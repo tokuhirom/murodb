@@ -1,6 +1,5 @@
 /// SQL parser: converts token stream into AST.
 /// Hand-written recursive descent parser.
-
 use crate::sql::ast::*;
 use crate::sql::lexer::Token;
 use crate::types::DataType;
@@ -53,6 +52,18 @@ impl Parser {
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
             Some(Token::Show) => self.parse_show()?,
+            Some(Token::Begin) => {
+                self.advance();
+                Statement::Begin
+            }
+            Some(Token::Commit) => {
+                self.advance();
+                Statement::Commit
+            }
+            Some(Token::Rollback) => {
+                self.advance();
+                Statement::Rollback
+            }
             Some(t) => return Err(format!("Unexpected token: {:?}", t)),
             None => return Err("Empty input".into()),
         };
@@ -85,7 +96,9 @@ impl Parser {
             Some(Token::Fulltext) => {
                 self.advance();
                 self.expect(&Token::Index)?;
-                Ok(Statement::CreateFulltextIndex(self.parse_create_fulltext_index()?))
+                Ok(Statement::CreateFulltextIndex(
+                    self.parse_create_fulltext_index()?,
+                ))
             }
             _ => Err("Expected TABLE, INDEX, UNIQUE INDEX, or FULLTEXT INDEX after CREATE".into()),
         }
@@ -101,13 +114,21 @@ impl Parser {
             columns.push(col);
 
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
-                Some(Token::RParen) => { self.advance(); break; }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
+                Some(Token::RParen) => {
+                    self.advance();
+                    break;
+                }
                 _ => return Err("Expected ',' or ')' in column list".into()),
             }
         }
 
-        Ok(CreateTable { table_name, columns })
+        Ok(CreateTable {
+            table_name,
+            columns,
+        })
     }
 
     fn parse_column_spec(&mut self) -> Result<ColumnSpec, String> {
@@ -254,8 +275,13 @@ impl Parser {
             loop {
                 cols.push(self.expect_ident()?);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
-                    Some(Token::RParen) => { self.advance(); break; }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    Some(Token::RParen) => {
+                        self.advance();
+                        break;
+                    }
                     _ => return Err("Expected ',' or ')' in column list".into()),
                 }
             }
@@ -273,8 +299,13 @@ impl Parser {
             loop {
                 row.push(self.parse_expr()?);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
-                    Some(Token::RParen) => { self.advance(); break; }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    Some(Token::RParen) => {
+                        self.advance();
+                        break;
+                    }
                     _ => return Err("Expected ',' or ')' in values list".into()),
                 }
             }
@@ -301,6 +332,77 @@ impl Parser {
 
         self.expect(&Token::From)?;
         let table_name = self.expect_ident()?;
+
+        // Optional table alias
+        let table_alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        // Parse JOIN clauses
+        let mut joins = Vec::new();
+        loop {
+            let join_type = match self.peek() {
+                Some(Token::Join) => {
+                    self.advance();
+                    Some(JoinType::Inner)
+                }
+                Some(Token::Inner) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Inner)
+                }
+                Some(Token::Left) => {
+                    self.advance();
+                    // optional OUTER keyword (not a token, but could be an ident)
+                    if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                    {
+                        self.advance();
+                    }
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Left)
+                }
+                Some(Token::Cross) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Cross)
+                }
+                _ => None,
+            };
+
+            match join_type {
+                Some(jt) => {
+                    let jt_table = self.expect_ident()?;
+                    let jt_alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_ident()?)
+                    } else if matches!(self.peek(), Some(Token::Ident(_)))
+                        && !self.is_keyword_ahead()
+                    {
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+                    let on_condition = if jt == JoinType::Cross {
+                        None
+                    } else {
+                        self.expect(&Token::On)?;
+                        Some(self.parse_expr()?)
+                    };
+                    joins.push(JoinClause {
+                        join_type: jt,
+                        table_name: jt_table,
+                        alias: jt_alias,
+                        on_condition,
+                    });
+                }
+                None => break,
+            }
+        }
 
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
@@ -349,10 +451,31 @@ impl Parser {
         Ok(Select {
             columns,
             table_name,
+            table_alias,
+            joins,
             where_clause,
             order_by,
             limit,
         })
+    }
+
+    /// Check if the next token is a SQL keyword (not a table alias).
+    fn is_keyword_ahead(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(
+                Token::Where
+                    | Token::Order
+                    | Token::Limit
+                    | Token::Join
+                    | Token::Inner
+                    | Token::Left
+                    | Token::Right
+                    | Token::Cross
+                    | Token::On
+                    | Token::Semicolon
+            )
+        )
     }
 
     fn parse_select_columns(&mut self) -> Result<Vec<SelectColumn>, String> {
@@ -517,7 +640,21 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                Ok(Expr::ColumnRef(name))
+                // Check for table.column qualified name
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance(); // consume '.'
+                                    // After dot: could be Ident or Star
+                    if self.peek() == Some(&Token::Star) {
+                        self.advance();
+                        // table.* — encode as special ColumnRef
+                        Ok(Expr::ColumnRef(format!("{}.*", name)))
+                    } else {
+                        let col = self.expect_ident()?;
+                        Ok(Expr::ColumnRef(format!("{}.{}", name, col)))
+                    }
+                } else {
+                    Ok(Expr::ColumnRef(name))
+                }
             }
             Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
             None => Err("Unexpected end of input in expression".into()),
@@ -621,7 +758,9 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let stmt = parse_sql("CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, data VARBINARY)").unwrap();
+        let stmt =
+            parse_sql("CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, data VARBINARY)")
+                .unwrap();
         if let Statement::CreateTable(ct) = stmt {
             assert_eq!(ct.table_name, "users");
             assert_eq!(ct.columns.len(), 3);
@@ -637,7 +776,10 @@ mod tests {
         let stmt = parse_sql("INSERT INTO t (id, name) VALUES (1, 'hello')").unwrap();
         if let Statement::Insert(ins) = stmt {
             assert_eq!(ins.table_name, "t");
-            assert_eq!(ins.columns, Some(vec!["id".to_string(), "name".to_string()]));
+            assert_eq!(
+                ins.columns,
+                Some(vec!["id".to_string(), "name".to_string()])
+            );
             assert_eq!(ins.values.len(), 1);
             assert_eq!(ins.values[0].len(), 2);
         } else {
@@ -709,7 +851,8 @@ mod tests {
     fn test_parse_match_against() {
         let stmt = parse_sql(
             "SELECT * FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
-        ).unwrap();
+        )
+        .unwrap();
         if let Statement::Select(sel) = stmt {
             assert!(sel.where_clause.is_some());
         } else {

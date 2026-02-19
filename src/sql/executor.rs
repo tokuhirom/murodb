@@ -1,5 +1,4 @@
 /// SQL executor: executes statements against the B-tree storage.
-
 use crate::btree::key_encoding::encode_i64;
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
@@ -10,7 +9,7 @@ use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{plan_select, Plan};
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 use crate::types::{DataType, Value};
 
 /// A result row.
@@ -36,16 +35,16 @@ pub enum ExecResult {
 /// Execute a SQL string.
 pub fn execute(
     sql: &str,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
     execute_statement(&stmt, pager, catalog)
 }
 
-fn execute_statement(
+pub fn execute_statement(
     stmt: &Statement,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     match stmt {
@@ -60,12 +59,15 @@ fn execute_statement(
         Statement::Update(upd) => exec_update(upd, pager, catalog),
         Statement::Delete(del) => exec_delete(del, pager, catalog),
         Statement::ShowTables => exec_show_tables(pager, catalog),
+        Statement::Begin | Statement::Commit | Statement::Rollback => Err(MuroError::Execution(
+            "BEGIN/COMMIT/ROLLBACK must be handled by Session".into(),
+        )),
     }
 }
 
 fn exec_create_table(
     ct: &CreateTable,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let columns: Vec<ColumnDef> = ct
@@ -109,7 +111,7 @@ fn exec_create_table(
 
 fn exec_create_index(
     ci: &CreateIndex,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let table_def = catalog
@@ -189,10 +191,10 @@ fn exec_create_index(
 
 fn exec_insert(
     ins: &Insert,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let table_def = catalog
+    let mut table_def = catalog
         .get_table(pager, &ins.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", ins.table_name)))?;
 
@@ -202,12 +204,17 @@ fn exec_insert(
     let mut rows_inserted = 0u64;
 
     for value_row in &ins.values {
-        let values = resolve_insert_values(&table_def, &ins.columns, value_row)?;
+        let mut values = resolve_insert_values(&table_def, &ins.columns, value_row)?;
 
-        // Get PK value
-        let pk_idx = table_def.pk_column_index().ok_or_else(|| {
-            MuroError::Execution("Table has no primary key".into())
-        })?;
+        // Auto-generate _rowid for hidden PK columns
+        let pk_idx = table_def
+            .pk_column_index()
+            .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
+        if table_def.columns[pk_idx].is_hidden && values[pk_idx].is_null() {
+            table_def.next_rowid += 1;
+            values[pk_idx] = Value::Int64(table_def.next_rowid);
+        }
+
         let pk_value = &values[pk_idx];
         let pk_key = encode_value(pk_value);
 
@@ -256,12 +263,9 @@ fn exec_insert(
             }
         }
 
-        // Update data_btree_root if it changed (due to splits)
-        if data_btree.root_page_id() != table_def.data_btree_root {
-            let mut updated_table = table_def.clone();
-            updated_table.data_btree_root = data_btree.root_page_id();
-            catalog.update_table(pager, &updated_table)?;
-        }
+        // Update table_def if btree root changed or next_rowid changed
+        table_def.data_btree_root = data_btree.root_page_id();
+        catalog.update_table(pager, &table_def)?;
 
         rows_inserted += 1;
     }
@@ -271,12 +275,17 @@ fn exec_insert(
 
 fn exec_select(
     sel: &Select,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let table_def = catalog
         .get_table(pager, &sel.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", sel.table_name)))?;
+
+    // If there are JOINs, use the join execution path
+    if !sel.joins.is_empty() {
+        return exec_select_join(sel, &table_def, pager, catalog);
+    }
 
     let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
     let index_columns: Vec<(String, String)> = indexes
@@ -307,7 +316,11 @@ fn exec_select(
                 }
             }
         }
-        Plan::IndexSeek { index_name, key_expr, .. } => {
+        Plan::IndexSeek {
+            index_name,
+            key_expr,
+            ..
+        } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
             let idx_key = encode_value(&key_val);
             let idx = indexes.iter().find(|i| i.name == index_name).unwrap();
@@ -351,19 +364,7 @@ fn exec_select(
 
     // ORDER BY
     if let Some(order_items) = &sel.order_by {
-        rows.sort_by(|a, b| {
-            for item in order_items {
-                if let Expr::ColumnRef(col) = &item.expr {
-                    let va = a.get(col);
-                    let vb = b.get(col);
-                    let ord = cmp_values(va, vb);
-                    if ord != std::cmp::Ordering::Equal {
-                        return if item.descending { ord.reverse() } else { ord };
-                    }
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
+        sort_rows(&mut rows, order_items);
     }
 
     // LIMIT
@@ -374,9 +375,303 @@ fn exec_select(
     Ok(ExecResult::Rows(rows))
 }
 
+/// Scan all rows of a table into qualified name format: Vec<Vec<(String, Value)>>
+/// where each (String, Value) has name = "tablename.column"
+fn scan_table_qualified(
+    table_name: &str,
+    alias: Option<&str>,
+    table_def: &TableDef,
+    pager: &mut impl PageStore,
+) -> Result<Vec<Vec<(String, Value)>>> {
+    let qualifier = alias.unwrap_or(table_name);
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut result = Vec::new();
+    data_btree.scan(pager, |_k, v| {
+        let values = deserialize_row(v, &table_def.columns)?;
+        let mut row: Vec<(String, Value)> = Vec::with_capacity(table_def.columns.len());
+        for (i, col) in table_def.columns.iter().enumerate() {
+            let val = values.get(i).cloned().unwrap_or(Value::Null);
+            row.push((format!("{}.{}", qualifier, col.name), val));
+        }
+        result.push(row);
+        Ok(true)
+    })?;
+    Ok(result)
+}
+
+/// Make a null row for LEFT JOIN when there's no match on the right side.
+fn null_row_qualified(qualifier: &str, table_def: &TableDef) -> Vec<(String, Value)> {
+    table_def
+        .columns
+        .iter()
+        .map(|col| (format!("{}.{}", qualifier, col.name), Value::Null))
+        .collect()
+}
+
+/// Resolve a column name against a joined row.
+/// Supports "table.column" qualified names and unqualified "column" names.
+fn resolve_join_column<'a>(
+    name: &str,
+    row: &'a [(String, Value)],
+) -> std::result::Result<Option<&'a Value>, String> {
+    // If already qualified (contains a dot, but not ".*")
+    if name.contains('.') && !name.ends_with(".*") {
+        for (k, v) in row {
+            if k == name {
+                return Ok(Some(v));
+            }
+        }
+        return Ok(None);
+    }
+
+    // Unqualified: search all columns, check for ambiguity
+    let mut found: Option<&Value> = None;
+    let mut found_count = 0;
+    for (k, v) in row {
+        let col_part = k.rsplit('.').next().unwrap_or(k);
+        if col_part == name {
+            found = Some(v);
+            found_count += 1;
+        }
+    }
+    if found_count > 1 {
+        return Err(format!("Ambiguous column name: {}", name));
+    }
+    Ok(found)
+}
+
+/// Evaluate a WHERE/ON expression against a joined row (Vec of qualified (name, value) pairs).
+fn eval_join_expr(expr: &Expr, row: &[(String, Value)]) -> Result<Value> {
+    eval_expr(expr, &|name| {
+        resolve_join_column(name, row).ok().flatten().cloned()
+    })
+}
+
+fn exec_select_join(
+    sel: &Select,
+    base_table_def: &TableDef,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    // Collect hidden qualified column names for Star expansion filtering
+    let base_qualifier = sel.table_alias.as_deref().unwrap_or(&sel.table_name);
+    let mut hidden_columns: Vec<String> = base_table_def
+        .columns
+        .iter()
+        .filter(|c| c.is_hidden)
+        .map(|c| format!("{}.{}", base_qualifier, c.name))
+        .collect();
+
+    // 1. Scan the base (FROM) table
+    let mut joined_rows = scan_table_qualified(
+        &sel.table_name,
+        sel.table_alias.as_deref(),
+        base_table_def,
+        pager,
+    )?;
+
+    // 2. For each JOIN, perform nested loop join
+    for join in &sel.joins {
+        let right_table_def = catalog
+            .get_table(pager, &join.table_name)?
+            .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", join.table_name)))?;
+
+        let right_qualifier = join.alias.as_deref().unwrap_or(&join.table_name);
+        hidden_columns.extend(
+            right_table_def
+                .columns
+                .iter()
+                .filter(|c| c.is_hidden)
+                .map(|c| format!("{}.{}", right_qualifier, c.name)),
+        );
+        let right_rows = scan_table_qualified(
+            &join.table_name,
+            join.alias.as_deref(),
+            &right_table_def,
+            pager,
+        )?;
+
+        let mut new_rows: Vec<Vec<(String, Value)>> = Vec::new();
+
+        match join.join_type {
+            JoinType::Inner => {
+                for left in &joined_rows {
+                    for right in &right_rows {
+                        let mut combined: Vec<(String, Value)> =
+                            Vec::with_capacity(left.len() + right.len());
+                        combined.extend(left.iter().cloned());
+                        combined.extend(right.iter().cloned());
+
+                        if let Some(on_expr) = &join.on_condition {
+                            let val = eval_join_expr(on_expr, &combined)?;
+                            if is_truthy(&val) {
+                                new_rows.push(combined);
+                            }
+                        } else {
+                            new_rows.push(combined);
+                        }
+                    }
+                }
+            }
+            JoinType::Left => {
+                for left in &joined_rows {
+                    let mut matched = false;
+                    for right in &right_rows {
+                        let mut combined: Vec<(String, Value)> =
+                            Vec::with_capacity(left.len() + right.len());
+                        combined.extend(left.iter().cloned());
+                        combined.extend(right.iter().cloned());
+
+                        if let Some(on_expr) = &join.on_condition {
+                            let val = eval_join_expr(on_expr, &combined)?;
+                            if is_truthy(&val) {
+                                new_rows.push(combined);
+                                matched = true;
+                            }
+                        } else {
+                            new_rows.push(combined);
+                            matched = true;
+                        }
+                    }
+                    if !matched {
+                        let mut combined: Vec<(String, Value)> = left.clone();
+                        combined.extend(null_row_qualified(right_qualifier, &right_table_def));
+                        new_rows.push(combined);
+                    }
+                }
+            }
+            JoinType::Cross => {
+                for left in &joined_rows {
+                    for right in &right_rows {
+                        let mut combined: Vec<(String, Value)> =
+                            Vec::with_capacity(left.len() + right.len());
+                        combined.extend(left.iter().cloned());
+                        combined.extend(right.iter().cloned());
+                        new_rows.push(combined);
+                    }
+                }
+            }
+        }
+
+        joined_rows = new_rows;
+    }
+
+    // 3. Apply WHERE filter
+    if let Some(where_expr) = &sel.where_clause {
+        joined_rows.retain(|row| {
+            let val = eval_join_expr(where_expr, row).unwrap_or(Value::Null);
+            is_truthy(&val)
+        });
+    }
+
+    // 4. ORDER BY (before projection, so all columns are accessible)
+    if let Some(order_items) = &sel.order_by {
+        joined_rows.sort_by(|a, b| {
+            for item in order_items {
+                if let Expr::ColumnRef(col) = &item.expr {
+                    let va = resolve_join_column(col, a).ok().flatten();
+                    let vb = resolve_join_column(col, b).ok().flatten();
+                    let ord = cmp_values(va, vb);
+                    if ord != std::cmp::Ordering::Equal {
+                        return if item.descending { ord.reverse() } else { ord };
+                    }
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    // 5. LIMIT (before projection for efficiency)
+    if let Some(limit) = sel.limit {
+        joined_rows.truncate(limit as usize);
+    }
+
+    // 6. Project SELECT columns
+    let mut rows: Vec<Row> = Vec::new();
+    for jrow in &joined_rows {
+        let row = build_join_row(jrow, &sel.columns, &hidden_columns)?;
+        rows.push(row);
+    }
+
+    Ok(ExecResult::Rows(rows))
+}
+
+fn build_join_row(
+    jrow: &[(String, Value)],
+    select_columns: &[SelectColumn],
+    hidden_columns: &[String],
+) -> Result<Row> {
+    let mut row_values = Vec::new();
+
+    for sel_col in select_columns {
+        match sel_col {
+            SelectColumn::Star => {
+                // Output all columns, using just the column part as the name, skip hidden
+                for (qualified_name, val) in jrow {
+                    if hidden_columns.contains(qualified_name) {
+                        continue;
+                    }
+                    let col_name = qualified_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(qualified_name)
+                        .to_string();
+                    row_values.push((col_name, val.clone()));
+                }
+            }
+            SelectColumn::Expr(expr, alias) => {
+                // Check for table.* pattern
+                if let Expr::ColumnRef(ref_name) = expr {
+                    if ref_name.ends_with(".*") {
+                        let prefix = &ref_name[..ref_name.len() - 2]; // "table"
+                        for (qualified_name, val) in jrow {
+                            if qualified_name.starts_with(prefix)
+                                && qualified_name.as_bytes().get(prefix.len()) == Some(&b'.')
+                            {
+                                let col_name = qualified_name
+                                    .rsplit('.')
+                                    .next()
+                                    .unwrap_or(qualified_name)
+                                    .to_string();
+                                row_values.push((col_name, val.clone()));
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                let val = eval_join_expr(expr, jrow)?;
+                let name = alias.clone().unwrap_or_else(|| match expr {
+                    Expr::ColumnRef(n) => n.clone(),
+                    _ => "?column?".to_string(),
+                });
+                row_values.push((name, val));
+            }
+        }
+    }
+
+    Ok(Row { values: row_values })
+}
+
+fn sort_rows(rows: &mut [Row], order_items: &[OrderByItem]) {
+    rows.sort_by(|a, b| {
+        for item in order_items {
+            if let Expr::ColumnRef(col) = &item.expr {
+                let va = a.get(col);
+                let vb = b.get(col);
+                let ord = cmp_values(va, vb);
+                if ord != std::cmp::Ordering::Equal {
+                    return if item.descending { ord.reverse() } else { ord };
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
 fn exec_update(
     upd: &Update,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let table_def = catalog
@@ -401,11 +696,13 @@ fn exec_update(
     for (pk_key, mut values) in to_update {
         // Apply assignments
         for (col_name, expr) in &upd.assignments {
-            let col_idx = table_def.column_index(col_name).ok_or_else(|| {
-                MuroError::Execution(format!("Unknown column: {}", col_name))
-            })?;
+            let col_idx = table_def
+                .column_index(col_name)
+                .ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", col_name)))?;
             let new_val = eval_expr(expr, &|name| {
-                table_def.column_index(name).and_then(|i| values.get(i).cloned())
+                table_def
+                    .column_index(name)
+                    .and_then(|i| values.get(i).cloned())
             })?;
             values[col_idx] = new_val;
         }
@@ -420,7 +717,7 @@ fn exec_update(
 
 fn exec_delete(
     del: &Delete,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     let table_def = catalog
@@ -450,10 +747,7 @@ fn exec_delete(
     Ok(ExecResult::RowsAffected(count))
 }
 
-fn exec_show_tables(
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_show_tables(pager: &mut impl PageStore, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let tables = catalog.list_tables(pager)?;
     let rows = tables
         .into_iter()
@@ -472,7 +766,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Null bitmap (1 bit per column, packed into bytes)
-    let bitmap_bytes = (columns.len() + 7) / 8;
+    let bitmap_bytes = columns.len().div_ceil(8);
     let mut bitmap = vec![0u8; bitmap_bytes];
     for (i, val) in values.iter().enumerate() {
         if val.is_null() {
@@ -482,7 +776,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     buf.extend_from_slice(&bitmap);
 
     // Values
-    for (_i, val) in values.iter().enumerate() {
+    for val in values.iter() {
         if val.is_null() {
             continue;
         }
@@ -505,7 +799,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
 }
 
 pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>> {
-    let bitmap_bytes = (columns.len() + 7) / 8;
+    let bitmap_bytes = columns.len().div_ceil(8);
     if data.len() < bitmap_bytes {
         return Err(MuroError::InvalidPage);
     }
@@ -534,8 +828,7 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
-                let len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
                 if offset + len > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -549,8 +842,7 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
-                let len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
                 if offset + len > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -589,20 +881,28 @@ fn resolve_insert_values(
                 ));
             }
             for (col_name, expr) in cols.iter().zip(exprs.iter()) {
-                let idx = table_def.column_index(col_name).ok_or_else(|| {
-                    MuroError::Execution(format!("Unknown column: {}", col_name))
-                })?;
+                let idx = table_def
+                    .column_index(col_name)
+                    .ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", col_name)))?;
                 values[idx] = eval_expr(expr, &|_| None)?;
             }
         }
         None => {
-            if exprs.len() != table_def.columns.len() {
+            // When no columns are specified, hidden columns are excluded from the count
+            let visible_indices: Vec<usize> = table_def
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.is_hidden)
+                .map(|(i, _)| i)
+                .collect();
+            if exprs.len() != visible_indices.len() {
                 return Err(MuroError::Execution(
                     "Value count doesn't match column count".into(),
                 ));
             }
-            for (i, expr) in exprs.iter().enumerate() {
-                values[i] = eval_expr(expr, &|_| None)?;
+            for (expr_idx, &col_idx) in visible_indices.iter().enumerate() {
+                values[col_idx] = eval_expr(&exprs[expr_idx], &|_| None)?;
             }
         }
     }
@@ -639,19 +939,22 @@ fn build_row(
         match sel_col {
             SelectColumn::Star => {
                 for (i, col) in table_def.columns.iter().enumerate() {
+                    if col.is_hidden {
+                        continue;
+                    }
                     let val = values.get(i).cloned().unwrap_or(Value::Null);
                     row_values.push((col.name.clone(), val));
                 }
             }
             SelectColumn::Expr(expr, alias) => {
                 let val = eval_expr(expr, &|name| {
-                    table_def.column_index(name).and_then(|i| values.get(i).cloned())
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| values.get(i).cloned())
                 })?;
-                let name = alias.clone().unwrap_or_else(|| {
-                    match expr {
-                        Expr::ColumnRef(n) => n.clone(),
-                        _ => "?column?".to_string(),
-                    }
+                let name = alias.clone().unwrap_or_else(|| match expr {
+                    Expr::ColumnRef(n) => n.clone(),
+                    _ => "?column?".to_string(),
                 });
                 row_values.push((name, val));
             }
@@ -675,6 +978,7 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
 mod tests {
     use super::*;
     use crate::crypto::aead::MasterKey;
+    use crate::storage::pager::Pager;
     use tempfile::TempDir;
 
     fn test_key() -> MasterKey {
@@ -693,10 +997,25 @@ mod tests {
     fn test_create_table_and_insert() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
-        execute("INSERT INTO t (id, name) VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t (id, name) VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t (id, name) VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t (id, name) VALUES (2, 'Bob')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         let result = execute("SELECT * FROM t", &mut pager, &mut catalog).unwrap();
         if let ExecResult::Rows(rows) = result {
@@ -712,10 +1031,25 @@ mod tests {
     fn test_select_where() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (3, 'Charlie')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'Charlie')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         let result = execute("SELECT * FROM t WHERE id = 2", &mut pager, &mut catalog).unwrap();
         if let ExecResult::Rows(rows) = result {
@@ -730,10 +1064,25 @@ mod tests {
     fn test_update() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
-        let result = execute("UPDATE t SET name = 'Alicia' WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        let result = execute(
+            "UPDATE t SET name = 'Alicia' WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         if let ExecResult::RowsAffected(n) = result {
             assert_eq!(n, 1);
         }
@@ -748,8 +1097,18 @@ mod tests {
     fn test_delete() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
 
         execute("DELETE FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
@@ -765,12 +1124,32 @@ mod tests {
     fn test_order_by_and_limit() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (3, 'Charlie')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'Charlie')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
 
-        let result = execute("SELECT * FROM t ORDER BY id DESC LIMIT 2", &mut pager, &mut catalog).unwrap();
+        let result = execute(
+            "SELECT * FROM t ORDER BY id DESC LIMIT 2",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].get("id"), Some(&Value::Int64(3)));
@@ -782,26 +1161,54 @@ mod tests {
     fn test_unique_constraint() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, email VARCHAR UNIQUE)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'a@b.com')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, email VARCHAR UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'a@b.com')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         // Duplicate PK
-        let result = execute("INSERT INTO t VALUES (1, 'x@y.com')", &mut pager, &mut catalog);
+        let result = execute(
+            "INSERT INTO t VALUES (1, 'x@y.com')",
+            &mut pager,
+            &mut catalog,
+        );
         assert!(result.is_err());
 
         // Duplicate UNIQUE
-        let result = execute("INSERT INTO t VALUES (2, 'a@b.com')", &mut pager, &mut catalog);
+        let result = execute(
+            "INSERT INTO t VALUES (2, 'a@b.com')",
+            &mut pager,
+            &mut catalog,
+        );
         assert!(result.is_err());
 
         // Different value should work
-        execute("INSERT INTO t VALUES (2, 'c@d.com')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, 'c@d.com')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
     }
 
     #[test]
     fn test_null_values() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
 
         let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
@@ -814,7 +1221,12 @@ mod tests {
     fn test_many_inserts() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         for i in 0..100 {
             let sql = format!("INSERT INTO t VALUES ({}, 'name_{}')", i, i);

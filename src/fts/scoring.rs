@@ -1,7 +1,6 @@
 /// BM25 scoring for FTS.
 ///
 /// BM25(D, Q) = Σ IDF(qi) · (f(qi, D) · (k1 + 1)) / (f(qi, D) + k1 · (1 - b + b · |D| / avgdl))
-
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
 

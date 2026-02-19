@@ -65,11 +65,7 @@ impl Transaction {
     }
 
     /// Commit: write dirty pages to WAL, then flush to pager.
-    pub fn commit(
-        &mut self,
-        pager: &mut Pager,
-        wal: &mut WalWriter,
-    ) -> Result<Lsn> {
+    pub fn commit(&mut self, pager: &mut Pager, wal: &mut WalWriter) -> Result<Lsn> {
         if self.state != TxState::Active {
             return Err(MuroError::Transaction(
                 "Cannot commit non-active transaction".into(),
@@ -99,7 +95,7 @@ impl Transaction {
         wal.sync()?;
 
         // Now flush dirty pages to the data file
-        for (_page_id, page) in &self.dirty_pages {
+        for page in self.dirty_pages.values() {
             pager.write_page(page)?;
         }
         pager.flush_meta()?;
@@ -127,6 +123,35 @@ impl Transaction {
     /// Number of dirty pages.
     pub fn dirty_page_count(&self) -> usize {
         self.dirty_pages.len()
+    }
+
+    /// Iterator over dirty pages (for WAL-less commit).
+    pub fn dirty_pages(&self) -> impl Iterator<Item = &Page> {
+        self.dirty_pages.values()
+    }
+
+    /// Commit without WAL: flush dirty pages directly to pager.
+    pub fn commit_no_wal(&mut self, pager: &mut Pager) -> Result<()> {
+        if self.state != TxState::Active {
+            return Err(MuroError::Transaction(
+                "Cannot commit non-active transaction".into(),
+            ));
+        }
+
+        for page in self.dirty_pages.values() {
+            pager.write_page(page)?;
+        }
+        pager.flush_meta()?;
+
+        self.state = TxState::Committed;
+        self.dirty_pages.clear();
+        Ok(())
+    }
+
+    /// Rollback without WAL: just discard dirty pages.
+    pub fn rollback_no_wal(&mut self) {
+        self.dirty_pages.clear();
+        self.state = TxState::Aborted;
     }
 }
 

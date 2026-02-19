@@ -19,19 +19,25 @@ fn test_wal_write_and_read() {
     {
         let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
         writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
-        writer.append(&WalRecord::PagePut {
-            txid: 1,
-            page_id: 5,
-            data: vec![0xAA; 100],
-        }).unwrap();
-        writer.append(&WalRecord::Commit { txid: 1, lsn: 2 }).unwrap();
+        writer
+            .append(&WalRecord::PagePut {
+                txid: 1,
+                page_id: 5,
+                data: vec![0xAA; 100],
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+            .unwrap();
 
         writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
-        writer.append(&WalRecord::PagePut {
-            txid: 2,
-            page_id: 6,
-            data: vec![0xBB; 50],
-        }).unwrap();
+        writer
+            .append(&WalRecord::PagePut {
+                txid: 2,
+                page_id: 6,
+                data: vec![0xBB; 50],
+            })
+            .unwrap();
         writer.append(&WalRecord::Abort { txid: 2 }).unwrap();
         writer.sync().unwrap();
     }
@@ -62,22 +68,28 @@ fn test_recovery_replays_committed_only() {
         writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
         let mut page1 = Page::new(1);
         page1.insert_cell(b"committed data").unwrap();
-        writer.append(&WalRecord::PagePut {
-            txid: 1,
-            page_id: 1,
-            data: page1.data.to_vec(),
-        }).unwrap();
-        writer.append(&WalRecord::Commit { txid: 1, lsn: 2 }).unwrap();
+        writer
+            .append(&WalRecord::PagePut {
+                txid: 1,
+                page_id: 1,
+                data: page1.data.to_vec(),
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+            .unwrap();
 
         // TX 2: uncommitted (simulating crash)
         writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
         let mut page2 = Page::new(2);
         page2.insert_cell(b"uncommitted data").unwrap();
-        writer.append(&WalRecord::PagePut {
-            txid: 2,
-            page_id: 2,
-            data: page2.data.to_vec(),
-        }).unwrap();
+        writer
+            .append(&WalRecord::PagePut {
+                txid: 2,
+                page_id: 2,
+                data: page2.data.to_vec(),
+            })
+            .unwrap();
         // No commit for TX 2
 
         writer.sync().unwrap();

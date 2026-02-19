@@ -7,17 +7,17 @@
 //! - WAL-based crash recovery
 //! - Multiple readers / single writer concurrency
 
-pub mod error;
-pub mod types;
-pub mod storage;
-pub mod crypto;
-pub mod wal;
 pub mod btree;
-pub mod schema;
-pub mod tx;
-pub mod sql;
-pub mod fts;
 pub mod concurrency;
+pub mod crypto;
+pub mod error;
+pub mod fts;
+pub mod schema;
+pub mod sql;
+pub mod storage;
+pub mod tx;
+pub mod types;
+pub mod wal;
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +27,7 @@ use crate::crypto::kdf;
 use crate::error::Result;
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
+use crate::sql::session::Session;
 use crate::storage::pager::Pager;
 
 /// Main database handle.
@@ -119,5 +120,13 @@ impl Database {
     pub fn flush(&mut self) -> Result<()> {
         self.pager.set_catalog_root(self.catalog.root_page_id());
         self.pager.flush_meta()
+    }
+
+    /// Create a `Session` that supports BEGIN/COMMIT/ROLLBACK.
+    ///
+    /// This consumes the Database and returns a Session. The Session owns the
+    /// pager and catalog, and manages explicit transaction state.
+    pub fn into_session(self) -> Session {
+        Session::new(self.pager, self.catalog)
     }
 }

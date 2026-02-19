@@ -10,11 +10,7 @@ use crate::wal::record::{TxId, WalRecord};
 
 /// Recover the database from WAL.
 /// Replays committed transactions, discards uncommitted ones.
-pub fn recover(
-    db_path: &Path,
-    wal_path: &Path,
-    master_key: &MasterKey,
-) -> Result<RecoveryResult> {
+pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Result<RecoveryResult> {
     if !wal_path.exists() {
         return Ok(RecoveryResult {
             committed_txids: Vec::new(),
@@ -40,8 +36,12 @@ pub fn recover(
 
     for (_, record) in &records {
         match record {
-            WalRecord::Commit { txid, .. } => { committed.insert(*txid); }
-            WalRecord::Abort { txid } => { aborted.insert(*txid); }
+            WalRecord::Commit { txid, .. } => {
+                committed.insert(*txid);
+            }
+            WalRecord::Abort { txid } => {
+                aborted.insert(*txid);
+            }
             _ => {}
         }
     }
@@ -50,7 +50,12 @@ pub fn recover(
     let mut page_updates: HashMap<PageId, Vec<u8>> = HashMap::new();
 
     for (_, record) in &records {
-        if let WalRecord::PagePut { txid, page_id, data } = record {
+        if let WalRecord::PagePut {
+            txid,
+            page_id,
+            data,
+        } = record
+        {
             if committed.contains(txid) {
                 page_updates.insert(*page_id, data.clone());
             }
@@ -61,7 +66,7 @@ pub fn recover(
     let mut pager = Pager::open(db_path, master_key)?;
     let mut pages_replayed = 0;
 
-    for (_page_id, data) in &page_updates {
+    for data in page_updates.values() {
         if data.len() == PAGE_SIZE {
             let mut page_data = [0u8; PAGE_SIZE];
             page_data.copy_from_slice(data);
@@ -116,12 +121,16 @@ mod tests {
             // Write a full page of data
             let mut page = Page::new(1);
             page.insert_cell(b"recovered data").unwrap();
-            writer.append(&WalRecord::PagePut {
-                txid: 1,
-                page_id: 1,
-                data: page.data.to_vec(),
-            }).unwrap();
-            writer.append(&WalRecord::Commit { txid: 1, lsn: 2 }).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 1,
+                    data: page.data.to_vec(),
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+                .unwrap();
             writer.sync().unwrap();
         }
 
@@ -146,11 +155,13 @@ mod tests {
             let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
             writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
             let page = Page::new(1);
-            writer.append(&WalRecord::PagePut {
-                txid: 1,
-                page_id: 1,
-                data: page.data.to_vec(),
-            }).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 1,
+                    data: page.data.to_vec(),
+                })
+                .unwrap();
             // No commit - simulating crash
             writer.sync().unwrap();
         }

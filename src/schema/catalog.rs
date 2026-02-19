@@ -5,13 +5,12 @@
 ///   "index:<name>" -> serialized IndexDef
 ///
 /// The catalog B-tree root is stored at a well-known page.
-
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::schema::column::ColumnDef;
 use crate::schema::index::IndexDef;
 use crate::storage::page::PageId;
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 
 /// Table definition.
 #[derive(Debug, Clone)]
@@ -20,6 +19,7 @@ pub struct TableDef {
     pub columns: Vec<ColumnDef>,
     pub pk_column: Option<String>,
     pub data_btree_root: PageId,
+    pub next_rowid: i64,
 }
 
 impl TableDef {
@@ -50,6 +50,8 @@ impl TableDef {
         }
         // data_btree_root
         buf.extend_from_slice(&self.data_btree_root.to_le_bytes());
+        // next_rowid
+        buf.extend_from_slice(&self.next_rowid.to_le_bytes());
         buf
     }
 
@@ -58,21 +60,27 @@ impl TableDef {
         let mut offset = 0;
 
         // name
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let name_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
         let name = String::from_utf8(data[offset..offset + name_len].to_vec()).ok()?;
         offset += name_len;
 
         // column count
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let col_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
 
         // columns
         let mut columns = Vec::with_capacity(col_count);
         for _ in 0..col_count {
-            if data.len() < offset + 2 { return None; }
+            if data.len() < offset + 2 {
+                return None;
+            }
             let col_bytes_len =
                 u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
@@ -82,11 +90,15 @@ impl TableDef {
         }
 
         // pk_column
-        if data.len() < offset + 1 { return None; }
+        if data.len() < offset + 1 {
+            return None;
+        }
         let has_pk = data[offset];
         offset += 1;
         let pk_column = if has_pk == 1 {
-            if data.len() < offset + 2 { return None; }
+            if data.len() < offset + 2 {
+                return None;
+            }
             let pk_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
             let pk = String::from_utf8(data[offset..offset + pk_len].to_vec()).ok()?;
@@ -97,14 +109,25 @@ impl TableDef {
         };
 
         // data_btree_root
-        if data.len() < offset + 8 { return None; }
+        if data.len() < offset + 8 {
+            return None;
+        }
         let data_btree_root = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        // next_rowid (optional for backward compat, defaults to 0)
+        let next_rowid = if data.len() >= offset + 8 {
+            i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+        } else {
+            0
+        };
 
         Some(TableDef {
             name,
             columns,
             pk_column,
             data_btree_root,
+            next_rowid,
         })
     }
 
@@ -126,7 +149,7 @@ pub struct SystemCatalog {
 
 impl SystemCatalog {
     /// Create a new system catalog with a fresh B-tree.
-    pub fn create(pager: &mut Pager) -> Result<Self> {
+    pub fn create(pager: &mut impl PageStore) -> Result<Self> {
         let catalog_btree = BTree::create(pager)?;
         Ok(SystemCatalog { catalog_btree })
     }
@@ -145,18 +168,36 @@ impl SystemCatalog {
     /// Create a table. Returns the table definition with the allocated B-tree root.
     pub fn create_table(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         name: &str,
         columns: Vec<ColumnDef>,
     ) -> Result<TableDef> {
         // Check if table already exists
         let key = format!("table:{}", name);
         if self.catalog_btree.search(pager, key.as_bytes())?.is_some() {
-            return Err(MuroError::Schema(format!("Table '{}' already exists", name)));
+            return Err(MuroError::Schema(format!(
+                "Table '{}' already exists",
+                name
+            )));
         }
 
-        // Find PK column
-        let pk_column = columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone());
+        // Find PK column; if none, inject a hidden _rowid column
+        let has_pk = columns.iter().any(|c| c.is_primary_key);
+        let (columns, pk_column) = if has_pk {
+            let pk_name = columns
+                .iter()
+                .find(|c| c.is_primary_key)
+                .map(|c| c.name.clone());
+            (columns, pk_name)
+        } else {
+            use crate::types::DataType;
+            let rowid_col = ColumnDef::new("_rowid", DataType::Int64)
+                .primary_key()
+                .hidden();
+            let mut cols = vec![rowid_col];
+            cols.extend(columns);
+            (cols, Some("_rowid".to_string()))
+        };
 
         // Allocate a B-tree for the table data
         let data_btree = BTree::create(pager)?;
@@ -167,17 +208,19 @@ impl SystemCatalog {
             columns,
             pk_column,
             data_btree_root,
+            next_rowid: 0,
         };
 
         // Store in catalog
         let serialized = table_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
 
         Ok(table_def)
     }
 
     /// Get a table definition by name.
-    pub fn get_table(&self, pager: &mut Pager, name: &str) -> Result<Option<TableDef>> {
+    pub fn get_table(&self, pager: &mut impl PageStore, name: &str) -> Result<Option<TableDef>> {
         let key = format!("table:{}", name);
         match self.catalog_btree.search(pager, key.as_bytes())? {
             Some(data) => Ok(TableDef::deserialize(&data)),
@@ -186,17 +229,18 @@ impl SystemCatalog {
     }
 
     /// Update a table definition.
-    pub fn update_table(&mut self, pager: &mut Pager, table_def: &TableDef) -> Result<()> {
+    pub fn update_table(&mut self, pager: &mut impl PageStore, table_def: &TableDef) -> Result<()> {
         let key = format!("table:{}", table_def.name);
         let serialized = table_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
         Ok(())
     }
 
     /// Create an index definition and store it in the catalog.
     pub fn create_index(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         index_def: IndexDef,
     ) -> Result<IndexDef> {
         let key = format!("index:{}", index_def.name);
@@ -207,12 +251,13 @@ impl SystemCatalog {
             )));
         }
         let serialized = index_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
         Ok(index_def)
     }
 
     /// Get an index definition by name.
-    pub fn get_index(&self, pager: &mut Pager, name: &str) -> Result<Option<IndexDef>> {
+    pub fn get_index(&self, pager: &mut impl PageStore, name: &str) -> Result<Option<IndexDef>> {
         let key = format!("index:{}", name);
         match self.catalog_btree.search(pager, key.as_bytes())? {
             Some(data) => Ok(IndexDef::deserialize(&data).map(|(idx, _)| idx)),
@@ -223,7 +268,7 @@ impl SystemCatalog {
     /// Get all indexes for a table.
     pub fn get_indexes_for_table(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         table_name: &str,
     ) -> Result<Vec<IndexDef>> {
         let mut indexes = Vec::new();
@@ -243,7 +288,7 @@ impl SystemCatalog {
     }
 
     /// List all table names.
-    pub fn list_tables(&self, pager: &mut Pager) -> Result<Vec<String>> {
+    pub fn list_tables(&self, pager: &mut impl PageStore) -> Result<Vec<String>> {
         let mut tables = Vec::new();
         self.catalog_btree.scan(pager, |k, _v| {
             if let Ok(key_str) = std::str::from_utf8(k) {
@@ -262,6 +307,7 @@ mod tests {
     use super::*;
     use crate::crypto::aead::MasterKey;
     use crate::schema::index::IndexType;
+    use crate::storage::pager::Pager;
     use crate::types::DataType;
     use tempfile::TempDir;
 
@@ -280,6 +326,7 @@ mod tests {
             ],
             pk_column: Some("id".to_string()),
             data_btree_root: 42,
+            next_rowid: 0,
         };
 
         let bytes = table.serialize();
@@ -321,7 +368,9 @@ mod tests {
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
         let columns = vec![ColumnDef::new("id", DataType::Int64).primary_key()];
-        catalog.create_table(&mut pager, "t", columns.clone()).unwrap();
+        catalog
+            .create_table(&mut pager, "t", columns.clone())
+            .unwrap();
         assert!(catalog.create_table(&mut pager, "t", columns).is_err());
     }
 

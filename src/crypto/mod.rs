@@ -1,3 +1,3 @@
 pub mod aead;
-pub mod kdf;
 pub mod hmac_util;
+pub mod kdf;

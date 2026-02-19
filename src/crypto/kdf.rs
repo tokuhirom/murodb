@@ -1,6 +1,6 @@
-use argon2::Argon2;
 use crate::crypto::aead::MasterKey;
 use crate::error::{MuroError, Result};
+use argon2::Argon2;
 
 /// Derive a 256-bit master key from a passphrase using Argon2id.
 pub fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<MasterKey> {

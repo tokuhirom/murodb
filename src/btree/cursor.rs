@@ -2,10 +2,9 @@
 ///
 /// The cursor collects entries from the current scan position.
 /// For MVP, this uses the scan method internally.
-
 use crate::btree::ops::BTree;
 use crate::error::Result;
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 
 pub struct BTreeCursor {
     entries: Vec<(Vec<u8>, Vec<u8>)>,
@@ -14,7 +13,7 @@ pub struct BTreeCursor {
 
 impl BTreeCursor {
     /// Create a cursor that iterates all entries.
-    pub fn new(btree: &BTree, pager: &mut Pager) -> Result<Self> {
+    pub fn new(btree: &BTree, pager: &mut impl PageStore) -> Result<Self> {
         let mut entries = Vec::new();
         btree.scan(pager, |k, v| {
             entries.push((k.to_vec(), v.to_vec()));
@@ -27,7 +26,7 @@ impl BTreeCursor {
     }
 
     /// Create a cursor starting from a given key.
-    pub fn from_key(btree: &BTree, pager: &mut Pager, start_key: &[u8]) -> Result<Self> {
+    pub fn from_key(btree: &BTree, pager: &mut impl PageStore, start_key: &[u8]) -> Result<Self> {
         let mut entries = Vec::new();
         btree.scan_from(pager, start_key, |k, v| {
             entries.push((k.to_vec(), v.to_vec()));
@@ -40,6 +39,7 @@ impl BTreeCursor {
     }
 
     /// Get the next entry.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(&[u8], &[u8])> {
         if self.position < self.entries.len() {
             let (ref k, ref v) = self.entries[self.position];
@@ -74,6 +74,7 @@ impl BTreeCursor {
 mod tests {
     use super::*;
     use crate::crypto::aead::MasterKey;
+    use crate::storage::pager::Pager;
     use tempfile::NamedTempFile;
 
     #[test]

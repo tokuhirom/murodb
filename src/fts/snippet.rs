@@ -1,6 +1,5 @@
 /// FTS snippet: extract text around match positions with highlighting.
 /// Option B: local scan approach (MVP).
-
 use unicode_normalization::UnicodeNormalization;
 
 /// Generate a snippet from text with highlighted matches.

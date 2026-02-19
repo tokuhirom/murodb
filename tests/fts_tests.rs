@@ -38,7 +38,9 @@ fn test_japanese_bigram_tokenization() {
     let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["東京", "京タ", "タワ", "ワー", "ーで", "で夜", "夜景", "景を", "を見", "見た"]
+        vec![
+            "東京", "京タ", "タワ", "ワー", "ーで", "で夜", "夜景", "景を", "を見", "見た"
+        ]
     );
 }
 
@@ -108,15 +110,23 @@ fn test_snippet_with_boolean_query() {
 
 #[test]
 fn test_fts_update_document() {
-    let (mut pager, mut idx, _dir) = setup_fts(&[
-        (1, "古い内容です"),
-    ]);
+    let (mut pager, mut idx, _dir) = setup_fts(&[(1, "古い内容です")]);
 
     // Remove old content and add new
-    idx.apply_pending(&mut pager, &[
-        FtsPendingOp::Remove { doc_id: 1, text: "古い内容です".to_string() },
-        FtsPendingOp::Add { doc_id: 1, text: "新しい内容です".to_string() },
-    ]).unwrap();
+    idx.apply_pending(
+        &mut pager,
+        &[
+            FtsPendingOp::Remove {
+                doc_id: 1,
+                text: "古い内容です".to_string(),
+            },
+            FtsPendingOp::Add {
+                doc_id: 1,
+                text: "新しい内容です".to_string(),
+            },
+        ],
+    )
+    .unwrap();
 
     // Old content should not match
     let pl = idx.get_postings(&mut pager, "古い").unwrap();

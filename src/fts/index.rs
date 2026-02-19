@@ -7,14 +7,13 @@
 /// Also stores statistics in the same B-tree:
 ///   key = b"__stats__"
 ///   value = FtsStats serialized
-
 use crate::btree::ops::BTree;
 use crate::crypto::hmac_util::hmac_term_id;
 use crate::error::Result;
 use crate::fts::postings::PostingList;
 use crate::fts::tokenizer::tokenize_bigram;
 use crate::storage::page::PageId;
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 
 /// FTS index handle.
 pub struct FtsIndex {
@@ -67,7 +66,7 @@ pub enum FtsPendingOp {
 
 impl FtsIndex {
     /// Create a new FTS index.
-    pub fn create(pager: &mut Pager, term_key: [u8; 32]) -> Result<Self> {
+    pub fn create(pager: &mut impl PageStore, term_key: [u8; 32]) -> Result<Self> {
         let btree = BTree::create(pager)?;
         let mut index = FtsIndex { btree, term_key };
 
@@ -96,7 +95,7 @@ impl FtsIndex {
     }
 
     /// Get the posting list for a term.
-    pub fn get_postings(&self, pager: &mut Pager, term: &str) -> Result<PostingList> {
+    pub fn get_postings(&self, pager: &mut impl PageStore, term: &str) -> Result<PostingList> {
         let tid = self.term_id(term);
         match self.btree.search(pager, &tid)? {
             Some(data) => Ok(PostingList::deserialize(&data).unwrap_or_default()),
@@ -105,7 +104,7 @@ impl FtsIndex {
     }
 
     /// Get FTS statistics.
-    pub fn get_stats(&self, pager: &mut Pager) -> Result<FtsStats> {
+    pub fn get_stats(&self, pager: &mut impl PageStore) -> Result<FtsStats> {
         match self.btree.search(pager, STATS_KEY)? {
             Some(data) => Ok(FtsStats::deserialize(&data).unwrap_or_default()),
             None => Ok(FtsStats::default()),
@@ -115,7 +114,7 @@ impl FtsIndex {
     /// Apply pending operations at commit time.
     pub fn apply_pending(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         ops: &[FtsPendingOp],
     ) -> Result<()> {
         let mut stats = self.get_stats(pager)?;
@@ -160,8 +159,7 @@ impl FtsIndex {
                         if seen_terms.insert(token.text.clone()) {
                             let tid = self.term_id(&token.text);
                             if let Some(data) = self.btree.search(pager, &tid)? {
-                                let mut pl =
-                                    PostingList::deserialize(&data).unwrap_or_default();
+                                let mut pl = PostingList::deserialize(&data).unwrap_or_default();
                                 pl.remove(*doc_id);
                                 if pl.df() == 0 {
                                     self.btree.delete(pager, &tid)?;
@@ -189,7 +187,7 @@ impl FtsIndex {
     /// Build index from scratch for all documents.
     pub fn build_from_docs(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         docs: &[(u64, String)], // (doc_id, text)
     ) -> Result<()> {
         let ops: Vec<FtsPendingOp> = docs
@@ -207,6 +205,7 @@ impl FtsIndex {
 mod tests {
     use super::*;
     use crate::crypto::aead::MasterKey;
+    use crate::storage::pager::Pager;
     use tempfile::TempDir;
 
     fn test_key() -> MasterKey {
@@ -258,15 +257,23 @@ mod tests {
 
         let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
 
-        idx.apply_pending(&mut pager, &[FtsPendingOp::Add {
-            doc_id: 1,
-            text: "東京タワー".to_string(),
-        }]).unwrap();
+        idx.apply_pending(
+            &mut pager,
+            &[FtsPendingOp::Add {
+                doc_id: 1,
+                text: "東京タワー".to_string(),
+            }],
+        )
+        .unwrap();
 
-        idx.apply_pending(&mut pager, &[FtsPendingOp::Remove {
-            doc_id: 1,
-            text: "東京タワー".to_string(),
-        }]).unwrap();
+        idx.apply_pending(
+            &mut pager,
+            &[FtsPendingOp::Remove {
+                doc_id: 1,
+                text: "東京タワー".to_string(),
+            }],
+        )
+        .unwrap();
 
         let pl = idx.get_postings(&mut pager, "東京").unwrap();
         assert_eq!(pl.df(), 0);

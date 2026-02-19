@@ -3,7 +3,6 @@
 /// Multiple readers, single writer model.
 /// Thread-level: parking_lot::RwLock
 /// Process-level: fs4 file lock
-
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -27,6 +26,7 @@ impl LockManager {
         let lock_path = db_path.with_extension("lock");
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)?;
@@ -56,9 +56,9 @@ impl LockManager {
     pub fn write_lock(&self) -> Result<WriteGuard<'_>> {
         let thread_guard = self.rw_lock.write();
 
-        self.lock_file
-            .lock_exclusive()
-            .map_err(|e| MuroError::Lock(format!("Failed to acquire exclusive file lock: {}", e)))?;
+        self.lock_file.lock_exclusive().map_err(|e| {
+            MuroError::Lock(format!("Failed to acquire exclusive file lock: {}", e))
+        })?;
 
         Ok(WriteGuard {
             _thread_guard: thread_guard,

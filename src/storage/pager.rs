@@ -75,10 +75,7 @@ impl Pager {
 
     /// Open an existing database file.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let crypto = PageCrypto::new(master_key);
         let cache = LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap());
@@ -259,6 +256,24 @@ impl Pager {
     pub fn sync(&mut self) -> Result<()> {
         self.file.sync_all()?;
         Ok(())
+    }
+}
+
+impl crate::storage::page_store::PageStore for Pager {
+    fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        Pager::read_page(self, page_id)
+    }
+
+    fn write_page(&mut self, page: &Page) -> Result<()> {
+        Pager::write_page(self, page)
+    }
+
+    fn allocate_page(&mut self) -> Result<Page> {
+        Pager::allocate_page(self)
+    }
+
+    fn free_page(&mut self, page_id: PageId) {
+        Pager::free_page(self, page_id)
     }
 }
 

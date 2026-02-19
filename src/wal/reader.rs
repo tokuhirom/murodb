@@ -24,6 +24,7 @@ impl WalReader {
     }
 
     /// Read the next WAL record. Returns None at end-of-file.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<(Lsn, WalRecord)>> {
         // Read frame length
         let mut len_buf = [0u8; 4];
@@ -39,7 +40,9 @@ impl WalReader {
         self.file.read_exact(&mut encrypted)?;
 
         let lsn = self.current_lsn;
-        let payload = self.crypto.decrypt(lsn, 0, &encrypted)
+        let payload = self
+            .crypto
+            .decrypt(lsn, 0, &encrypted)
             .map_err(|_| MuroError::Wal(format!("Failed to decrypt WAL record at LSN {}", lsn)))?;
 
         if payload.len() < 4 {
@@ -47,9 +50,7 @@ impl WalReader {
         }
 
         let record_bytes = &payload[..payload.len() - 4];
-        let stored_crc = u32::from_le_bytes(
-            payload[payload.len() - 4..].try_into().unwrap(),
-        );
+        let stored_crc = u32::from_le_bytes(payload[payload.len() - 4..].try_into().unwrap());
 
         if crc32(record_bytes) != stored_crc {
             return Err(MuroError::Wal(format!("CRC mismatch at LSN {}", lsn)));
@@ -91,12 +92,16 @@ mod tests {
         {
             let mut writer = WalWriter::create(&path, &key).unwrap();
             writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
-            writer.append(&WalRecord::PagePut {
-                txid: 1,
-                page_id: 10,
-                data: vec![0xAA; 32],
-            }).unwrap();
-            writer.append(&WalRecord::Commit { txid: 1, lsn: 2 }).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 10,
+                    data: vec![0xAA; 32],
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+                .unwrap();
             writer.sync().unwrap();
         }
 
@@ -106,8 +111,18 @@ mod tests {
             assert_eq!(records.len(), 3);
 
             assert!(matches!(&records[0].1, WalRecord::Begin { txid: 1 }));
-            assert!(matches!(&records[1].1, WalRecord::PagePut { txid: 1, page_id: 10, .. }));
-            assert!(matches!(&records[2].1, WalRecord::Commit { txid: 1, lsn: 2 }));
+            assert!(matches!(
+                &records[1].1,
+                WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 10,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &records[2].1,
+                WalRecord::Commit { txid: 1, lsn: 2 }
+            ));
         }
     }
 }

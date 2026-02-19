@@ -5,7 +5,6 @@
 ///   IndexSeek(idx, key) - Secondary index lookup
 ///   FullScan          - Full table scan
 ///   FtsScan(col, query, mode) - FTS search
-
 use crate::sql::ast::*;
 
 #[derive(Debug)]
@@ -80,22 +79,36 @@ pub fn plan_select(
 /// Extract FTS match from expression tree.
 fn extract_fts_match(expr: &Expr) -> Option<(String, String, MatchMode)> {
     match expr {
-        Expr::MatchAgainst { column, query, mode } => {
-            Some((column.clone(), query.clone(), *mode))
-        }
-        Expr::BinaryOp { left, op: BinaryOp::Gt, right } => {
+        Expr::MatchAgainst {
+            column,
+            query,
+            mode,
+        } => Some((column.clone(), query.clone(), *mode)),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOp::Gt,
+            right,
+        } => {
             // MATCH(...) AGAINST(...) > 0
-            if let (Expr::MatchAgainst { column, query, mode }, Expr::IntLiteral(0)) =
-                (left.as_ref(), right.as_ref())
+            if let (
+                Expr::MatchAgainst {
+                    column,
+                    query,
+                    mode,
+                },
+                Expr::IntLiteral(0),
+            ) = (left.as_ref(), right.as_ref())
             {
                 Some((column.clone(), query.clone(), *mode))
             } else {
                 None
             }
         }
-        Expr::BinaryOp { left, op: BinaryOp::And, right } => {
-            extract_fts_match(left).or_else(|| extract_fts_match(right))
-        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => extract_fts_match(left).or_else(|| extract_fts_match(right)),
         _ => None,
     }
 }

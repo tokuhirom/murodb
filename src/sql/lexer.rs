@@ -1,11 +1,10 @@
 /// SQL lexer (tokenizer) using nom.
-
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::{char, multispace0, digit1},
+    character::complete::{char, digit1, multispace0},
     combinator::{opt, value},
+    IResult,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,9 +47,9 @@ pub enum Token {
     Boolean,
     Show,
     Tables,
-    PrimaryKey,  // "PRIMARY KEY" as a combined token
-    Int64Type,   // "INT64"
-    VarcharType, // "VARCHAR"
+    PrimaryKey,    // "PRIMARY KEY" as a combined token
+    Int64Type,     // "INT64"
+    VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
 
     // Literals
@@ -236,9 +235,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
             if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case("KEY") {
                 let after_key = &rest[3..];
                 // Make sure "KEY" is not part of a longer word
-                if after_key.is_empty()
-                    || !after_key.chars().next().unwrap().is_alphanumeric()
-                {
+                if after_key.is_empty() || !after_key.chars().next().unwrap().is_alphanumeric() {
                     return Ok((after_key, Token::PrimaryKey));
                 }
             }
@@ -293,7 +290,8 @@ mod tests {
     fn test_tokenize_match_against() {
         let tokens = tokenize(
             "SELECT * FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(tokens.contains(&Token::Match));
         assert!(tokens.contains(&Token::Against));
         assert!(tokens.contains(&Token::Natural));

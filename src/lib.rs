@@ -7,17 +7,17 @@
 //! - WAL-based crash recovery
 //! - Multiple readers / single writer concurrency
 
-pub mod error;
-pub mod types;
-pub mod storage;
-pub mod crypto;
-pub mod wal;
 pub mod btree;
-pub mod schema;
-pub mod tx;
-pub mod sql;
-pub mod fts;
 pub mod concurrency;
+pub mod crypto;
+pub mod error;
+pub mod fts;
+pub mod schema;
+pub mod sql;
+pub mod storage;
+pub mod tx;
+pub mod types;
+pub mod wal;
 
 use std::path::{Path, PathBuf};
 

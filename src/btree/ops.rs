@@ -2,7 +2,6 @@
 ///
 /// The B-tree uses a pager for page I/O. Operations are performed on
 /// in-memory pages obtained from the pager.
-
 use crate::btree::key_encoding::compare_keys;
 use crate::btree::node::*;
 use crate::error::{MuroError, Result};
@@ -65,8 +64,7 @@ impl BTree {
                 Ok(None)
             }
             Some(NodeType::Internal) => {
-                let child_id = find_child(&page, key)
-                    .ok_or(MuroError::InvalidPage)?;
+                let child_id = find_child(&page, key).ok_or(MuroError::InvalidPage)?;
                 self.search_in_page(pager, child_id, key)
             }
             None => Err(MuroError::InvalidPage),
@@ -84,7 +82,8 @@ impl BTree {
             init_internal(&mut new_root, split.right_page_id);
 
             let cell = encode_internal_cell(self.root_page_id, &split.median_key);
-            new_root.insert_cell(&cell)
+            new_root
+                .insert_cell(&cell)
                 .map_err(|_| MuroError::PageOverflow)?;
             pager.write_page(&new_root)?;
             self.root_page_id = new_root_id;
@@ -130,10 +129,12 @@ impl BTree {
                     for j in 0..n {
                         if j == i {
                             let cell = encode_leaf_cell(key, value);
-                            new_page.insert_cell(&cell)
+                            new_page
+                                .insert_cell(&cell)
                                 .map_err(|_| MuroError::PageOverflow)?;
                         } else if let Some(cell_data) = page.cell(j + 1) {
-                            new_page.insert_cell(cell_data)
+                            new_page
+                                .insert_cell(cell_data)
                                 .map_err(|_| MuroError::PageOverflow)?;
                         }
                     }
@@ -176,10 +177,8 @@ impl BTree {
                 }
             }
         }
-        if !inserted {
-            if new_page.insert_cell(&cell).is_err() {
-                return self.split_leaf(pager, &page, key, value, pos);
-            }
+        if !inserted && new_page.insert_cell(&cell).is_err() {
+            return self.split_leaf(pager, &page, key, value, pos);
         }
 
         pager.write_page(&new_page)?;
@@ -219,7 +218,8 @@ impl BTree {
         init_leaf(&mut left);
         for (k, v) in &entries[..mid] {
             let cell = encode_leaf_cell(k, v);
-            left.insert_cell(&cell).map_err(|_| MuroError::PageOverflow)?;
+            left.insert_cell(&cell)
+                .map_err(|_| MuroError::PageOverflow)?;
         }
 
         // Right page (new page)
@@ -228,7 +228,9 @@ impl BTree {
         init_leaf(&mut right);
         for (k, v) in &entries[mid..] {
             let cell = encode_leaf_cell(k, v);
-            right.insert_cell(&cell).map_err(|_| MuroError::PageOverflow)?;
+            right
+                .insert_cell(&cell)
+                .map_err(|_| MuroError::PageOverflow)?;
         }
 
         pager.write_page(&left)?;
@@ -257,8 +259,7 @@ impl BTree {
         for i in 0..n {
             if let Some(k) = internal_key(&page, i) {
                 if compare_keys(key, k) == std::cmp::Ordering::Less {
-                    child_page_id = internal_left_child(&page, i)
-                        .ok_or(MuroError::InvalidPage)?;
+                    child_page_id = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
                     child_idx = Some(i);
                     break;
                 }
@@ -373,7 +374,8 @@ impl BTree {
         let mut left = Page::new(old_id);
         init_internal(&mut left, median_left_child);
         for entry in &entries[..mid] {
-            left.insert_cell(entry).map_err(|_| MuroError::PageOverflow)?;
+            left.insert_cell(entry)
+                .map_err(|_| MuroError::PageOverflow)?;
         }
 
         // Right page: entries[mid+1..], right child = current_right
@@ -381,7 +383,9 @@ impl BTree {
         let right_id = right.page_id();
         init_internal(&mut right, current_right);
         for entry in &entries[mid + 1..] {
-            right.insert_cell(entry).map_err(|_| MuroError::PageOverflow)?;
+            right
+                .insert_cell(entry)
+                .map_err(|_| MuroError::PageOverflow)?;
         }
 
         pager.write_page(&left)?;
@@ -442,7 +446,8 @@ impl BTree {
                     for i in 0..n {
                         if i != idx {
                             if let Some(cell_data) = page.cell(i + 1) {
-                                new_page.insert_cell(cell_data)
+                                new_page
+                                    .insert_cell(cell_data)
                                     .map_err(|_| MuroError::PageOverflow)?;
                             }
                         }
@@ -462,15 +467,14 @@ impl BTree {
                 for i in 0..n {
                     if let Some(k) = internal_key(&page, i) {
                         if compare_keys(key, k) == std::cmp::Ordering::Less {
-                            child_page_id = internal_left_child(&page, i)
-                                .ok_or(MuroError::InvalidPage)?;
+                            child_page_id =
+                                internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
                             break;
                         }
                     }
                 }
 
-                let (deleted, _underfull) =
-                    self.delete_from_page(pager, child_page_id, key)?;
+                let (deleted, _underfull) = self.delete_from_page(pager, child_page_id, key)?;
 
                 // For MVP, skip rebalancing/merging of internal nodes.
                 // The tree stays valid, just possibly slightly unbalanced.
@@ -512,8 +516,7 @@ impl BTree {
             Some(NodeType::Internal) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    let left = internal_left_child(&page, i)
-                        .ok_or(MuroError::InvalidPage)?;
+                    let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
                     self.scan_page(pager, left, callback)?;
                 }
                 let right = right_child(&page).ok_or(MuroError::InvalidPage)?;
@@ -525,12 +528,7 @@ impl BTree {
     }
 
     /// Range scan: iterate over entries where key >= start_key.
-    pub fn scan_from<F>(
-        &self,
-        pager: &mut Pager,
-        start_key: &[u8],
-        mut callback: F,
-    ) -> Result<()>
+    pub fn scan_from<F>(&self, pager: &mut Pager, start_key: &[u8], mut callback: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
@@ -554,10 +552,10 @@ impl BTree {
                 let n = num_entries(&page);
                 for i in 0..n {
                     if let Some((k, v)) = leaf_entry(&page, i) {
-                        if compare_keys(k, start_key) != std::cmp::Ordering::Less {
-                            if !callback(k, v)? {
-                                return Ok(());
-                            }
+                        if compare_keys(k, start_key) != std::cmp::Ordering::Less
+                            && !callback(k, v)?
+                        {
+                            return Ok(());
                         }
                     }
                 }
@@ -569,13 +567,11 @@ impl BTree {
                 for i in 0..n {
                     let entry_key = internal_key(&page, i).ok_or(MuroError::InvalidPage)?;
                     if !started && compare_keys(start_key, entry_key) == std::cmp::Ordering::Less {
-                        let left = internal_left_child(&page, i)
-                            .ok_or(MuroError::InvalidPage)?;
+                        let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
                         self.scan_from_page(pager, left, start_key, callback)?;
                         started = true;
                     } else if started {
-                        let left = internal_left_child(&page, i)
-                            .ok_or(MuroError::InvalidPage)?;
+                        let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
                         self.scan_page(pager, left, callback)?;
                     }
                 }
@@ -674,14 +670,8 @@ mod tests {
 
         assert!(btree.delete(&mut pager, b"b").unwrap());
         assert_eq!(btree.search(&mut pager, b"b").unwrap(), None);
-        assert_eq!(
-            btree.search(&mut pager, b"a").unwrap(),
-            Some(b"1".to_vec())
-        );
-        assert_eq!(
-            btree.search(&mut pager, b"c").unwrap(),
-            Some(b"3".to_vec())
-        );
+        assert_eq!(btree.search(&mut pager, b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(btree.search(&mut pager, b"c").unwrap(), Some(b"3".to_vec()));
 
         assert!(!btree.delete(&mut pager, b"nonexistent").unwrap());
 

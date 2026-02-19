@@ -8,7 +8,6 @@
 ///   PagePut(txid, page_id, page_data)
 ///   Commit(txid, lsn)
 ///   Abort(txid)
-
 use crate::storage::page::PageId;
 
 pub type TxId = u64;
@@ -16,10 +15,21 @@ pub type Lsn = u64;
 
 #[derive(Debug, Clone)]
 pub enum WalRecord {
-    Begin { txid: TxId },
-    PagePut { txid: TxId, page_id: PageId, data: Vec<u8> },
-    Commit { txid: TxId, lsn: Lsn },
-    Abort { txid: TxId },
+    Begin {
+        txid: TxId,
+    },
+    PagePut {
+        txid: TxId,
+        page_id: PageId,
+        data: Vec<u8>,
+    },
+    Commit {
+        txid: TxId,
+        lsn: Lsn,
+    },
+    Abort {
+        txid: TxId,
+    },
 }
 
 const TAG_BEGIN: u8 = 1;
@@ -46,7 +56,11 @@ impl WalRecord {
                 buf.extend_from_slice(&txid.to_le_bytes());
                 buf
             }
-            WalRecord::PagePut { txid, page_id, data } => {
+            WalRecord::PagePut {
+                txid,
+                page_id,
+                data,
+            } => {
                 let mut buf = Vec::with_capacity(1 + 8 + 8 + 4 + data.len());
                 buf.push(TAG_PAGE_PUT);
                 buf.extend_from_slice(&txid.to_le_bytes());
@@ -79,27 +93,41 @@ impl WalRecord {
 
         match data[0] {
             TAG_BEGIN => {
-                if data.len() < 9 { return None; }
+                if data.len() < 9 {
+                    return None;
+                }
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 Some(WalRecord::Begin { txid })
             }
             TAG_PAGE_PUT => {
-                if data.len() < 21 { return None; }
+                if data.len() < 21 {
+                    return None;
+                }
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 let page_id = u64::from_le_bytes(data[9..17].try_into().unwrap());
                 let data_len = u32::from_le_bytes(data[17..21].try_into().unwrap()) as usize;
-                if data.len() < 21 + data_len { return None; }
+                if data.len() < 21 + data_len {
+                    return None;
+                }
                 let page_data = data[21..21 + data_len].to_vec();
-                Some(WalRecord::PagePut { txid, page_id, data: page_data })
+                Some(WalRecord::PagePut {
+                    txid,
+                    page_id,
+                    data: page_data,
+                })
             }
             TAG_COMMIT => {
-                if data.len() < 17 { return None; }
+                if data.len() < 17 {
+                    return None;
+                }
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 let lsn = u64::from_le_bytes(data[9..17].try_into().unwrap());
                 Some(WalRecord::Commit { txid, lsn })
             }
             TAG_ABORT => {
-                if data.len() < 9 { return None; }
+                if data.len() < 9 {
+                    return None;
+                }
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 Some(WalRecord::Abort { txid })
             }
@@ -132,7 +160,11 @@ mod tests {
     fn test_record_roundtrip() {
         let records = vec![
             WalRecord::Begin { txid: 1 },
-            WalRecord::PagePut { txid: 1, page_id: 42, data: vec![0xAB; 100] },
+            WalRecord::PagePut {
+                txid: 1,
+                page_id: 42,
+                data: vec![0xAB; 100],
+            },
             WalRecord::Commit { txid: 1, lsn: 5 },
             WalRecord::Abort { txid: 2 },
         ];

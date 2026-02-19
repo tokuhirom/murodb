@@ -35,10 +35,7 @@ impl WalWriter {
     }
 
     pub fn open(path: &Path, master_key: &MasterKey, start_lsn: Lsn) -> Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         Ok(WalWriter {
             file,
@@ -95,14 +92,18 @@ mod tests {
         let lsn0 = writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
         assert_eq!(lsn0, 0);
 
-        let lsn1 = writer.append(&WalRecord::PagePut {
-            txid: 1,
-            page_id: 5,
-            data: vec![0xFF; 50],
-        }).unwrap();
+        let lsn1 = writer
+            .append(&WalRecord::PagePut {
+                txid: 1,
+                page_id: 5,
+                data: vec![0xFF; 50],
+            })
+            .unwrap();
         assert_eq!(lsn1, 1);
 
-        let lsn2 = writer.append(&WalRecord::Commit { txid: 1, lsn: 2 }).unwrap();
+        let lsn2 = writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+            .unwrap();
         assert_eq!(lsn2, 2);
 
         writer.sync().unwrap();

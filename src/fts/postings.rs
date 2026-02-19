@@ -1,6 +1,5 @@
 /// Posting list: term_id -> [(doc_id, positions)]
 /// Compression: delta encoding + varint for positions.
-
 /// A posting entry for a single document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Posting {

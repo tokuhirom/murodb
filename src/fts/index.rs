@@ -7,7 +7,6 @@
 /// Also stores statistics in the same B-tree:
 ///   key = b"__stats__"
 ///   value = FtsStats serialized
-
 use crate::btree::ops::BTree;
 use crate::crypto::hmac_util::hmac_term_id;
 use crate::error::Result;
@@ -113,11 +112,7 @@ impl FtsIndex {
     }
 
     /// Apply pending operations at commit time.
-    pub fn apply_pending(
-        &mut self,
-        pager: &mut Pager,
-        ops: &[FtsPendingOp],
-    ) -> Result<()> {
+    pub fn apply_pending(&mut self, pager: &mut Pager, ops: &[FtsPendingOp]) -> Result<()> {
         let mut stats = self.get_stats(pager)?;
 
         for op in ops {
@@ -160,8 +155,7 @@ impl FtsIndex {
                         if seen_terms.insert(token.text.clone()) {
                             let tid = self.term_id(&token.text);
                             if let Some(data) = self.btree.search(pager, &tid)? {
-                                let mut pl =
-                                    PostingList::deserialize(&data).unwrap_or_default();
+                                let mut pl = PostingList::deserialize(&data).unwrap_or_default();
                                 pl.remove(*doc_id);
                                 if pl.df() == 0 {
                                     self.btree.delete(pager, &tid)?;
@@ -258,15 +252,23 @@ mod tests {
 
         let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
 
-        idx.apply_pending(&mut pager, &[FtsPendingOp::Add {
-            doc_id: 1,
-            text: "東京タワー".to_string(),
-        }]).unwrap();
+        idx.apply_pending(
+            &mut pager,
+            &[FtsPendingOp::Add {
+                doc_id: 1,
+                text: "東京タワー".to_string(),
+            }],
+        )
+        .unwrap();
 
-        idx.apply_pending(&mut pager, &[FtsPendingOp::Remove {
-            doc_id: 1,
-            text: "東京タワー".to_string(),
-        }]).unwrap();
+        idx.apply_pending(
+            &mut pager,
+            &[FtsPendingOp::Remove {
+                doc_id: 1,
+                text: "東京タワー".to_string(),
+            }],
+        )
+        .unwrap();
 
         let pl = idx.get_postings(&mut pager, "東京").unwrap();
         assert_eq!(pl.df(), 0);

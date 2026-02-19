@@ -3,7 +3,6 @@
 /// INT64: big-endian with sign bit flipped (so negative < positive in byte order)
 /// VARCHAR: raw UTF-8 bytes
 /// VARBINARY: raw bytes
-
 /// Encode i64 into 8 bytes that preserve sort order under byte comparison.
 pub fn encode_i64(val: i64) -> [u8; 8] {
     // Flip the sign bit so that negative numbers sort before positive

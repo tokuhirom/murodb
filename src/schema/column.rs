@@ -51,9 +51,15 @@ impl ColumnDef {
         });
         // flags
         let mut flags: u8 = 0;
-        if self.is_primary_key { flags |= 0x01; }
-        if self.is_unique { flags |= 0x02; }
-        if self.is_nullable { flags |= 0x04; }
+        if self.is_primary_key {
+            flags |= 0x01;
+        }
+        if self.is_unique {
+            flags |= 0x02;
+        }
+        if self.is_nullable {
+            flags |= 0x04;
+        }
         buf.push(flags);
         buf
     }

@@ -43,7 +43,11 @@ fn format_rows(result: &ExecResult) -> String {
             }
 
             // Get column names from first row
-            let columns: Vec<&str> = rows[0].values.iter().map(|(name, _)| name.as_str()).collect();
+            let columns: Vec<&str> = rows[0]
+                .values
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
 
             // Calculate column widths
             let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
@@ -59,7 +63,11 @@ fn format_rows(result: &ExecResult) -> String {
             let mut out = String::new();
 
             // Header
-            let separator: String = widths.iter().map(|w| format!("+{}", "-".repeat(w + 2))).collect::<String>() + "+";
+            let separator: String = widths
+                .iter()
+                .map(|w| format!("+{}", "-".repeat(w + 2)))
+                .collect::<String>()
+                + "+";
             out.push_str(&separator);
             out.push('\n');
 
@@ -126,7 +134,11 @@ fn run_repl(db: &mut Database) {
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "murodb> " } else { "     -> " };
+        let prompt = if buffer.is_empty() {
+            "murodb> "
+        } else {
+            "     -> "
+        };
 
         match rl.readline(prompt) {
             Ok(line) => {

@@ -75,10 +75,7 @@ impl Pager {
 
     /// Open an existing database file.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let crypto = PageCrypto::new(master_key);
         let cache = LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap());

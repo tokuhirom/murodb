@@ -2,15 +2,14 @@ use crate::storage::page::PageId;
 
 /// Simple freelist tracking free pages.
 /// Free page IDs are stored in-memory and serialized to a special page on checkpoint.
+#[derive(Default)]
 pub struct FreeList {
     free_pages: Vec<PageId>,
 }
 
 impl FreeList {
     pub fn new() -> Self {
-        FreeList {
-            free_pages: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Allocate a free page. Returns None if no free pages available.

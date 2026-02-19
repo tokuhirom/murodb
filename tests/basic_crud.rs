@@ -24,13 +24,30 @@ fn test_full_crud_cycle() {
     // CREATE TABLE
     execute(
         "CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, email VARCHAR)",
-        &mut pager, &mut catalog,
-    ).unwrap();
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     // INSERT
-    execute("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO users VALUES (2, 'Bob', 'bob@example.com')", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO users VALUES (3, 'Charlie', 'charlie@example.com')", &mut pager, &mut catalog).unwrap();
+    execute(
+        "INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO users VALUES (2, 'Bob', 'bob@example.com')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO users VALUES (3, 'Charlie', 'charlie@example.com')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     // SELECT all
     let result = execute("SELECT * FROM users", &mut pager, &mut catalog).unwrap();
@@ -48,7 +65,12 @@ fn test_full_crud_cycle() {
     }
 
     // UPDATE
-    execute("UPDATE users SET name = 'Bobby' WHERE id = 2", &mut pager, &mut catalog).unwrap();
+    execute(
+        "UPDATE users SET name = 'Bobby' WHERE id = 2",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
     let result = execute("SELECT * FROM users WHERE id = 2", &mut pager, &mut catalog).unwrap();
     if let ExecResult::Rows(rows) = result {
         assert_eq!(rows[0].get("name"), Some(&Value::Varchar("Bobby".into())));
@@ -66,8 +88,18 @@ fn test_full_crud_cycle() {
 fn test_insert_with_explicit_columns() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, a VARCHAR, b VARCHAR)", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO t (id, b) VALUES (1, 'only_b')", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, a VARCHAR, b VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO t (id, b) VALUES (1, 'only_b')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
     if let ExecResult::Rows(rows) = result {
@@ -80,12 +112,27 @@ fn test_insert_with_explicit_columns() {
 fn test_order_by_desc_limit() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, val INT64)", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, val INT64)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
     for i in 1..=10 {
-        execute(&format!("INSERT INTO t VALUES ({}, {})", i, i * 10), &mut pager, &mut catalog).unwrap();
+        execute(
+            &format!("INSERT INTO t VALUES ({}, {})", i, i * 10),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
     }
 
-    let result = execute("SELECT * FROM t ORDER BY val DESC LIMIT 3", &mut pager, &mut catalog).unwrap();
+    let result = execute(
+        "SELECT * FROM t ORDER BY val DESC LIMIT 3",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
     if let ExecResult::Rows(rows) = result {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].get("val"), Some(&Value::Int64(100)));
@@ -98,9 +145,19 @@ fn test_order_by_desc_limit() {
 fn test_null_handling() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
     execute("INSERT INTO t VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO t VALUES (2, 'Alice')", &mut pager, &mut catalog).unwrap();
+    execute(
+        "INSERT INTO t VALUES (2, 'Alice')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     let result = execute("SELECT * FROM t", &mut pager, &mut catalog).unwrap();
     if let ExecResult::Rows(rows) = result {
@@ -114,7 +171,12 @@ fn test_null_handling() {
 fn test_varbinary_type() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, data VARBINARY)", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, data VARBINARY)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
     // For MVP, we test with string insertion since we don't have hex literal support
     execute("INSERT INTO t VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
 
@@ -128,8 +190,18 @@ fn test_varbinary_type() {
 fn test_multiple_value_insert() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     let result = execute("SELECT * FROM t", &mut pager, &mut catalog).unwrap();
     if let ExecResult::Rows(rows) = result {
@@ -141,8 +213,18 @@ fn test_multiple_value_insert() {
 fn test_duplicate_pk_error() {
     let (mut pager, mut catalog, _dir) = setup();
 
-    execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-    execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+    execute(
+        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO t VALUES (1, 'Alice')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
 
     let result = execute("INSERT INTO t VALUES (1, 'Bob')", &mut pager, &mut catalog);
     assert!(result.is_err());

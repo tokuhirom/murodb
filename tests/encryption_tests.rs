@@ -1,8 +1,8 @@
 use murodb::crypto::aead::{MasterKey, PageCrypto};
 use murodb::crypto::kdf;
-use murodb::storage::pager::Pager;
 use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult};
+use murodb::storage::pager::Pager;
 use murodb::types::Value;
 use tempfile::TempDir;
 
@@ -63,7 +63,12 @@ fn test_wrong_key_cannot_open_database() {
     {
         let mut pager = Pager::create(&db_path, &correct_key).unwrap();
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (1)", &mut pager, &mut catalog).unwrap();
         pager.flush_meta().unwrap();
     }
@@ -92,8 +97,18 @@ fn test_data_persists_across_reopen() {
         let mut pager = Pager::create(&db_path, &key).unwrap();
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'persistent')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'persistent')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         catalog_root = catalog.root_page_id();
         pager.flush_meta().unwrap();
@@ -107,7 +122,10 @@ fn test_data_persists_across_reopen() {
         let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].get("name"), Some(&Value::Varchar("persistent".into())));
+            assert_eq!(
+                rows[0].get("name"),
+                Some(&Value::Varchar("persistent".into()))
+            );
         } else {
             panic!("Expected rows");
         }

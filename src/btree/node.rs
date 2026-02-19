@@ -13,7 +13,6 @@
 ///   [left_child: u64] [key_len: u16] [key bytes]
 ///
 /// For internal nodes, the right-most child pointer is stored in the node header.
-
 use crate::storage::page::{Page, PageId};
 
 const NODE_TYPE_LEAF: u8 = 1;
@@ -71,7 +70,11 @@ pub fn set_right_child(page: &mut Page, child: PageId) {
 /// Number of key-value entries (excluding the header cell at index 0).
 pub fn num_entries(page: &Page) -> u16 {
     let count = page.cell_count();
-    if count == 0 { 0 } else { count - 1 }
+    if count == 0 {
+        0
+    } else {
+        count - 1
+    }
 }
 
 // --- Leaf node operations ---

@@ -2,7 +2,6 @@
 ///
 /// The cursor collects entries from the current scan position.
 /// For MVP, this uses the scan method internally.
-
 use crate::btree::ops::BTree;
 use crate::error::Result;
 use crate::storage::pager::Pager;
@@ -40,6 +39,7 @@ impl BTreeCursor {
     }
 
     /// Get the next entry.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(&[u8], &[u8])> {
         if self.position < self.entries.len() {
             let (ref k, ref v) = self.entries[self.position];

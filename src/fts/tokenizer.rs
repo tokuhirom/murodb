@@ -1,7 +1,6 @@
 /// FTS tokenizer: NFKC normalization + bigram (n=2).
 ///
 /// Input: "東京タワー" → ["東京", "京タ", "タワ", "ワー"]
-
 use unicode_normalization::UnicodeNormalization;
 
 /// Token with its position in the document.

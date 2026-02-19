@@ -47,8 +47,7 @@ const TAG_OVERHEAD: usize = 16;
 
 impl PageCrypto {
     pub fn new(master_key: &MasterKey) -> Self {
-        let cipher = Aes256GcmSiv::new_from_slice(master_key.as_bytes())
-            .expect("valid key size");
+        let cipher = Aes256GcmSiv::new_from_slice(master_key.as_bytes()).expect("valid key size");
         PageCrypto { cipher }
     }
 
@@ -62,12 +61,7 @@ impl PageCrypto {
 
     /// Encrypt page plaintext.
     /// Returns: nonce (12 bytes) || ciphertext+tag
-    pub fn encrypt(
-        &self,
-        page_id: PageId,
-        epoch: u64,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub fn encrypt(&self, page_id: PageId, epoch: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
         let aad = Self::build_aad(page_id, epoch);
 
         let mut nonce_bytes = [0u8; NONCE_SIZE];
@@ -91,12 +85,7 @@ impl PageCrypto {
     }
 
     /// Decrypt: input = nonce (12 bytes) || ciphertext+tag
-    pub fn decrypt(
-        &self,
-        page_id: PageId,
-        epoch: u64,
-        encrypted: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, page_id: PageId, epoch: u64, encrypted: &[u8]) -> Result<Vec<u8>> {
         if encrypted.len() < NONCE_SIZE + TAG_OVERHEAD {
             return Err(MuroError::Decryption);
         }

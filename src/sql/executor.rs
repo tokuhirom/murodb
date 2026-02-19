@@ -1,5 +1,4 @@
 /// SQL executor: executes statements against the B-tree storage.
-
 use crate::btree::key_encoding::encode_i64;
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
@@ -34,11 +33,7 @@ pub enum ExecResult {
 }
 
 /// Execute a SQL string.
-pub fn execute(
-    sql: &str,
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+pub fn execute(sql: &str, pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
     execute_statement(&stmt, pager, catalog)
 }
@@ -187,11 +182,7 @@ fn exec_create_index(
     Ok(ExecResult::Ok)
 }
 
-fn exec_insert(
-    ins: &Insert,
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_insert(ins: &Insert, pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let table_def = catalog
         .get_table(pager, &ins.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", ins.table_name)))?;
@@ -205,9 +196,9 @@ fn exec_insert(
         let values = resolve_insert_values(&table_def, &ins.columns, value_row)?;
 
         // Get PK value
-        let pk_idx = table_def.pk_column_index().ok_or_else(|| {
-            MuroError::Execution("Table has no primary key".into())
-        })?;
+        let pk_idx = table_def
+            .pk_column_index()
+            .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
         let pk_value = &values[pk_idx];
         let pk_key = encode_value(pk_value);
 
@@ -269,11 +260,7 @@ fn exec_insert(
     Ok(ExecResult::RowsAffected(rows_inserted))
 }
 
-fn exec_select(
-    sel: &Select,
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_select(sel: &Select, pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let table_def = catalog
         .get_table(pager, &sel.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", sel.table_name)))?;
@@ -307,7 +294,11 @@ fn exec_select(
                 }
             }
         }
-        Plan::IndexSeek { index_name, key_expr, .. } => {
+        Plan::IndexSeek {
+            index_name,
+            key_expr,
+            ..
+        } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
             let idx_key = encode_value(&key_val);
             let idx = indexes.iter().find(|i| i.name == index_name).unwrap();
@@ -374,11 +365,7 @@ fn exec_select(
     Ok(ExecResult::Rows(rows))
 }
 
-fn exec_update(
-    upd: &Update,
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_update(upd: &Update, pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let table_def = catalog
         .get_table(pager, &upd.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", upd.table_name)))?;
@@ -401,11 +388,13 @@ fn exec_update(
     for (pk_key, mut values) in to_update {
         // Apply assignments
         for (col_name, expr) in &upd.assignments {
-            let col_idx = table_def.column_index(col_name).ok_or_else(|| {
-                MuroError::Execution(format!("Unknown column: {}", col_name))
-            })?;
+            let col_idx = table_def
+                .column_index(col_name)
+                .ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", col_name)))?;
             let new_val = eval_expr(expr, &|name| {
-                table_def.column_index(name).and_then(|i| values.get(i).cloned())
+                table_def
+                    .column_index(name)
+                    .and_then(|i| values.get(i).cloned())
             })?;
             values[col_idx] = new_val;
         }
@@ -418,11 +407,7 @@ fn exec_update(
     Ok(ExecResult::RowsAffected(count))
 }
 
-fn exec_delete(
-    del: &Delete,
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_delete(del: &Delete, pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let table_def = catalog
         .get_table(pager, &del.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", del.table_name)))?;
@@ -450,10 +435,7 @@ fn exec_delete(
     Ok(ExecResult::RowsAffected(count))
 }
 
-fn exec_show_tables(
-    pager: &mut Pager,
-    catalog: &mut SystemCatalog,
-) -> Result<ExecResult> {
+fn exec_show_tables(pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<ExecResult> {
     let tables = catalog.list_tables(pager)?;
     let rows = tables
         .into_iter()
@@ -472,7 +454,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Null bitmap (1 bit per column, packed into bytes)
-    let bitmap_bytes = (columns.len() + 7) / 8;
+    let bitmap_bytes = columns.len().div_ceil(8);
     let mut bitmap = vec![0u8; bitmap_bytes];
     for (i, val) in values.iter().enumerate() {
         if val.is_null() {
@@ -482,7 +464,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     buf.extend_from_slice(&bitmap);
 
     // Values
-    for (_i, val) in values.iter().enumerate() {
+    for val in values.iter() {
         if val.is_null() {
             continue;
         }
@@ -505,7 +487,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
 }
 
 pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>> {
-    let bitmap_bytes = (columns.len() + 7) / 8;
+    let bitmap_bytes = columns.len().div_ceil(8);
     if data.len() < bitmap_bytes {
         return Err(MuroError::InvalidPage);
     }
@@ -534,8 +516,7 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
-                let len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
                 if offset + len > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -549,8 +530,7 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
-                let len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
                 if offset + len > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -589,9 +569,9 @@ fn resolve_insert_values(
                 ));
             }
             for (col_name, expr) in cols.iter().zip(exprs.iter()) {
-                let idx = table_def.column_index(col_name).ok_or_else(|| {
-                    MuroError::Execution(format!("Unknown column: {}", col_name))
-                })?;
+                let idx = table_def
+                    .column_index(col_name)
+                    .ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", col_name)))?;
                 values[idx] = eval_expr(expr, &|_| None)?;
             }
         }
@@ -645,13 +625,13 @@ fn build_row(
             }
             SelectColumn::Expr(expr, alias) => {
                 let val = eval_expr(expr, &|name| {
-                    table_def.column_index(name).and_then(|i| values.get(i).cloned())
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| values.get(i).cloned())
                 })?;
-                let name = alias.clone().unwrap_or_else(|| {
-                    match expr {
-                        Expr::ColumnRef(n) => n.clone(),
-                        _ => "?column?".to_string(),
-                    }
+                let name = alias.clone().unwrap_or_else(|| match expr {
+                    Expr::ColumnRef(n) => n.clone(),
+                    _ => "?column?".to_string(),
                 });
                 row_values.push((name, val));
             }
@@ -693,10 +673,25 @@ mod tests {
     fn test_create_table_and_insert() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
-        execute("INSERT INTO t (id, name) VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t (id, name) VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t (id, name) VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t (id, name) VALUES (2, 'Bob')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         let result = execute("SELECT * FROM t", &mut pager, &mut catalog).unwrap();
         if let ExecResult::Rows(rows) = result {
@@ -712,10 +707,25 @@ mod tests {
     fn test_select_where() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (3, 'Charlie')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'Charlie')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         let result = execute("SELECT * FROM t WHERE id = 2", &mut pager, &mut catalog).unwrap();
         if let ExecResult::Rows(rows) = result {
@@ -730,10 +740,25 @@ mod tests {
     fn test_update() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
-        let result = execute("UPDATE t SET name = 'Alicia' WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        let result = execute(
+            "UPDATE t SET name = 'Alicia' WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         if let ExecResult::RowsAffected(n) = result {
             assert_eq!(n, 1);
         }
@@ -748,8 +773,18 @@ mod tests {
     fn test_delete() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
 
         execute("DELETE FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
@@ -765,12 +800,32 @@ mod tests {
     fn test_order_by_and_limit() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (3, 'Charlie')", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'Alice')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'Charlie')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
 
-        let result = execute("SELECT * FROM t ORDER BY id DESC LIMIT 2", &mut pager, &mut catalog).unwrap();
+        let result = execute(
+            "SELECT * FROM t ORDER BY id DESC LIMIT 2",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].get("id"), Some(&Value::Int64(3)));
@@ -782,26 +837,54 @@ mod tests {
     fn test_unique_constraint() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, email VARCHAR UNIQUE)", &mut pager, &mut catalog).unwrap();
-        execute("INSERT INTO t VALUES (1, 'a@b.com')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, email VARCHAR UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'a@b.com')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         // Duplicate PK
-        let result = execute("INSERT INTO t VALUES (1, 'x@y.com')", &mut pager, &mut catalog);
+        let result = execute(
+            "INSERT INTO t VALUES (1, 'x@y.com')",
+            &mut pager,
+            &mut catalog,
+        );
         assert!(result.is_err());
 
         // Duplicate UNIQUE
-        let result = execute("INSERT INTO t VALUES (2, 'a@b.com')", &mut pager, &mut catalog);
+        let result = execute(
+            "INSERT INTO t VALUES (2, 'a@b.com')",
+            &mut pager,
+            &mut catalog,
+        );
         assert!(result.is_err());
 
         // Different value should work
-        execute("INSERT INTO t VALUES (2, 'c@d.com')", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, 'c@d.com')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
     }
 
     #[test]
     fn test_null_values() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
         execute("INSERT INTO t VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
 
         let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
@@ -814,7 +897,12 @@ mod tests {
     fn test_many_inserts() {
         let (mut pager, mut catalog, _dir) = setup();
 
-        execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
 
         for i in 0..100 {
             let sql = format!("INSERT INTO t VALUES ({}, 'name_{}')", i, i);

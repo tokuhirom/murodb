@@ -49,31 +49,45 @@ impl IndexDef {
         let mut offset = 0;
 
         // name
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let name_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
-        if data.len() < offset + name_len { return None; }
+        if data.len() < offset + name_len {
+            return None;
+        }
         let name = String::from_utf8(data[offset..offset + name_len].to_vec()).ok()?;
         offset += name_len;
 
         // table_name
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let table_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
-        if data.len() < offset + table_len { return None; }
+        if data.len() < offset + table_len {
+            return None;
+        }
         let table_name = String::from_utf8(data[offset..offset + table_len].to_vec()).ok()?;
         offset += table_len;
 
         // column_name
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let col_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
-        if data.len() < offset + col_len { return None; }
+        if data.len() < offset + col_len {
+            return None;
+        }
         let column_name = String::from_utf8(data[offset..offset + col_len].to_vec()).ok()?;
         offset += col_len;
 
         // index_type
-        if data.len() < offset + 1 { return None; }
+        if data.len() < offset + 1 {
+            return None;
+        }
         let index_type = match data[offset] {
             1 => IndexType::BTree,
             2 => IndexType::Fulltext,
@@ -82,23 +96,30 @@ impl IndexDef {
         offset += 1;
 
         // is_unique
-        if data.len() < offset + 1 { return None; }
+        if data.len() < offset + 1 {
+            return None;
+        }
         let is_unique = data[offset] != 0;
         offset += 1;
 
         // btree_root
-        if data.len() < offset + 8 { return None; }
+        if data.len() < offset + 8 {
+            return None;
+        }
         let btree_root = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
         offset += 8;
 
-        Some((IndexDef {
-            name,
-            table_name,
-            column_name,
-            index_type,
-            is_unique,
-            btree_root,
-        }, offset))
+        Some((
+            IndexDef {
+                name,
+                table_name,
+                column_name,
+                index_type,
+                is_unique,
+                btree_root,
+            },
+            offset,
+        ))
     }
 }
 

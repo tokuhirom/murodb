@@ -1,6 +1,5 @@
 /// SQL parser: converts token stream into AST.
 /// Hand-written recursive descent parser.
-
 use crate::sql::ast::*;
 use crate::sql::lexer::Token;
 use crate::types::DataType;
@@ -85,7 +84,9 @@ impl Parser {
             Some(Token::Fulltext) => {
                 self.advance();
                 self.expect(&Token::Index)?;
-                Ok(Statement::CreateFulltextIndex(self.parse_create_fulltext_index()?))
+                Ok(Statement::CreateFulltextIndex(
+                    self.parse_create_fulltext_index()?,
+                ))
             }
             _ => Err("Expected TABLE, INDEX, UNIQUE INDEX, or FULLTEXT INDEX after CREATE".into()),
         }
@@ -101,13 +102,21 @@ impl Parser {
             columns.push(col);
 
             match self.peek() {
-                Some(Token::Comma) => { self.advance(); }
-                Some(Token::RParen) => { self.advance(); break; }
+                Some(Token::Comma) => {
+                    self.advance();
+                }
+                Some(Token::RParen) => {
+                    self.advance();
+                    break;
+                }
                 _ => return Err("Expected ',' or ')' in column list".into()),
             }
         }
 
-        Ok(CreateTable { table_name, columns })
+        Ok(CreateTable {
+            table_name,
+            columns,
+        })
     }
 
     fn parse_column_spec(&mut self) -> Result<ColumnSpec, String> {
@@ -254,8 +263,13 @@ impl Parser {
             loop {
                 cols.push(self.expect_ident()?);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
-                    Some(Token::RParen) => { self.advance(); break; }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    Some(Token::RParen) => {
+                        self.advance();
+                        break;
+                    }
                     _ => return Err("Expected ',' or ')' in column list".into()),
                 }
             }
@@ -273,8 +287,13 @@ impl Parser {
             loop {
                 row.push(self.parse_expr()?);
                 match self.peek() {
-                    Some(Token::Comma) => { self.advance(); }
-                    Some(Token::RParen) => { self.advance(); break; }
+                    Some(Token::Comma) => {
+                        self.advance();
+                    }
+                    Some(Token::RParen) => {
+                        self.advance();
+                        break;
+                    }
                     _ => return Err("Expected ',' or ')' in values list".into()),
                 }
             }
@@ -621,7 +640,9 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let stmt = parse_sql("CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, data VARBINARY)").unwrap();
+        let stmt =
+            parse_sql("CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, data VARBINARY)")
+                .unwrap();
         if let Statement::CreateTable(ct) = stmt {
             assert_eq!(ct.table_name, "users");
             assert_eq!(ct.columns.len(), 3);
@@ -637,7 +658,10 @@ mod tests {
         let stmt = parse_sql("INSERT INTO t (id, name) VALUES (1, 'hello')").unwrap();
         if let Statement::Insert(ins) = stmt {
             assert_eq!(ins.table_name, "t");
-            assert_eq!(ins.columns, Some(vec!["id".to_string(), "name".to_string()]));
+            assert_eq!(
+                ins.columns,
+                Some(vec!["id".to_string(), "name".to_string()])
+            );
             assert_eq!(ins.values.len(), 1);
             assert_eq!(ins.values[0].len(), 2);
         } else {
@@ -709,7 +733,8 @@ mod tests {
     fn test_parse_match_against() {
         let stmt = parse_sql(
             "SELECT * FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
-        ).unwrap();
+        )
+        .unwrap();
         if let Statement::Select(sel) = stmt {
             assert!(sel.where_clause.is_some());
         } else {

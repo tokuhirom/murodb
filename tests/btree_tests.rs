@@ -36,14 +36,16 @@ fn test_btree_large_dataset() {
     // Verify sort order via scan
     let mut last_key: Option<Vec<u8>> = None;
     let mut scan_count = 0;
-    btree.scan(&mut pager, |k, _v| {
-        if let Some(ref lk) = last_key {
-            assert!(k > lk.as_slice(), "Keys not in order");
-        }
-        last_key = Some(k.to_vec());
-        scan_count += 1;
-        Ok(true)
-    }).unwrap();
+    btree
+        .scan(&mut pager, |k, _v| {
+            if let Some(ref lk) = last_key {
+                assert!(k > lk.as_slice(), "Keys not in order");
+            }
+            last_key = Some(k.to_vec());
+            scan_count += 1;
+            Ok(true)
+        })
+        .unwrap();
     assert_eq!(scan_count, count);
 }
 
@@ -62,10 +64,12 @@ fn test_btree_string_keys() {
 
     // Verify sorted scan
     let mut results = Vec::new();
-    btree.scan(&mut pager, |k, _| {
-        results.push(String::from_utf8(k.to_vec()).unwrap());
-        Ok(true)
-    }).unwrap();
+    btree
+        .scan(&mut pager, |k, _| {
+            results.push(String::from_utf8(k.to_vec()).unwrap());
+            Ok(true)
+        })
+        .unwrap();
 
     assert_eq!(results, vec!["apple", "banana", "cherry", "mango", "zebra"]);
 }

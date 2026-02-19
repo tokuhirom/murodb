@@ -40,9 +40,9 @@ pub struct CreateFulltextIndex {
     pub index_name: String,
     pub table_name: String,
     pub column_name: String,
-    pub parser: String,       // e.g. "ngram"
-    pub ngram_n: usize,       // e.g. 2
-    pub normalize: String,    // e.g. "nfkc"
+    pub parser: String,    // e.g. "ngram"
+    pub ngram_n: usize,    // e.g. 2
+    pub normalize: String, // e.g. "nfkc"
 }
 
 #[derive(Debug, Clone)]

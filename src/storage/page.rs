@@ -11,7 +11,6 @@
 ///
 /// Cell Pointer: u16 (offset to cell data within page)
 /// Cell Data: [u16 len][payload bytes]
-
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_HEADER_SIZE: usize = 14;
 pub const CELL_POINTER_SIZE: usize = 2;
@@ -97,14 +96,12 @@ impl Page {
         let cell_offset = free_end - total_cell_size;
         let len = payload.len() as u16;
         self.data[cell_offset..cell_offset + 2].copy_from_slice(&len.to_le_bytes());
-        self.data[cell_offset + 2..cell_offset + 2 + payload.len()]
-            .copy_from_slice(payload);
+        self.data[cell_offset + 2..cell_offset + 2 + payload.len()].copy_from_slice(payload);
 
         // Write cell pointer
         let cell_idx = self.cell_count();
         let ptr_offset = free_start;
-        self.data[ptr_offset..ptr_offset + 2]
-            .copy_from_slice(&(cell_offset as u16).to_le_bytes());
+        self.data[ptr_offset..ptr_offset + 2].copy_from_slice(&(cell_offset as u16).to_le_bytes());
 
         self.set_cell_count(cell_idx + 1);
         self.set_free_start((free_start + CELL_POINTER_SIZE) as u16);
@@ -121,9 +118,8 @@ impl Page {
         let ptr_offset = PAGE_HEADER_SIZE + (index as usize) * CELL_POINTER_SIZE;
         let cell_offset =
             u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize;
-        let len = u16::from_le_bytes(
-            self.data[cell_offset..cell_offset + 2].try_into().unwrap(),
-        ) as usize;
+        let len = u16::from_le_bytes(self.data[cell_offset..cell_offset + 2].try_into().unwrap())
+            as usize;
         Some(&self.data[cell_offset + 2..cell_offset + 2 + len])
     }
 
@@ -135,9 +131,8 @@ impl Page {
         let ptr_offset = PAGE_HEADER_SIZE + (index as usize) * CELL_POINTER_SIZE;
         let cell_offset =
             u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize;
-        let len = u16::from_le_bytes(
-            self.data[cell_offset..cell_offset + 2].try_into().unwrap(),
-        ) as usize;
+        let len = u16::from_le_bytes(self.data[cell_offset..cell_offset + 2].try_into().unwrap())
+            as usize;
         Some((cell_offset + 2, len))
     }
 

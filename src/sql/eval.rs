@@ -1,15 +1,11 @@
 /// Expression evaluator for WHERE clauses.
-
 use crate::error::{MuroError, Result};
 use crate::sql::ast::{BinaryOp, Expr};
 use crate::types::Value;
 
 /// Evaluate an expression given a row's column values.
 /// `columns` maps column name -> Value.
-pub fn eval_expr(
-    expr: &Expr,
-    columns: &dyn Fn(&str) -> Option<Value>,
-) -> Result<Value> {
+pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result<Value> {
     match expr {
         Expr::IntLiteral(n) => Ok(Value::Int64(*n)),
         Expr::StringLiteral(s) => Ok(Value::Varchar(s.clone())),
@@ -17,9 +13,7 @@ pub fn eval_expr(
         Expr::Null => Ok(Value::Null),
 
         Expr::ColumnRef(name) => {
-            columns(name).ok_or_else(|| {
-                MuroError::Execution(format!("Unknown column: {}", name))
-            })
+            columns(name).ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", name)))
         }
 
         Expr::BinaryOp { left, op, right } => {
@@ -76,12 +70,54 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     }
 
     match op {
-        BinaryOp::Eq => Ok(Value::Int64(if value_cmp(left, right) == Some(std::cmp::Ordering::Equal) { 1 } else { 0 })),
-        BinaryOp::Ne => Ok(Value::Int64(if value_cmp(left, right) != Some(std::cmp::Ordering::Equal) { 1 } else { 0 })),
-        BinaryOp::Lt => Ok(Value::Int64(if value_cmp(left, right) == Some(std::cmp::Ordering::Less) { 1 } else { 0 })),
-        BinaryOp::Gt => Ok(Value::Int64(if value_cmp(left, right) == Some(std::cmp::Ordering::Greater) { 1 } else { 0 })),
-        BinaryOp::Le => Ok(Value::Int64(if matches!(value_cmp(left, right), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) { 1 } else { 0 })),
-        BinaryOp::Ge => Ok(Value::Int64(if matches!(value_cmp(left, right), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) { 1 } else { 0 })),
+        BinaryOp::Eq => Ok(Value::Int64(
+            if value_cmp(left, right) == Some(std::cmp::Ordering::Equal) {
+                1
+            } else {
+                0
+            },
+        )),
+        BinaryOp::Ne => Ok(Value::Int64(
+            if value_cmp(left, right) != Some(std::cmp::Ordering::Equal) {
+                1
+            } else {
+                0
+            },
+        )),
+        BinaryOp::Lt => Ok(Value::Int64(
+            if value_cmp(left, right) == Some(std::cmp::Ordering::Less) {
+                1
+            } else {
+                0
+            },
+        )),
+        BinaryOp::Gt => Ok(Value::Int64(
+            if value_cmp(left, right) == Some(std::cmp::Ordering::Greater) {
+                1
+            } else {
+                0
+            },
+        )),
+        BinaryOp::Le => Ok(Value::Int64(
+            if matches!(
+                value_cmp(left, right),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            ) {
+                1
+            } else {
+                0
+            },
+        )),
+        BinaryOp::Ge => Ok(Value::Int64(
+            if matches!(
+                value_cmp(left, right),
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+            ) {
+                1
+            } else {
+                0
+            },
+        )),
         BinaryOp::And => {
             let l = is_truthy(left);
             let r = is_truthy(right);
@@ -120,7 +156,10 @@ mod tests {
     #[test]
     fn test_eval_literals() {
         let lookup = |_: &str| -> Option<Value> { None };
-        assert_eq!(eval_expr(&Expr::IntLiteral(42), &lookup).unwrap(), Value::Int64(42));
+        assert_eq!(
+            eval_expr(&Expr::IntLiteral(42), &lookup).unwrap(),
+            Value::Int64(42)
+        );
         assert_eq!(
             eval_expr(&Expr::StringLiteral("hello".into()), &lookup).unwrap(),
             Value::Varchar("hello".into())

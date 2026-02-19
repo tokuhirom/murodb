@@ -2,7 +2,6 @@
 ///
 /// NATURAL: bigram tokenize query → look up postings → BM25 score
 /// BOOLEAN: parse +term, -term, "phrase" → evaluate constraints
-
 use std::collections::HashSet;
 
 use crate::error::Result;
@@ -86,7 +85,11 @@ pub fn query_natural(
     }
 
     // Sort by score descending
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(results)
 }
@@ -94,10 +97,10 @@ pub fn query_natural(
 /// Parsed boolean query element.
 #[derive(Debug)]
 enum BooleanTerm {
-    Must(String),       // +term
-    MustNot(String),    // -term
-    Phrase(String),     // "..."
-    Should(String),     // plain term (implicit AND in MVP)
+    Must(String),    // +term
+    MustNot(String), // -term
+    Phrase(String),  // "..."
+    Should(String),  // plain term (implicit AND in MVP)
 }
 
 /// Execute a BOOLEAN MODE query.
@@ -172,10 +175,7 @@ pub fn query_boolean(
     // For boolean mode, score is less important; use simple TF-based scoring
     let results: Vec<FtsResult> = final_docs
         .into_iter()
-        .map(|doc_id| FtsResult {
-            doc_id,
-            score: 1.0,
-        })
+        .map(|doc_id| FtsResult { doc_id, score: 1.0 })
         .collect();
 
     Ok(results)
@@ -241,11 +241,7 @@ fn parse_boolean_query(query: &str) -> Vec<BooleanTerm> {
 }
 
 /// Find documents matching a phrase (consecutive bigrams).
-fn find_phrase_matches(
-    fts_index: &FtsIndex,
-    pager: &mut Pager,
-    phrase: &str,
-) -> Result<Vec<u64>> {
+fn find_phrase_matches(fts_index: &FtsIndex, pager: &mut Pager, phrase: &str) -> Result<Vec<u64>> {
     let bigrams = tokenize_bigram(phrase);
     if bigrams.is_empty() {
         return Ok(Vec::new());
@@ -263,11 +259,7 @@ fn find_phrase_matches(
         return Ok(Vec::new());
     }
 
-    let first_docs: HashSet<u64> = postings[0]
-        .postings
-        .iter()
-        .map(|p| p.doc_id)
-        .collect();
+    let first_docs: HashSet<u64> = postings[0].postings.iter().map(|p| p.doc_id).collect();
 
     let mut candidate_docs: HashSet<u64> = first_docs;
     for pl in &postings[1..] {

@@ -5,7 +5,6 @@
 ///   "index:<name>" -> serialized IndexDef
 ///
 /// The catalog B-tree root is stored at a well-known page.
-
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::schema::column::ColumnDef;
@@ -58,21 +57,27 @@ impl TableDef {
         let mut offset = 0;
 
         // name
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let name_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
         let name = String::from_utf8(data[offset..offset + name_len].to_vec()).ok()?;
         offset += name_len;
 
         // column count
-        if data.len() < offset + 2 { return None; }
+        if data.len() < offset + 2 {
+            return None;
+        }
         let col_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
 
         // columns
         let mut columns = Vec::with_capacity(col_count);
         for _ in 0..col_count {
-            if data.len() < offset + 2 { return None; }
+            if data.len() < offset + 2 {
+                return None;
+            }
             let col_bytes_len =
                 u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
@@ -82,11 +87,15 @@ impl TableDef {
         }
 
         // pk_column
-        if data.len() < offset + 1 { return None; }
+        if data.len() < offset + 1 {
+            return None;
+        }
         let has_pk = data[offset];
         offset += 1;
         let pk_column = if has_pk == 1 {
-            if data.len() < offset + 2 { return None; }
+            if data.len() < offset + 2 {
+                return None;
+            }
             let pk_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
             let pk = String::from_utf8(data[offset..offset + pk_len].to_vec()).ok()?;
@@ -97,7 +106,9 @@ impl TableDef {
         };
 
         // data_btree_root
-        if data.len() < offset + 8 { return None; }
+        if data.len() < offset + 8 {
+            return None;
+        }
         let data_btree_root = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
 
         Some(TableDef {
@@ -152,11 +163,17 @@ impl SystemCatalog {
         // Check if table already exists
         let key = format!("table:{}", name);
         if self.catalog_btree.search(pager, key.as_bytes())?.is_some() {
-            return Err(MuroError::Schema(format!("Table '{}' already exists", name)));
+            return Err(MuroError::Schema(format!(
+                "Table '{}' already exists",
+                name
+            )));
         }
 
         // Find PK column
-        let pk_column = columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone());
+        let pk_column = columns
+            .iter()
+            .find(|c| c.is_primary_key)
+            .map(|c| c.name.clone());
 
         // Allocate a B-tree for the table data
         let data_btree = BTree::create(pager)?;
@@ -171,7 +188,8 @@ impl SystemCatalog {
 
         // Store in catalog
         let serialized = table_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
 
         Ok(table_def)
     }
@@ -189,16 +207,13 @@ impl SystemCatalog {
     pub fn update_table(&mut self, pager: &mut Pager, table_def: &TableDef) -> Result<()> {
         let key = format!("table:{}", table_def.name);
         let serialized = table_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
         Ok(())
     }
 
     /// Create an index definition and store it in the catalog.
-    pub fn create_index(
-        &mut self,
-        pager: &mut Pager,
-        index_def: IndexDef,
-    ) -> Result<IndexDef> {
+    pub fn create_index(&mut self, pager: &mut Pager, index_def: IndexDef) -> Result<IndexDef> {
         let key = format!("index:{}", index_def.name);
         if self.catalog_btree.search(pager, key.as_bytes())?.is_some() {
             return Err(MuroError::Schema(format!(
@@ -207,7 +222,8 @@ impl SystemCatalog {
             )));
         }
         let serialized = index_def.serialize();
-        self.catalog_btree.insert(pager, key.as_bytes(), &serialized)?;
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
         Ok(index_def)
     }
 
@@ -321,7 +337,9 @@ mod tests {
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
         let columns = vec![ColumnDef::new("id", DataType::Int64).primary_key()];
-        catalog.create_table(&mut pager, "t", columns.clone()).unwrap();
+        catalog
+            .create_table(&mut pager, "t", columns.clone())
+            .unwrap();
         assert!(catalog.create_table(&mut pager, "t", columns).is_err());
     }
 

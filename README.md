@@ -1,67 +1,50 @@
-# murodb
+# MuroDB
 
-Design Doc: Encrypted Embedded SQL DB with B-Tree + FTS (Japanese Bigram)
+Encrypted embedded SQL database with B-Tree + Full-Text Search (Japanese Bigram), written in Rust.
 
-0. Goals
+## Features
 
-Goals
+- **Transparent encryption** - AES-256-GCM-SIV (nonce-misuse resistant) for all pages and WAL
+- **B-tree storage** - PRIMARY KEY (INT64), UNIQUE indexes (single column)
+- **Full-text search** - Japanese bigram (n=2) with NFKC normalization
+  - MySQL-style `MATCH(col) AGAINST(...)` syntax
+  - NATURAL LANGUAGE MODE with BM25 scoring
+  - BOOLEAN MODE with `+term`, `-term`, `"phrase"` operators
+  - `fts_snippet()` for highlighted excerpts
+- **ACID transactions** - WAL-based crash recovery
+- **Concurrency** - Multiple readers / single writer (thread RwLock + process file lock)
+- **Single file** - Database file + WAL file
 
-組み込み用途で使える 単一ファイルDB
+## Current Status: MVP (Phase 0) Complete
 
-透過暗号化（DB/WAL/一時領域含めて平文断片を残さない）
+135 tests passing across unit and integration test suites.
 
-B-tree による
+### Implemented
 
-PRIMARY KEY (INT64)
+| Component | Description |
+|---|---|
+| `crypto/` | AES-256-GCM-SIV page encryption, Argon2 KDF, HMAC-SHA256 term blinding |
+| `storage/` | 4096B slotted pages, encrypted pager with LRU cache, freelist |
+| `btree/` | Insert/split, delete, search, scan, order-preserving key encoding |
+| `wal/` | Encrypted WAL records, writer/reader, crash recovery |
+| `tx/` | Transaction with dirty page buffer, commit/rollback |
+| `schema/` | System catalog, table/index definitions |
+| `sql/` | Hand-written lexer/parser, AST, rule-based planner, executor |
+| `fts/` | Bigram tokenizer, delta+varint postings, BM25, NATURAL/BOOLEAN queries, snippets |
+| `concurrency/` | parking_lot RwLock + fs4 file lock |
 
-UNIQUE（単一列、後で拡張可能）
+## SQL Surface
 
+### Types
 
-FTS（日本語 bigram n=2）
+- `INT64`
+- `VARCHAR`
+- `VARBINARY`
+- `NULL`
 
-MySQL風 MATCH(col) AGAINST(...)
+### DDL
 
-フレーズ検索（"..."）
-
-スニペット＋ハイライト
-
-
-トランザクション（ACIDのうち、特にA/D重視）
-
-並行性：Read並列 / Write単一（WAL + single-writer）
-
-
-Non-goals (MVP)
-
-JOIN / サブクエリ / 複雑なSQL最適化
-
-複合PK・複合UNIQUE
-
-collation（日本語ソートなど）
-
-ネットワーク越しのサーバープロトコル
-
-完全なアクセスパターン秘匿（ORAM等）
-
-
-
----
-
-1. Public SQL Surface
-
-1.1 Types
-
-INT64
-
-VARCHAR
-
-VARBINARY
-
-値として NULL を許容（型は3つでも NULL は必須）
-
-
-1.2 DDL
-
+```sql
 CREATE TABLE t (
   id INT64 PRIMARY KEY,
   body VARCHAR,
@@ -69,429 +52,124 @@ CREATE TABLE t (
   uniq VARCHAR UNIQUE
 );
 
-CREATE UNIQUE INDEX ... ON t(col); -- 追加のUNIQUE/INDEX用（MVPでは単一列）
-
-1.3 FTS DDL
-
-MySQLっぽさ優先で以下を採用：
+CREATE UNIQUE INDEX idx_email ON users(email);
 
 CREATE FULLTEXT INDEX t_body_fts ON t(body)
   WITH PARSER ngram
   OPTIONS (n=2, normalize='nfkc');
+```
 
-1.4 FTS Query API
+### DML
 
--- NATURAL (ranking)
+```sql
+INSERT INTO t (id, name) VALUES (1, 'Alice'), (2, 'Bob');
+
+SELECT * FROM t WHERE id = 42 ORDER BY id DESC LIMIT 10;
+
+UPDATE t SET name = 'Alicia' WHERE id = 1;
+
+DELETE FROM t WHERE id = 1;
+```
+
+### Full-Text Search
+
+```sql
+-- NATURAL LANGUAGE MODE (BM25 ranking)
 SELECT id, MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) AS score
 FROM t
 WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0
 ORDER BY score DESC
 LIMIT 20;
 
--- BOOLEAN (phrase / +/-)
+-- BOOLEAN MODE (phrase / +/-)
 SELECT id
 FROM t
 WHERE MATCH(body) AGAINST('"東京タワー" +夜景 -混雑' IN BOOLEAN MODE) > 0;
 
-1.5 Snippet API (独自)
-
-MySQLには標準が弱いので、DB拡張関数として提供：
-
-SELECT
-  id,
+-- Snippet with highlight
+SELECT id,
   fts_snippet(body, '"東京タワー"', '<mark>', '</mark>', 30) AS snippet
 FROM t
 WHERE MATCH(body) AGAINST('"東京タワー"' IN BOOLEAN MODE) > 0
-ORDER BY MATCH(body) AGAINST('"東京タワー"' IN BOOLEAN MODE) DESC
 LIMIT 10;
+```
 
-仕様：
+## Architecture
 
-fts_snippet(col, query, pre_tag, post_tag, context_chars)
+### Storage
 
-query は AGAINST に渡した文字列と同じでOK
+- **Page size**: 4096 bytes (slotted page layout)
+- **Encryption**: Each page encrypted with AES-256-GCM-SIV, AAD = (page_id, epoch)
+- **Cache**: LRU page cache (default 256 pages)
 
+### B-tree
 
+- Key encoding: INT64 (big-endian + sign flip for order preservation), VARCHAR/VARBINARY (raw bytes)
+- Clustered by PRIMARY KEY
+- Secondary indexes share the same B-tree implementation
 
----
+### FTS
 
-2. Concurrency & Locking
+- Tokenization: NFKC normalization + bigram (n=2)
+- Term IDs: HMAC-SHA256 blinded (no plaintext tokens on disk)
+- Postings: delta + varint compressed, stored in B-tree
+- Scoring: BM25
+- Phrase matching: consecutive bigram position verification
+- Snippet: local scan approach (Option B)
 
-2.1 Model
+### WAL & Recovery
 
-Multiple readers, single writer
+- Records: BEGIN, PAGE_PUT, COMMIT, ABORT
+- Recovery: replay committed transactions, discard uncommitted
+- All WAL records encrypted
 
-Read TX は開始時点のスナップショット（LSN）を見る
+### Concurrency
 
-Write TX は同時に1つだけ
+- Thread-level: `parking_lot::RwLock`
+- Process-level: `fs4` file lock
+- Model: multiple readers, single writer
 
+## Dependencies
 
-2.2 Locks (3-layer)
+| Crate | Purpose |
+|---|---|
+| `aes-gcm-siv` | AEAD encryption |
+| `argon2` | Passphrase KDF |
+| `hmac` + `sha2` | FTS term ID blinding |
+| `nom` | SQL lexer |
+| `unicode-normalization` | NFKC normalization |
+| `parking_lot` | RwLock |
+| `fs4` | File lock |
+| `lru` | Page cache |
+| `rand` | Nonce generation |
+| `thiserror` | Error types |
 
-1. Thread-level lock（同一プロセス内）
+## Non-goals (MVP)
 
+- JOIN / subqueries / complex SQL optimization
+- Composite PK / composite UNIQUE
+- Collation (Japanese sort order, etc.)
+- Network server protocol
+- Full access-pattern obfuscation (ORAM, etc.)
 
+## Roadmap
 
-RWLock：read shared / write exclusive
+### Phase 1
+- Auto-checkpoint (threshold-based)
+- fts_snippet acceleration (pos-to-offset map)
+- FTS stop-ngram filtering
+- Generalized CREATE INDEX (non-unique)
 
+### Phase 2
+- OS keychain integration
+- Key rotation (epoch-based re-encryption)
+- Composite UNIQUE / composite INDEX
 
-2. Process-level lock（複数プロセス対応）
+### Phase 3
+- JOIN / subqueries / improved optimizer
+- Online DDL
+- Embedded server API (connection pool, metrics)
 
+## License
 
-
-OSファイルロック
-
-共有ロック：reader
-
-排他ロック：writer / DDL
-
-
-
-3. DB-internal sequencing
-
-
-
-WALの追記順序、commit record の原子性、schema世代管理
-
-
-2.3 DDL Locking
-
-DDLは 完全排他
-
-MVPではオンラインDDLはしない（全トランザクション停止 → 実行）
-
-
-
----
-
-3. Storage Format
-
-3.1 File Layout (single file + WAL file)
-
-dbfile：ページストア（B-tree、メタ等）
-
-walfile：追記ログ（暗号化）
-
-
-（SQLiteに寄せて、WALは別ファイルが実装も運用も楽。将来単一ファイルに統合は可能だが後回し）
-
-3.2 Pages
-
-固定ページサイズ（例：4096 or 8192）
-
-各ページは暗号化して格納（後述）
-
-
-3.3 Core B-tree
-
-テーブル本体：rowid(INT64) でクラスタ化（もしくは PRIMARY KEY が INT64 単一ならそれをrowidとして扱う）
-
-secondary index / unique index：同一B-tree実装、is_unique フラグで制約化
-
-
-キーエンコード：
-
-INT64：符号付きを順序保存するエンコード（big-endian + bias）
-
-VARCHAR：UTF-8 bytes のバイナリ比較（NFKCなどはFTS側だけ。通常比較は生UTF-8）
-
-VARBINARY：bytes
-
-
-> UNIQUE の後変更を可能にするため、UNIQUEは「B-tree index の属性」に寄せる。
-
-
-
-
----
-
-4. Transaction, WAL, Crash Recovery
-
-4.1 WAL records (logical view)
-
-BEGIN(txid)
-
-PAGE_PUT(page_id, page_ciphertext)  ※実際は暗号化済みページ
-
-COMMIT(txid, commit_lsn)
-
-ABORT(txid)
-
-
-4.2 Snapshot
-
-Read TX: snapshot_lsn = current_committed_lsn
-
-Readは snapshot_lsn までのWALを反映した論理状態を読む
-
-
-4.3 Checkpoint
-
-WALが閾値超え（サイズ or record数）でチェックポイント
-
-チェックポイントは writerが実行（MVP）
-
-将来：低優先度バックグラウンドで自動化
-
-
-4.4 Atomicity
-
-COMMIT レコードが書けたら確定
-
-COMMIT 前にクラッシュしたTXは無視（redo only）
-
-
-
----
-
-5. Encryption
-
-5.1 Scope
-
-暗号化対象（必須）：
-
-DBページ
-
-WAL
-
-FTS postings / 統計 / pending
-
-一時領域（ソートやインデックス構築で必要なら）
-
-
-5.2 Primitive
-
-AEAD（認証付き暗号）
-
-AADに「ページID・世代」を入れる
-
-
-例（概念）：
-
-ciphertext = AEAD_Encrypt(key, nonce, aad=(page_id, epoch), plaintext=page_bytes)
-
-
-> 目的：改ざん検出 + リプレイ抑止の足場。
-
-
-
-5.3 Key Management (MVP)
-
-master key は外部供給（アプリが渡す）
-
-追加で「パスフレーズ → KDF → master key」もサポート（任意）
-
-将来：OSキーチェーン統合（macOS Keychain等）
-
-
-5.4 Key Rotation (Roadmap item)
-
-epoch を導入して、ページ再暗号化・段階移行を可能にする
-
-
-
----
-
-6. FTS (Japanese Bigram, Commit-time Update)
-
-6.1 Tokenization
-
-normalize: NFKC
-
-ngram: 2-gram
-
-入力 "東京タワー" → 東京 京タ タワ ワー
-
-
-6.2 Query Language
-
-NATURAL: 演算子なしの文字列 → bigram化 → BM25
-
-BOOLEAN:
-
-"..." phrase（隣接一致）
-
-+term must
-
--term must-not
-
-空白はAND（MVP）
-
-
-
-6.3 Index Data Model
-
-term_id = HMAC(term_key, ngram_bytes)（DB内に平文トークンを残さない）
-
-postings：term_id -> [(doc_id, positions...)]
-
-
-positions：
-
-ngram index（0,1,2...）として保持
-
-圧縮：delta + varint
-
-
-6.4 Phrase matching
-
-phrase "東京タワー" は bigram列が連続していること：
-
-pos(東京) と pos(京タ)-1 と pos(タワ)-2 と pos(ワー)-3 の交差があればヒット
-
-
-6.5 Snippet
-
-文書本文は ブロック単位暗号化（4KB〜16KB）
-
-ヒット位置近辺のブロックのみ復号し、前後 context_chars を切り出してハイライト
-
-
-（MVPでは pos -> byte_offset を簡易に推定しても良いが、品質のために次のいずれかを採用）
-
-Option A: docごとに pos -> byte_offset の圧縮マップを持つ（暗号化）
-
-Option B: ブロック復号後に局所的に走査してオフセットを探す（実装は簡単だが遅い）
-
-
-MVP推奨：Option B（まず動かす）→ RoadmapでAへ
-
-6.6 Commit-time update flow
-
-TX内：
-
-変更分を fts_pending に蓄積（add/update/delete） COMMIT時：
-
-
-1. pending を確定順に適用
-
-
-2. postingsを term_id ごとにマージ
-
-
-3. 統計（df/doc_len/avg）更新
-
-
-4. WALに書く
-
-
-
-ROLLBACK時：
-
-pending破棄のみ（FTS本体は触らない）
-
-
-
----
-
-7. UNIQUE constraint evolution
-
-前提：スキーマ変更は自分の制御下のみ、DDLは排他でOK。
-
-UNIQUE追加：全表スキャン → 重複チェック → UNIQUE index 構築
-
-UNIQUE削除：index drop で完了
-
-UNIQUE→non-unique：dropして作り直し（MVP）
-
-NULLの扱い：複数NULLを許可（UNIQUE上でNULLは相互に非衝突）
-
-
-
----
-
-8. Minimal Planner / Execution
-
-MVPのプランナはルールベースで十分：
-
-WHERE id = ? → PK B-tree seek
-
-WHERE col = ? かつ indexあり → index seek
-
-WHERE MATCH(col) AGAINST(...) → FTSノード
-
-ORDER BY score DESC LIMIT N → Top-N（スコア計算しながら）
-
-
-
----
-
-9. Testing Strategy
-
-crash recovery テスト（commit直前/直後/途中でプロセスkill）
-
-WAL再生の整合性
-
-暗号化：改ざん検出（1 byte flipでエラー）
-
-UNIQUE：追加・削除・重複検出
-
-FTS：bigram一致、フレーズ一致、スニペット生成
-
-
-
----
-
-Roadmap
-
-Phase 0 (MVP)
-
-B-tree (table + single-column indexes)
-
-PK(INT64), UNIQUE(single column)
-
-WAL + single writer + process file lock
-
-ページ暗号化 + WAL暗号化（AEAD）
-
-FTS bigram n=2
-
-MATCH/AGAINST NATURAL/BOOLEAN
-
-phrase "...", +/-（最低限）
-
-snippet（Option B: 局所走査）
-
-
-
-Phase 1
-
-自動チェックポイント（閾値ベース）
-
-fts_snippet 高速化（Option A: pos→offset map）
-
-FTS stop-ngram（頻出2-gram除外）でサイズ/速度改善
-
-CREATE INDEX（non-unique）を一般化
-
-
-Phase 2
-
-OSキーチェーン統合（プラットフォーム別）
-
-キーローテーション（epoch導入、段階再暗号化）
-
-複合UNIQUE/複合INDEX（タプルキーエンコード）
-
-
-Phase 3
-
-JOIN / サブクエリ / もう少しまともなオプティマイザ
-
-オンラインDDL（必要なら）
-
-サーバー組み込み向けAPI（接続プール想定、メトリクス）
-
-
-
----
-
-Open Decisions (後で良いがメモ)
-
-ページサイズ（4KB/8KB）
-
-WALの物理フォーマット（record framing、checksum）
-
-snippetのoffset mapの形式
-
-BOOLEAN MODEの演算子互換（MySQLにどこまで寄せるか）
+MIT License. See [LICENSE](LICENSE) for details.

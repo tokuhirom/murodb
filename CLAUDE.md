@@ -4,7 +4,7 @@
 
 ```bash
 cargo build          # ビルド
-cargo test           # 全テスト実行 (135 tests)
+cargo test           # 全テスト実行
 cargo test <name>    # 特定テスト実行 (例: cargo test fts)
 cargo clippy         # lint
 ```
@@ -57,5 +57,9 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 ## Known Limitations
 
 - Posting list が 4096B ページを超えるとエラー (大量文書の共通bigramで発生しうる)
-- JOIN / subquery 未対応
+- Subquery 未対応
 - Composite PK / Composite UNIQUE 未対応
+- DROP TABLE / ALTER TABLE 未対応
+- GROUP BY / 集約関数 未対応
+- LIKE / IN / BETWEEN 未対応
+- スカラー関数 (LENGTH, CONCAT 等) 未対応

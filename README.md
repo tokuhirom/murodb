@@ -45,11 +45,7 @@ Options:
 - `--create` — Create a new database
 - `--password <PW>` — Password (prompts if omitted)
 
-## Current Status: MVP (Phase 0) Complete
-
-135 tests passing across unit and integration test suites.
-
-### Implemented
+## Components
 
 | Component | Description |
 |---|---|
@@ -180,31 +176,115 @@ LIMIT 10;
 | `rand` | Nonce generation |
 | `thiserror` | Error types |
 
-## Non-goals (MVP)
+## Non-goals
 
-- JOIN / subqueries / complex SQL optimization
-- Composite PK / composite UNIQUE
-- Collation (Japanese sort order, etc.)
 - Network server protocol
 - Full access-pattern obfuscation (ORAM, etc.)
+- Stored procedures / triggers
 
 ## Roadmap
 
-### Phase 1
-- Auto-checkpoint (threshold-based)
-- fts_snippet acceleration (pos-to-offset map)
-- FTS stop-ngram filtering
-- Generalized CREATE INDEX (non-unique)
+### Implemented
 
-### Phase 2
-- OS keychain integration
-- Key rotation (epoch-based re-encryption)
-- Composite UNIQUE / composite INDEX
+- [x] Basic CRUD (INSERT, SELECT, UPDATE, DELETE)
+- [x] CREATE TABLE (PRIMARY KEY, UNIQUE, NOT NULL)
+- [x] CREATE INDEX / CREATE UNIQUE INDEX (single column)
+- [x] CREATE FULLTEXT INDEX (bigram, BM25, NATURAL/BOOLEAN mode, snippet)
+- [x] MySQL-compatible integer types (TINYINT, SMALLINT, INT, BIGINT)
+- [x] VARCHAR(n), VARBINARY(n), TEXT with size validation
+- [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
+- [x] AND, OR logical operators
+- [x] ORDER BY (ASC/DESC, multi-column), LIMIT
+- [x] JOIN (INNER, LEFT, CROSS) with table aliases
+- [x] BEGIN / COMMIT / ROLLBACK
+- [x] SHOW TABLES
+- [x] Multi-row INSERT
+- [x] Hidden _rowid auto-generation for tables without explicit PK
+- [x] AES-256-GCM-SIV encryption, Argon2 KDF
+- [x] WAL-based crash recovery
+- [x] CLI with REPL
 
-### Phase 3
-- JOIN / subqueries / improved optimizer
-- Online DDL
-- Embedded server API (connection pool, metrics)
+### Phase 1 — SQL Essentials
+
+Basic operators and DDL to make daily use practical.
+
+- [ ] DROP TABLE / DROP TABLE IF EXISTS
+- [ ] DROP INDEX
+- [ ] IF NOT EXISTS for CREATE TABLE / CREATE INDEX
+- [ ] SHOW CREATE TABLE
+- [ ] DESCRIBE / DESC table
+- [ ] LIKE / NOT LIKE (% and _ wildcards)
+- [ ] IN (value list)
+- [ ] BETWEEN ... AND ...
+- [ ] IS NULL / IS NOT NULL
+- [ ] NOT operator (general)
+- [ ] OFFSET (SELECT ... LIMIT n OFFSET m)
+- [ ] DEFAULT column values
+- [ ] AUTO_INCREMENT
+- [ ] Arithmetic operators in expressions (+, -, *, /, %)
+- [ ] BOOLEAN type (alias for TINYINT)
+- [ ] CHECK constraint
+
+### Phase 2 — Built-in Functions
+
+MySQL-compatible scalar functions.
+
+- [ ] String: LENGTH, CHAR_LENGTH, CONCAT, SUBSTRING/SUBSTR, UPPER, LOWER
+- [ ] String: TRIM, LTRIM, RTRIM, REPLACE, REVERSE, REPEAT
+- [ ] String: LEFT, RIGHT, LPAD, RPAD, INSTR/LOCATE
+- [ ] String: REGEXP / REGEXP_LIKE
+- [ ] Numeric: ABS, CEIL/CEILING, FLOOR, ROUND, MOD, POWER/POW
+- [ ] NULL handling: COALESCE, IFNULL, NULLIF, IF
+- [ ] Type conversion: CAST(expr AS type)
+- [ ] CASE WHEN ... THEN ... ELSE ... END
+
+### Phase 3 — Aggregation & Grouping
+
+- [ ] COUNT, SUM, AVG, MIN, MAX
+- [ ] COUNT(DISTINCT ...)
+- [ ] GROUP BY
+- [ ] HAVING
+- [ ] SELECT DISTINCT
+
+### Phase 4 — Schema Evolution
+
+- [ ] ALTER TABLE ADD COLUMN
+- [ ] ALTER TABLE DROP COLUMN
+- [ ] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
+- [ ] RENAME TABLE
+- [ ] Composite PRIMARY KEY
+- [ ] Composite UNIQUE / composite INDEX
+
+### Phase 5 — Advanced Query
+
+- [ ] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
+- [ ] UNION / UNION ALL
+- [ ] EXISTS / NOT EXISTS
+- [ ] INSERT ... ON DUPLICATE KEY UPDATE
+- [ ] REPLACE INTO
+- [ ] EXPLAIN (query plan display)
+- [ ] RIGHT JOIN
+
+### Phase 6 — Types & Storage
+
+- [ ] FLOAT / DOUBLE
+- [ ] DATE, DATETIME, TIMESTAMP
+- [ ] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
+- [ ] BLOB
+- [ ] Overflow pages (posting list > 4096B)
+
+### Phase 7 — Performance & Internals
+
+- [ ] Auto-checkpoint (threshold-based WAL)
+- [ ] Composite index range scan
+- [ ] Query optimizer improvements (cost-based)
+- [ ] FTS stop-ngram filtering
+- [ ] fts_snippet acceleration (pos-to-offset map)
+
+### Phase 8 — Security (Future)
+
+- [ ] Key rotation (epoch-based re-encryption)
+- [ ] Collation support (Japanese sort order, etc.)
 
 ## License
 

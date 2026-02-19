@@ -1,9 +1,9 @@
-//! MuroDB: Encrypted Embedded SQL Database with B-Tree + FTS (Japanese Bigram)
+//! MuroDB: Encrypted Embedded SQL Database with B-Tree + FTS (Bigram)
 //!
 //! A single-file encrypted database with:
 //! - AES-256-GCM-SIV transparent encryption
 //! - B-tree based storage with PRIMARY KEY and UNIQUE indexes
-//! - Full-text search with Japanese bigram tokenization
+//! - Full-text search with bigram tokenization
 //! - WAL-based crash recovery
 //! - Multiple readers / single writer concurrency
 

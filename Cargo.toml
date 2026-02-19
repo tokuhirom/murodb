@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Tokuhiro Matsuno"]
-description = "Encrypted embedded SQL database with B-Tree + FTS (Japanese Bigram)"
+description = "Encrypted embedded SQL database with B-Tree + FTS (Bigram)"
 
 [dependencies]
 nom = "7"

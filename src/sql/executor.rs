@@ -59,6 +59,7 @@ fn execute_statement(
         Statement::Select(sel) => exec_select(sel, pager, catalog),
         Statement::Update(upd) => exec_update(upd, pager, catalog),
         Statement::Delete(del) => exec_delete(del, pager, catalog),
+        Statement::ShowTables => exec_show_tables(pager, catalog),
     }
 }
 
@@ -447,6 +448,20 @@ fn exec_delete(
     }
 
     Ok(ExecResult::RowsAffected(count))
+}
+
+fn exec_show_tables(
+    pager: &mut Pager,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let tables = catalog.list_tables(pager)?;
+    let rows = tables
+        .into_iter()
+        .map(|name| Row {
+            values: vec![("Table".to_string(), Value::Varchar(name))],
+        })
+        .collect();
+    Ok(ExecResult::Rows(rows))
 }
 
 // --- Row serialization ---

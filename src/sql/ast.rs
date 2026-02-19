@@ -9,6 +9,7 @@ pub enum Statement {
     Select(Select),
     Update(Update),
     Delete(Delete),
+    ShowTables,
 }
 
 #[derive(Debug, Clone)]

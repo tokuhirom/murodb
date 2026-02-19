@@ -15,6 +15,36 @@ Encrypted embedded SQL database with B-Tree + Full-Text Search (Bigram), written
 - **Concurrency** - Multiple readers / single writer (thread RwLock + process file lock)
 - **Single file** - Database file + WAL file
 
+## Install
+
+```bash
+cargo install --path .
+```
+
+## Usage
+
+```bash
+# Create a new database
+murodb mydb.db --create -e "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)"
+
+# Insert data
+murodb mydb.db -e "INSERT INTO t (id, name) VALUES (1, 'hello')"
+
+# Query
+murodb mydb.db -e "SELECT * FROM t"
+
+# Show tables
+murodb mydb.db -e "SHOW TABLES"
+
+# Interactive REPL
+murodb mydb.db
+```
+
+Options:
+- `-e <SQL>` — Execute SQL and exit
+- `--create` — Create a new database
+- `--password <PW>` — Password (prompts if omitted)
+
 ## Current Status: MVP (Phase 0) Complete
 
 135 tests passing across unit and integration test suites.

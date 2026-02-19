@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::concurrency::LockManager;
 use crate::crypto::aead::MasterKey;
+use crate::crypto::kdf;
 use crate::error::Result;
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
@@ -42,6 +43,7 @@ impl Database {
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
         let catalog = SystemCatalog::create(&mut pager)?;
+        pager.set_catalog_root(catalog.root_page_id());
         let lock_manager = LockManager::new(path)?;
         pager.flush_meta()?;
 
@@ -53,9 +55,10 @@ impl Database {
         })
     }
 
-    /// Open an existing database. `catalog_root` is the catalog B-tree root page ID.
-    pub fn open(path: &Path, master_key: &MasterKey, catalog_root: u64) -> Result<Self> {
+    /// Open an existing database.
+    pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let pager = Pager::open(path, master_key)?;
+        let catalog_root = pager.catalog_root();
         let catalog = SystemCatalog::open(catalog_root);
         let lock_manager = LockManager::new(path)?;
 
@@ -65,6 +68,31 @@ impl Database {
             lock_manager,
             db_path: path.to_path_buf(),
         })
+    }
+
+    /// Create a new database with a password.
+    pub fn create_with_password(path: &Path, password: &str) -> Result<Self> {
+        let salt = kdf::generate_salt();
+        let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
+        let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
+        let catalog = SystemCatalog::create(&mut pager)?;
+        pager.set_catalog_root(catalog.root_page_id());
+        let lock_manager = LockManager::new(path)?;
+        pager.flush_meta()?;
+
+        Ok(Database {
+            pager,
+            catalog,
+            lock_manager,
+            db_path: path.to_path_buf(),
+        })
+    }
+
+    /// Open an existing database with a password.
+    pub fn open_with_password(path: &Path, password: &str) -> Result<Self> {
+        let salt = Pager::read_salt_from_file(path)?;
+        let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
+        Self::open(path, &master_key)
     }
 
     /// Execute a SQL statement. Returns the result.
@@ -89,6 +117,7 @@ impl Database {
 
     /// Flush all data to disk.
     pub fn flush(&mut self) -> Result<()> {
+        self.pager.set_catalog_root(self.catalog.root_page_id());
         self.pager.flush_meta()
     }
 }

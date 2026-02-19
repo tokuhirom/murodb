@@ -13,10 +13,17 @@ use crate::storage::page::{Page, PageId, PAGE_SIZE};
 /// On-disk encrypted page size = nonce(12) + ciphertext(4096) + tag(16) = 4124
 const ENCRYPTED_PAGE_SIZE: usize = PAGE_SIZE + PageCrypto::overhead();
 
-/// DB file header stored in page 0 (first 64 bytes of plaintext page 0).
-/// Magic(8) + version(4) + page_count(8) + freelist_page(8) + epoch(8) + salt(16) + reserved
+/// Plaintext file header size (written before any encrypted pages).
+/// Layout:
+///   0..8    Magic "MURODB01"
+///   8..12   Format version (u32 LE)
+///   12..28  Salt (16 bytes, for Argon2 KDF)
+///   28..36  Catalog root page ID (u64 LE)
+///   36..44  Page count (u64 LE)
+///   44..52  Epoch (u64 LE)
+///   52..64  Reserved (zero-filled)
+const PLAINTEXT_HEADER_SIZE: u64 = 64;
 const MAGIC: &[u8; 8] = b"MURODB01";
-const DB_HEADER_SIZE: usize = 64;
 
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
@@ -26,13 +33,15 @@ pub struct Pager {
     crypto: PageCrypto,
     page_count: u64,
     epoch: u64,
+    catalog_root: u64,
+    salt: [u8; 16],
     freelist: FreeList,
     cache: LruCache<PageId, Page>,
 }
 
 impl Pager {
-    /// Create a new database file.
-    pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
+    /// Create a new database file with the given salt.
+    pub fn create_with_salt(path: &Path, master_key: &MasterKey, salt: [u8; 16]) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -45,18 +54,23 @@ impl Pager {
         let mut pager = Pager {
             file,
             crypto,
-            page_count: 1, // page 0 is the meta page
+            page_count: 0,
             epoch: 0,
+            catalog_root: 0,
+            salt,
             freelist: FreeList::new(),
             cache,
         };
 
-        // Write page 0 (meta/header page)
-        let mut meta_page = Page::new(0);
-        pager.write_db_header(&mut meta_page);
-        pager.write_page_to_disk(&meta_page)?;
+        // Write the plaintext header
+        pager.write_plaintext_header()?;
 
         Ok(pager)
+    }
+
+    /// Create a new database file (legacy API, generates a zero salt).
+    pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
+        Self::create_with_salt(path, master_key, [0u8; 16])
     }
 
     /// Open an existing database file.
@@ -74,49 +88,69 @@ impl Pager {
             crypto,
             page_count: 0,
             epoch: 0,
+            catalog_root: 0,
+            salt: [0u8; 16],
             freelist: FreeList::new(),
             cache,
         };
 
-        // Read meta page to get DB header
-        let meta_page = pager.read_page_from_disk(0)?;
-        pager.read_db_header(&meta_page)?;
+        pager.read_plaintext_header()?;
+
+        // Verify that decryption works by reading page 0 if there are pages
+        if pager.page_count > 0 {
+            let _page0 = pager.read_page_from_disk(0)?;
+        }
 
         Ok(pager)
     }
 
-    /// Write DB header into page 0's data area.
-    fn write_db_header(&self, page: &mut Page) {
-        let mut header = [0u8; DB_HEADER_SIZE];
-        header[0..8].copy_from_slice(MAGIC);
-        header[8..12].copy_from_slice(&1u32.to_le_bytes()); // version
-        header[12..20].copy_from_slice(&self.page_count.to_le_bytes());
-        header[20..28].copy_from_slice(&self.epoch.to_le_bytes());
-        // Bytes 28..64 reserved
+    /// Read the plaintext header from the file to verify magic and extract salt.
+    /// This does NOT require a master key and can be called on a raw file.
+    pub fn read_salt_from_file(path: &Path) -> Result<[u8; 16]> {
+        let mut file = File::open(path)?;
+        let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
+        file.read_exact(&mut header)?;
 
-        // Store header as a cell in page 0
-        // Clear the page first and write header as first cell
-        *page = Page::new(0);
-        page.insert_cell(&header).expect("header fits in page");
-    }
-
-    /// Read DB header from page 0.
-    fn read_db_header(&mut self, page: &Page) -> Result<()> {
-        let header = page.cell(0).ok_or_else(|| {
-            MuroError::InvalidPage
-        })?;
-
-        if header.len() < DB_HEADER_SIZE {
+        if &header[0..8] != MAGIC {
             return Err(MuroError::InvalidPage);
         }
+
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&header[12..28]);
+        Ok(salt)
+    }
+
+    /// Write the plaintext file header.
+    fn write_plaintext_header(&mut self) -> Result<()> {
+        let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
+        header[0..8].copy_from_slice(MAGIC);
+        header[8..12].copy_from_slice(&1u32.to_le_bytes()); // version
+        header[12..28].copy_from_slice(&self.salt);
+        header[28..36].copy_from_slice(&self.catalog_root.to_le_bytes());
+        header[36..44].copy_from_slice(&self.page_count.to_le_bytes());
+        header[44..52].copy_from_slice(&self.epoch.to_le_bytes());
+        // 52..64 reserved (already zero)
+
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&header)?;
+        Ok(())
+    }
+
+    /// Read the plaintext file header.
+    fn read_plaintext_header(&mut self) -> Result<()> {
+        let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.read_exact(&mut header)?;
 
         if &header[0..8] != MAGIC {
             return Err(MuroError::InvalidPage);
         }
 
         let _version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        self.page_count = u64::from_le_bytes(header[12..20].try_into().unwrap());
-        self.epoch = u64::from_le_bytes(header[20..28].try_into().unwrap());
+        self.salt.copy_from_slice(&header[12..28]);
+        self.catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
+        self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
+        self.epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
 
         Ok(())
     }
@@ -161,7 +195,7 @@ impl Pager {
 
     /// Read an encrypted page from disk and decrypt it.
     fn read_page_from_disk(&mut self, page_id: PageId) -> Result<Page> {
-        let offset = page_id as u64 * ENCRYPTED_PAGE_SIZE as u64;
+        let offset = PLAINTEXT_HEADER_SIZE + page_id * ENCRYPTED_PAGE_SIZE as u64;
         self.file.seek(SeekFrom::Start(offset))?;
 
         let mut encrypted = vec![0u8; ENCRYPTED_PAGE_SIZE];
@@ -183,17 +217,15 @@ impl Pager {
         let page_id = page.page_id();
         let encrypted = self.crypto.encrypt(page_id, self.epoch, page.as_bytes())?;
 
-        let offset = page_id as u64 * ENCRYPTED_PAGE_SIZE as u64;
+        let offset = PLAINTEXT_HEADER_SIZE + page_id * ENCRYPTED_PAGE_SIZE as u64;
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(&encrypted)?;
         Ok(())
     }
 
-    /// Flush the meta page (page 0) with current state.
+    /// Flush the plaintext header with current state.
     pub fn flush_meta(&mut self) -> Result<()> {
-        let mut meta_page = Page::new(0);
-        self.write_db_header(&mut meta_page);
-        self.write_page_to_disk(&meta_page)?;
+        self.write_plaintext_header()?;
         self.file.sync_all()?;
         Ok(())
     }
@@ -206,6 +238,21 @@ impl Pager {
     /// Get current epoch.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Get catalog root page ID.
+    pub fn catalog_root(&self) -> u64 {
+        self.catalog_root
+    }
+
+    /// Set catalog root page ID.
+    pub fn set_catalog_root(&mut self, root: u64) {
+        self.catalog_root = root;
+    }
+
+    /// Get salt.
+    pub fn salt(&self) -> &[u8; 16] {
+        &self.salt
     }
 
     /// Sync file to disk.
@@ -232,13 +279,14 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         {
-            let pager = Pager::create(&path, &test_key()).unwrap();
-            assert_eq!(pager.page_count(), 1); // meta page
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            assert_eq!(pager.page_count(), 0);
+            pager.flush_meta().unwrap();
         }
 
         {
             let pager = Pager::open(&path, &test_key()).unwrap();
-            assert_eq!(pager.page_count(), 1);
+            assert_eq!(pager.page_count(), 0);
         }
 
         std::fs::remove_file(&path).ok();
@@ -269,14 +317,14 @@ mod tests {
 
         {
             let mut pager = Pager::open(&path, &test_key()).unwrap();
-            assert_eq!(pager.page_count(), 3); // meta + 2 data pages
+            assert_eq!(pager.page_count(), 2);
 
-            let page = pager.read_page(1).unwrap();
+            let page = pager.read_page(0).unwrap();
             assert_eq!(page.cell_count(), 2);
             assert_eq!(page.cell(0), Some(b"hello world".as_slice()));
             assert_eq!(page.cell(1), Some(b"second cell".as_slice()));
 
-            let page2 = pager.read_page(2).unwrap();
+            let page2 = pager.read_page(1).unwrap();
             assert_eq!(page2.cell(0), Some(b"page two data".as_slice()));
         }
 
@@ -291,7 +339,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         {
-            let _pager = Pager::create(&path, &test_key()).unwrap();
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            // Write at least one page so open can verify decryption
+            let page = pager.allocate_page().unwrap();
+            pager.write_page(&page).unwrap();
+            pager.flush_meta().unwrap();
         }
 
         {
@@ -319,14 +371,14 @@ mod tests {
         let page2 = pager.allocate_page().unwrap();
         pager.write_page(&page2).unwrap();
 
-        assert_eq!(pager.page_count(), 3);
+        assert_eq!(pager.page_count(), 2);
 
         // Free page1 and reallocate - should get the same ID
         pager.free_page(page1_id);
         let page3 = pager.allocate_page().unwrap();
         assert_eq!(page3.page_id(), page1_id);
         // page_count should not increase since we reused a free page
-        assert_eq!(pager.page_count(), 3);
+        assert_eq!(pager.page_count(), 2);
 
         std::fs::remove_file(&path).ok();
     }
@@ -345,9 +397,51 @@ mod tests {
         pager.write_page(&page).unwrap();
 
         // Read twice - second should come from cache
-        let p1 = pager.read_page(1).unwrap();
-        let p2 = pager.read_page(1).unwrap();
+        let p1 = pager.read_page(0).unwrap();
+        let p2 = pager.read_page(0).unwrap();
         assert_eq!(p1.cell(0), p2.cell(0));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_catalog_root_persistence() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            pager.set_catalog_root(42);
+            pager.flush_meta().unwrap();
+        }
+
+        {
+            let pager = Pager::open(&path, &test_key()).unwrap();
+            assert_eq!(pager.catalog_root(), 42);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_salt_persistence() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        let salt = [0xAB; 16];
+        {
+            let mut pager = Pager::create_with_salt(&path, &test_key(), salt).unwrap();
+            pager.flush_meta().unwrap();
+        }
+
+        {
+            let read_salt = Pager::read_salt_from_file(&path).unwrap();
+            assert_eq!(read_salt, salt);
+        }
 
         std::fs::remove_file(&path).ok();
     }

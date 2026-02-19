@@ -52,6 +52,7 @@ impl Parser {
             Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
+            Some(Token::Show) => self.parse_show()?,
             Some(t) => return Err(format!("Unexpected token: {:?}", t)),
             None => return Err("Empty input".into()),
         };
@@ -228,6 +229,17 @@ impl Parser {
             ngram_n,
             normalize,
         })
+    }
+
+    fn parse_show(&mut self) -> Result<Statement, String> {
+        self.advance(); // consume SHOW
+        match self.peek() {
+            Some(Token::Tables) => {
+                self.advance();
+                Ok(Statement::ShowTables)
+            }
+            _ => Err("Expected TABLES after SHOW".into()),
+        }
     }
 
     fn parse_insert(&mut self) -> Result<Insert, String> {

@@ -46,6 +46,8 @@ pub enum Token {
     Language,
     Mode,
     Boolean,
+    Show,
+    Tables,
     PrimaryKey,  // "PRIMARY KEY" as a combined token
     Int64Type,   // "INT64"
     VarcharType, // "VARCHAR"
@@ -226,6 +228,8 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "LANGUAGE" => Token::Language,
         "MODE" => Token::Mode,
         "BOOLEAN" => Token::Boolean,
+        "SHOW" => Token::Show,
+        "TABLES" => Token::Tables,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"
             let rest = remaining.trim_start();

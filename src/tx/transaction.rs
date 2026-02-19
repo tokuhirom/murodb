@@ -164,7 +164,7 @@ mod tests {
         assert!(lsn > 0);
 
         // Verify data is persisted
-        let page = pager.read_page(1).unwrap();
+        let page = pager.read_page(0).unwrap();
         assert_eq!(page.cell(0), Some(b"tx data".as_slice()));
     }
 

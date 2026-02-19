@@ -5,11 +5,15 @@ pub enum Statement {
     CreateTable(CreateTable),
     CreateIndex(CreateIndex),
     CreateFulltextIndex(CreateFulltextIndex),
+    DropTable(DropTable),
+    DropIndex(DropIndex),
     Insert(Insert),
     Select(Select),
     Update(Update),
     Delete(Delete),
     ShowTables,
+    ShowCreateTable(String),
+    Describe(String),
     Begin,
     Commit,
     Rollback,
@@ -19,6 +23,7 @@ pub enum Statement {
 pub struct CreateTable {
     pub table_name: String,
     pub columns: Vec<ColumnSpec>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +33,9 @@ pub struct ColumnSpec {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_nullable: bool,
+    pub default_value: Option<Expr>,
+    pub auto_increment: bool,
+    pub check_expr: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +44,7 @@ pub struct CreateIndex {
     pub table_name: String,
     pub column_name: String,
     pub is_unique: bool,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +55,18 @@ pub struct CreateFulltextIndex {
     pub parser: String,    // e.g. "ngram"
     pub ngram_n: usize,    // e.g. 2
     pub normalize: String, // e.g. "nfkc"
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTable {
+    pub table_name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndex {
+    pub index_name: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +100,7 @@ pub struct Select {
     pub where_clause: Option<Expr>,
     pub order_by: Option<Vec<OrderByItem>>,
     pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,11 +134,36 @@ pub enum Expr {
     StringLiteral(String),
     BlobLiteral(Vec<u8>),
     Null,
+    DefaultValue,
     ColumnRef(String),
     BinaryOp {
         left: Box<Expr>,
         op: BinaryOp,
         right: Box<Expr>,
+    },
+    UnaryOp {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+    Like {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        negated: bool,
+    },
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negated: bool,
+    },
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool, // true = IS NOT NULL
     },
     MatchAgainst {
         column: String,
@@ -144,6 +191,17 @@ pub enum BinaryOp {
     Ge,
     And,
     Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

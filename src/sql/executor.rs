@@ -1,5 +1,5 @@
 /// SQL executor: executes statements against the B-tree storage.
-use crate::btree::key_encoding::encode_i64;
+use crate::btree::key_encoding::{encode_i16, encode_i32, encode_i64, encode_i8};
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::schema::catalog::{SystemCatalog, TableDef};
@@ -128,10 +128,12 @@ fn exec_create_index(
 
     let idx_btree = BTree::create(pager)?;
 
+    let col_idx = table_def.column_index(&ci.column_name).unwrap();
+    let col_data_type = table_def.columns[col_idx].data_type;
+
     // If unique, scan existing data for duplicates
     if ci.is_unique {
         let data_btree = BTree::open(table_def.data_btree_root);
-        let col_idx = table_def.column_index(&ci.column_name).unwrap();
 
         let mut seen_keys: Vec<Vec<u8>> = Vec::new();
         data_btree.scan(pager, |_k, v| {
@@ -139,7 +141,7 @@ fn exec_create_index(
             if col_idx < row_values.len() {
                 let val = &row_values[col_idx];
                 if !val.is_null() {
-                    let encoded = encode_value(val);
+                    let encoded = encode_value(val, &col_data_type);
                     if seen_keys.contains(&encoded) {
                         return Err(MuroError::UniqueViolation(format!(
                             "Duplicate value in column '{}'",
@@ -155,7 +157,6 @@ fn exec_create_index(
 
     // Collect existing data for index building
     let data_btree = BTree::open(table_def.data_btree_root);
-    let col_idx = table_def.column_index(&ci.column_name).unwrap();
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
     data_btree.scan(pager, |pk_key, v| {
@@ -163,7 +164,7 @@ fn exec_create_index(
         if col_idx < row_values.len() {
             let val = &row_values[col_idx];
             if !val.is_null() {
-                let idx_key = encode_value(val);
+                let idx_key = encode_value(val, &col_data_type);
                 entries.push((idx_key, pk_key.to_vec()));
             }
         }
@@ -212,11 +213,19 @@ fn exec_insert(
             .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
         if table_def.columns[pk_idx].is_hidden && values[pk_idx].is_null() {
             table_def.next_rowid += 1;
-            values[pk_idx] = Value::Int64(table_def.next_rowid);
+            values[pk_idx] = Value::Integer(table_def.next_rowid);
+        }
+
+        // Validate all values against their column types
+        for (i, val) in values.iter().enumerate() {
+            if !val.is_null() {
+                validate_value(val, &table_def.columns[i].data_type)?;
+            }
         }
 
         let pk_value = &values[pk_idx];
-        let pk_key = encode_value(pk_value);
+        let pk_data_type = &table_def.columns[pk_idx].data_type;
+        let pk_key = encode_value(pk_value, pk_data_type);
 
         // Check PK uniqueness
         if data_btree.search(pager, &pk_key)?.is_some() {
@@ -234,7 +243,7 @@ fn exec_insert(
                 })?;
                 let val = &values[col_idx];
                 if !val.is_null() {
-                    let idx_key = encode_value(val);
+                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
                     let idx_btree = BTree::open(idx.btree_root);
                     if idx_btree.search(pager, &idx_key)?.is_some() {
                         return Err(MuroError::UniqueViolation(format!(
@@ -256,7 +265,7 @@ fn exec_insert(
                 let col_idx = table_def.column_index(&idx.column_name).unwrap();
                 let val = &values[col_idx];
                 if !val.is_null() {
-                    let idx_key = encode_value(val);
+                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
                     let mut idx_btree = BTree::open(idx.btree_root);
                     idx_btree.insert(pager, &idx_key, &pk_key)?;
                 }
@@ -305,7 +314,8 @@ fn exec_select(
     match plan {
         Plan::PkSeek { key_expr, .. } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
-            let pk_key = encode_value(&key_val);
+            let pk_idx = table_def.pk_column_index().unwrap();
+            let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
             let data_btree = BTree::open(table_def.data_btree_root);
             if let Some(data) = data_btree.search(pager, &pk_key)? {
                 let values = deserialize_row(&data, &table_def.columns)?;
@@ -322,8 +332,9 @@ fn exec_select(
             ..
         } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
-            let idx_key = encode_value(&key_val);
             let idx = indexes.iter().find(|i| i.name == index_name).unwrap();
+            let idx_col_idx = table_def.column_index(&idx.column_name).unwrap();
+            let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
             let idx_btree = BTree::open(idx.btree_root);
             if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
                 let data_btree = BTree::open(table_def.data_btree_root);
@@ -760,7 +771,7 @@ fn exec_show_tables(pager: &mut impl PageStore, catalog: &mut SystemCatalog) -> 
 
 // --- Row serialization ---
 // Format: [null_bitmap][value1][value2]...
-// Each value: for INT64: 8 bytes; for VARCHAR/VARBINARY: u32 len + bytes
+// Each value: for integers: 1/2/4/8 bytes by type; for VARCHAR/TEXT/VARBINARY: u32 len + bytes
 
 pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -776,12 +787,18 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     buf.extend_from_slice(&bitmap);
 
     // Values
-    for val in values.iter() {
+    for (i, val) in values.iter().enumerate() {
         if val.is_null() {
             continue;
         }
         match val {
-            Value::Int64(n) => buf.extend_from_slice(&n.to_le_bytes()),
+            Value::Integer(n) => match columns[i].data_type {
+                DataType::TinyInt => buf.extend_from_slice(&(*n as i8).to_le_bytes()),
+                DataType::SmallInt => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
+                DataType::Int => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
+                DataType::BigInt => buf.extend_from_slice(&n.to_le_bytes()),
+                _ => buf.extend_from_slice(&n.to_le_bytes()),
+            },
             Value::Varchar(s) => {
                 let bytes = s.as_bytes();
                 buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -816,15 +833,39 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
         }
 
         match col.data_type {
-            DataType::Int64 => {
+            DataType::TinyInt => {
+                if offset + 1 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = data[offset] as i8;
+                values.push(Value::Integer(n as i64));
+                offset += 1;
+            }
+            DataType::SmallInt => {
+                if offset + 2 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = i16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                values.push(Value::Integer(n as i64));
+                offset += 2;
+            }
+            DataType::Int => {
+                if offset + 4 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                values.push(Value::Integer(n as i64));
+                offset += 4;
+            }
+            DataType::BigInt => {
                 if offset + 8 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
                 let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-                values.push(Value::Int64(n));
+                values.push(Value::Integer(n));
                 offset += 8;
             }
-            DataType::Varchar => {
+            DataType::Varchar(_) | DataType::Text => {
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
@@ -838,7 +879,7 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
                 values.push(Value::Varchar(s));
                 offset += len;
             }
-            DataType::Varbinary => {
+            DataType::Varbinary(_) => {
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
@@ -857,12 +898,58 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
 }
 
 /// Encode a Value for use as a B-tree key.
-pub fn encode_value(value: &Value) -> Vec<u8> {
-    match value {
-        Value::Int64(n) => encode_i64(*n).to_vec(),
-        Value::Varchar(s) => s.as_bytes().to_vec(),
-        Value::Varbinary(b) => b.clone(),
-        Value::Null => Vec::new(),
+/// For integer types, the encoding width depends on the DataType.
+pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
+    match (value, data_type) {
+        (Value::Integer(n), DataType::TinyInt) => encode_i8(*n as i8).to_vec(),
+        (Value::Integer(n), DataType::SmallInt) => encode_i16(*n as i16).to_vec(),
+        (Value::Integer(n), DataType::Int) => encode_i32(*n as i32).to_vec(),
+        (Value::Integer(n), DataType::BigInt) => encode_i64(*n).to_vec(),
+        (Value::Integer(n), _) => encode_i64(*n).to_vec(),
+        (Value::Varchar(s), _) => s.as_bytes().to_vec(),
+        (Value::Varbinary(b), _) => b.clone(),
+        (Value::Null, _) => Vec::new(),
+    }
+}
+
+/// Validate that a value fits within the constraints of the data type.
+fn validate_value(value: &Value, data_type: &DataType) -> Result<()> {
+    match (value, data_type) {
+        (Value::Integer(n), DataType::TinyInt) if *n < -128 || *n > 127 => {
+            Err(MuroError::Execution(format!(
+                "Value {} out of range for TINYINT (-128 to 127)",
+                n
+            )))
+        }
+        (Value::Integer(n), DataType::SmallInt) if *n < -32768 || *n > 32767 => {
+            Err(MuroError::Execution(format!(
+                "Value {} out of range for SMALLINT (-32768 to 32767)",
+                n
+            )))
+        }
+        (Value::Integer(n), DataType::Int) if *n < i32::MIN as i64 || *n > i32::MAX as i64 => {
+            Err(MuroError::Execution(format!(
+                "Value {} out of range for INT ({} to {})",
+                n,
+                i32::MIN,
+                i32::MAX
+            )))
+        }
+        (Value::Varchar(s), DataType::Varchar(Some(max))) if s.len() as u32 > *max => {
+            Err(MuroError::Execution(format!(
+                "String length {} exceeds VARCHAR({})",
+                s.len(),
+                max
+            )))
+        }
+        (Value::Varbinary(b), DataType::Varbinary(Some(max))) if b.len() as u32 > *max => {
+            Err(MuroError::Execution(format!(
+                "Binary length {} exceeds VARBINARY({})",
+                b.len(),
+                max
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -966,7 +1053,7 @@ fn build_row(
 
 fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     match (a, b) {
-        (Some(Value::Int64(a)), Some(Value::Int64(b))) => a.cmp(b),
+        (Some(Value::Integer(a)), Some(Value::Integer(b))) => a.cmp(b),
         (Some(Value::Varchar(a)), Some(Value::Varchar(b))) => a.cmp(b),
         (Some(Value::Null), _) | (None, _) => std::cmp::Ordering::Less,
         (_, Some(Value::Null)) | (_, None) => std::cmp::Ordering::Greater,
@@ -998,7 +1085,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1032,7 +1119,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1065,7 +1152,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1098,7 +1185,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1125,7 +1212,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1152,8 +1239,8 @@ mod tests {
         .unwrap();
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0].get("id"), Some(&Value::Int64(3)));
-            assert_eq!(rows[1].get("id"), Some(&Value::Int64(2)));
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(3)));
+            assert_eq!(rows[1].get("id"), Some(&Value::Integer(2)));
         }
     }
 
@@ -1162,7 +1249,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, email VARCHAR UNIQUE)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR UNIQUE)",
             &mut pager,
             &mut catalog,
         )
@@ -1204,7 +1291,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )
@@ -1222,7 +1309,7 @@ mod tests {
         let (mut pager, mut catalog, _dir) = setup();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )

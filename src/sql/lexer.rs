@@ -56,9 +56,13 @@ pub enum Token {
     Show,
     Tables,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
-    Int64Type,     // "INT64"
+    TinyIntType,   // "TINYINT"
+    SmallIntType,  // "SMALLINT"
+    IntType,       // "INT" / "INTEGER"
+    BigIntType,    // "BIGINT"
     VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
+    TextType,      // "TEXT"
 
     // Literals
     Integer(i64),
@@ -257,9 +261,13 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
             }
             Token::Ident(word.to_string())
         }
-        "INT64" => Token::Int64Type,
+        "TINYINT" => Token::TinyIntType,
+        "SMALLINT" => Token::SmallIntType,
+        "INT" | "INTEGER" => Token::IntType,
+        "BIGINT" => Token::BigIntType,
         "VARCHAR" => Token::VarcharType,
         "VARBINARY" => Token::VarbinaryType,
+        "TEXT" => Token::TextType,
         "FTS_SNIPPET" => Token::FtsSnippet,
         _ => Token::Ident(word.to_string()),
     };
@@ -273,13 +281,13 @@ mod tests {
 
     #[test]
     fn test_tokenize_create_table() {
-        let tokens = tokenize("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)").unwrap();
+        let tokens = tokenize("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)").unwrap();
         assert_eq!(tokens[0], Token::Create);
         assert_eq!(tokens[1], Token::Table);
         assert_eq!(tokens[2], Token::Ident("t".to_string()));
         assert_eq!(tokens[3], Token::LParen);
         assert_eq!(tokens[4], Token::Ident("id".to_string()));
-        assert_eq!(tokens[5], Token::Int64Type);
+        assert_eq!(tokens[5], Token::BigIntType);
         assert_eq!(tokens[6], Token::PrimaryKey);
     }
 

@@ -170,11 +170,40 @@ impl Parser {
 
     fn parse_data_type(&mut self) -> Result<DataType, String> {
         match self.advance() {
-            Some(Token::Int64Type) => Ok(DataType::Int64),
-            Some(Token::VarcharType) => Ok(DataType::Varchar),
-            Some(Token::VarbinaryType) => Ok(DataType::Varbinary),
+            Some(Token::TinyIntType) => Ok(DataType::TinyInt),
+            Some(Token::SmallIntType) => Ok(DataType::SmallInt),
+            Some(Token::IntType) => Ok(DataType::Int),
+            Some(Token::BigIntType) => Ok(DataType::BigInt),
+            Some(Token::VarcharType) => {
+                let size = self.parse_optional_size()?;
+                Ok(DataType::Varchar(size))
+            }
+            Some(Token::VarbinaryType) => {
+                let size = self.parse_optional_size()?;
+                Ok(DataType::Varbinary(size))
+            }
+            Some(Token::TextType) => Ok(DataType::Text),
             Some(t) => Err(format!("Expected data type, got {:?}", t)),
             None => Err("Expected data type".into()),
+        }
+    }
+
+    fn parse_optional_size(&mut self) -> Result<Option<u32>, String> {
+        if self.peek() == Some(&Token::LParen) {
+            self.advance(); // (
+            let n = match self.advance() {
+                Some(Token::Integer(n)) => {
+                    if n < 0 {
+                        return Err("Size must be a positive integer".into());
+                    }
+                    n as u32
+                }
+                _ => return Err("Expected integer size".into()),
+            };
+            self.expect(&Token::RParen)?;
+            Ok(Some(n))
+        } else {
+            Ok(None)
         }
     }
 
@@ -759,13 +788,13 @@ mod tests {
     #[test]
     fn test_parse_create_table() {
         let stmt =
-            parse_sql("CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, data VARBINARY)")
+            parse_sql("CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR, data VARBINARY)")
                 .unwrap();
         if let Statement::CreateTable(ct) = stmt {
             assert_eq!(ct.table_name, "users");
             assert_eq!(ct.columns.len(), 3);
             assert!(ct.columns[0].is_primary_key);
-            assert_eq!(ct.columns[1].data_type, DataType::Varchar);
+            assert_eq!(ct.columns[1].data_type, DataType::Varchar(None));
         } else {
             panic!("Expected CreateTable");
         }

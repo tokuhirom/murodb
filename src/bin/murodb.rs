@@ -107,7 +107,7 @@ fn format_rows(result: &ExecResult) -> String {
 
 fn format_value(val: &Value) -> String {
     match val {
-        Value::Int64(n) => n.to_string(),
+        Value::Integer(n) => n.to_string(),
         Value::Varchar(s) => s.clone(),
         Value::Varbinary(b) => format!("0x{}", hex_encode(b)),
         Value::Null => "NULL".to_string(),

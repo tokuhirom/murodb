@@ -64,7 +64,7 @@ fn test_wrong_key_cannot_open_database() {
         let mut pager = Pager::create(&db_path, &correct_key).unwrap();
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY)",
             &mut pager,
             &mut catalog,
         )
@@ -98,7 +98,7 @@ fn test_data_persists_across_reopen() {
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
         execute(
-            "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
             &mut pager,
             &mut catalog,
         )

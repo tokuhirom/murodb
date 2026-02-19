@@ -2,7 +2,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Int64(i64),
+    Integer(i64),
     Varchar(String),
     Varbinary(Vec<u8>),
     Null,
@@ -15,7 +15,7 @@ impl Value {
 
     pub fn as_i64(&self) -> Option<i64> {
         match self {
-            Value::Int64(v) => Some(*v),
+            Value::Integer(v) => Some(*v),
             _ => None,
         }
     }
@@ -38,7 +38,7 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Int64(v) => write!(f, "{}", v),
+            Value::Integer(v) => write!(f, "{}", v),
             Value::Varchar(v) => write!(f, "{}", v),
             Value::Varbinary(v) => write!(f, "<binary {} bytes>", v.len()),
             Value::Null => write!(f, "NULL"),
@@ -48,17 +48,27 @@ impl fmt::Display for Value {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
-    Int64,
-    Varchar,
-    Varbinary,
+    TinyInt,
+    SmallInt,
+    Int,
+    BigInt,
+    Varchar(Option<u32>),
+    Varbinary(Option<u32>),
+    Text,
 }
 
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DataType::Int64 => write!(f, "INT64"),
-            DataType::Varchar => write!(f, "VARCHAR"),
-            DataType::Varbinary => write!(f, "VARBINARY"),
+            DataType::TinyInt => write!(f, "TINYINT"),
+            DataType::SmallInt => write!(f, "SMALLINT"),
+            DataType::Int => write!(f, "INT"),
+            DataType::BigInt => write!(f, "BIGINT"),
+            DataType::Varchar(None) => write!(f, "VARCHAR"),
+            DataType::Varchar(Some(n)) => write!(f, "VARCHAR({})", n),
+            DataType::Varbinary(None) => write!(f, "VARBINARY"),
+            DataType::Varbinary(Some(n)) => write!(f, "VARBINARY({})", n),
+            DataType::Text => write!(f, "TEXT"),
         }
     }
 }

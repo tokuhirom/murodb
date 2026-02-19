@@ -31,7 +31,7 @@ fn test_begin_commit() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
 
     session.execute("BEGIN").unwrap();
@@ -50,7 +50,7 @@ fn test_begin_rollback() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
 
     // Insert one row without transaction (auto-commit)
@@ -72,7 +72,7 @@ fn test_autocommit() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
 
     // Without BEGIN, INSERT should be immediately committed
@@ -114,7 +114,7 @@ fn test_ddl_in_transaction() {
 
     session.execute("BEGIN").unwrap();
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     session
         .execute("INSERT INTO t VALUES (1, 'Alice')")
@@ -130,7 +130,7 @@ fn test_select_in_transaction() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     session
         .execute("INSERT INTO t VALUES (1, 'Alice')")
@@ -151,7 +151,7 @@ fn test_update_in_transaction() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     session
         .execute("INSERT INTO t VALUES (1, 'Alice')")
@@ -180,7 +180,7 @@ fn test_delete_in_transaction() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     session
         .execute("INSERT INTO t VALUES (1, 'Alice')")
@@ -199,7 +199,7 @@ fn test_rollback_preserves_prior_data() {
     let (mut session, _dir) = setup_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     session
         .execute("INSERT INTO t VALUES (1, 'Alice')")
@@ -226,7 +226,7 @@ fn test_database_into_session() {
     let mut session = db.into_session();
 
     session
-        .execute("CREATE TABLE t (id INT64 PRIMARY KEY)")
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
         .unwrap();
     session.execute("BEGIN").unwrap();
     session.execute("INSERT INTO t VALUES (1)").unwrap();

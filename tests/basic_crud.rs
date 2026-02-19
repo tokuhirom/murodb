@@ -23,7 +23,7 @@ fn test_full_crud_cycle() {
 
     // CREATE TABLE
     execute(
-        "CREATE TABLE users (id INT64 PRIMARY KEY, name VARCHAR, email VARCHAR)",
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR, email VARCHAR)",
         &mut pager,
         &mut catalog,
     )
@@ -89,7 +89,7 @@ fn test_insert_with_explicit_columns() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, a VARCHAR, b VARCHAR)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a VARCHAR, b VARCHAR)",
         &mut pager,
         &mut catalog,
     )
@@ -113,7 +113,7 @@ fn test_order_by_desc_limit() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, val INT64)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val BIGINT)",
         &mut pager,
         &mut catalog,
     )
@@ -135,9 +135,9 @@ fn test_order_by_desc_limit() {
     .unwrap();
     if let ExecResult::Rows(rows) = result {
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].get("val"), Some(&Value::Int64(100)));
-        assert_eq!(rows[1].get("val"), Some(&Value::Int64(90)));
-        assert_eq!(rows[2].get("val"), Some(&Value::Int64(80)));
+        assert_eq!(rows[0].get("val"), Some(&Value::Integer(100)));
+        assert_eq!(rows[1].get("val"), Some(&Value::Integer(90)));
+        assert_eq!(rows[2].get("val"), Some(&Value::Integer(80)));
     }
 }
 
@@ -146,7 +146,7 @@ fn test_null_handling() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
         &mut pager,
         &mut catalog,
     )
@@ -172,7 +172,7 @@ fn test_varbinary_type() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, data VARBINARY)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, data VARBINARY)",
         &mut pager,
         &mut catalog,
     )
@@ -191,7 +191,7 @@ fn test_multiple_value_insert() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
         &mut pager,
         &mut catalog,
     )
@@ -214,7 +214,7 @@ fn test_duplicate_pk_error() {
     let (mut pager, mut catalog, _dir) = setup();
 
     execute(
-        "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
         &mut pager,
         &mut catalog,
     )

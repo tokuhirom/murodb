@@ -5,7 +5,7 @@ Encrypted embedded SQL database with B-Tree + Full-Text Search (Bigram), written
 ## Features
 
 - **Transparent encryption** - AES-256-GCM-SIV (nonce-misuse resistant) for all pages and WAL
-- **B-tree storage** - PRIMARY KEY (INT64), UNIQUE indexes (single column)
+- **B-tree storage** - PRIMARY KEY (TINYINT/SMALLINT/INT/BIGINT), UNIQUE indexes (single column)
 - **Full-text search** - Bigram (n=2) with NFKC normalization
   - MySQL-style `MATCH(col) AGAINST(...)` syntax
   - NATURAL LANGUAGE MODE with BM25 scoring
@@ -25,7 +25,7 @@ cargo install --path .
 
 ```bash
 # Create a new database
-murodb mydb.db --create -e "CREATE TABLE t (id INT64 PRIMARY KEY, name VARCHAR)"
+murodb mydb.db --create -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
 
 # Insert data
 murodb mydb.db -e "INSERT INTO t (id, name) VALUES (1, 'hello')"
@@ -67,16 +67,22 @@ Options:
 
 ### Types
 
-- `INT64`
-- `VARCHAR`
-- `VARBINARY`
-- `NULL`
+| Type | Storage | Range |
+|------|---------|-------|
+| TINYINT | 1 byte | -128 to 127 |
+| SMALLINT | 2 bytes | -32,768 to 32,767 |
+| INT | 4 bytes | -2,147,483,648 to 2,147,483,647 |
+| BIGINT | 8 bytes | -2^63 to 2^63-1 |
+| VARCHAR(n) | variable | max n bytes (optional) |
+| TEXT | variable | unbounded text |
+| VARBINARY(n) | variable | max n bytes (optional) |
+| NULL | 0 bytes | null value |
 
 ### DDL
 
 ```sql
 CREATE TABLE t (
-  id INT64 PRIMARY KEY,
+  id BIGINT PRIMARY KEY,
   body VARCHAR,
   blob VARBINARY,
   uniq VARCHAR UNIQUE
@@ -134,7 +140,7 @@ LIMIT 10;
 
 ### B-tree
 
-- Key encoding: INT64 (big-endian + sign flip for order preservation), VARCHAR/VARBINARY (raw bytes)
+- Key encoding: Integer types (big-endian + sign flip for order preservation), VARCHAR/VARBINARY (raw bytes)
 - Clustered by PRIMARY KEY
 - Secondary indexes share the same B-tree implementation
 

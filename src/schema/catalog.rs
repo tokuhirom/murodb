@@ -191,7 +191,7 @@ impl SystemCatalog {
             (columns, pk_name)
         } else {
             use crate::types::DataType;
-            let rowid_col = ColumnDef::new("_rowid", DataType::Int64)
+            let rowid_col = ColumnDef::new("_rowid", DataType::BigInt)
                 .primary_key()
                 .hidden();
             let mut cols = vec![rowid_col];
@@ -320,9 +320,9 @@ mod tests {
         let table = TableDef {
             name: "users".to_string(),
             columns: vec![
-                ColumnDef::new("id", DataType::Int64).primary_key(),
-                ColumnDef::new("name", DataType::Varchar),
-                ColumnDef::new("data", DataType::Varbinary),
+                ColumnDef::new("id", DataType::BigInt).primary_key(),
+                ColumnDef::new("name", DataType::Varchar(None)),
+                ColumnDef::new("data", DataType::Varbinary(None)),
             ],
             pk_column: Some("id".to_string()),
             data_btree_root: 42,
@@ -346,8 +346,8 @@ mod tests {
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
         let columns = vec![
-            ColumnDef::new("id", DataType::Int64).primary_key(),
-            ColumnDef::new("body", DataType::Varchar),
+            ColumnDef::new("id", DataType::BigInt).primary_key(),
+            ColumnDef::new("body", DataType::Varchar(None)),
         ];
 
         let table_def = catalog.create_table(&mut pager, "posts", columns).unwrap();
@@ -367,7 +367,7 @@ mod tests {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
         let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
-        let columns = vec![ColumnDef::new("id", DataType::Int64).primary_key()];
+        let columns = vec![ColumnDef::new("id", DataType::BigInt).primary_key()];
         catalog
             .create_table(&mut pager, "t", columns.clone())
             .unwrap();
@@ -412,8 +412,8 @@ mod tests {
             let mut catalog = SystemCatalog::create(&mut pager).unwrap();
 
             let columns = vec![
-                ColumnDef::new("id", DataType::Int64).primary_key(),
-                ColumnDef::new("name", DataType::Varchar),
+                ColumnDef::new("id", DataType::BigInt).primary_key(),
+                ColumnDef::new("name", DataType::Varchar(None)),
             ];
             catalog.create_table(&mut pager, "users", columns).unwrap();
             catalog_root = catalog.root_page_id();

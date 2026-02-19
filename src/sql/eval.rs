@@ -7,7 +7,7 @@ use crate::types::Value;
 /// `columns` maps column name -> Value.
 pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result<Value> {
     match expr {
-        Expr::IntLiteral(n) => Ok(Value::Int64(*n)),
+        Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
         Expr::StringLiteral(s) => Ok(Value::Varchar(s.clone())),
         Expr::BlobLiteral(b) => Ok(Value::Varbinary(b.clone())),
         Expr::Null => Ok(Value::Null),
@@ -23,9 +23,9 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
         }
 
         Expr::MatchAgainst { .. } => {
-            // FTS scoring - returns a float-like value, represented as Int64 for MVP
+            // FTS scoring - returns a float-like value, represented as Integer for MVP
             // Actual FTS evaluation happens in the executor
-            Ok(Value::Int64(0))
+            Ok(Value::Integer(0))
         }
 
         Expr::FtsSnippet { .. } => {
@@ -36,8 +36,8 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
         Expr::GreaterThanZero(inner) => {
             let val = eval_expr(inner, columns)?;
             match val {
-                Value::Int64(n) => Ok(Value::Int64(if n > 0 { 1 } else { 0 })),
-                _ => Ok(Value::Int64(0)),
+                Value::Integer(n) => Ok(Value::Integer(if n > 0 { 1 } else { 0 })),
+                _ => Ok(Value::Integer(0)),
             }
         }
     }
@@ -49,18 +49,18 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
         return match op {
             BinaryOp::And => {
                 // NULL AND FALSE = FALSE, NULL AND TRUE = NULL
-                if matches!(left, Value::Int64(0)) || matches!(right, Value::Int64(0)) {
-                    Ok(Value::Int64(0))
+                if matches!(left, Value::Integer(0)) || matches!(right, Value::Integer(0)) {
+                    Ok(Value::Integer(0))
                 } else {
                     Ok(Value::Null)
                 }
             }
             BinaryOp::Or => {
                 // NULL OR TRUE = TRUE
-                if matches!(left, Value::Int64(n) if *n != 0)
-                    || matches!(right, Value::Int64(n) if *n != 0)
+                if matches!(left, Value::Integer(n) if *n != 0)
+                    || matches!(right, Value::Integer(n) if *n != 0)
                 {
-                    Ok(Value::Int64(1))
+                    Ok(Value::Integer(1))
                 } else {
                     Ok(Value::Null)
                 }
@@ -70,35 +70,35 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     }
 
     match op {
-        BinaryOp::Eq => Ok(Value::Int64(
+        BinaryOp::Eq => Ok(Value::Integer(
             if value_cmp(left, right) == Some(std::cmp::Ordering::Equal) {
                 1
             } else {
                 0
             },
         )),
-        BinaryOp::Ne => Ok(Value::Int64(
+        BinaryOp::Ne => Ok(Value::Integer(
             if value_cmp(left, right) != Some(std::cmp::Ordering::Equal) {
                 1
             } else {
                 0
             },
         )),
-        BinaryOp::Lt => Ok(Value::Int64(
+        BinaryOp::Lt => Ok(Value::Integer(
             if value_cmp(left, right) == Some(std::cmp::Ordering::Less) {
                 1
             } else {
                 0
             },
         )),
-        BinaryOp::Gt => Ok(Value::Int64(
+        BinaryOp::Gt => Ok(Value::Integer(
             if value_cmp(left, right) == Some(std::cmp::Ordering::Greater) {
                 1
             } else {
                 0
             },
         )),
-        BinaryOp::Le => Ok(Value::Int64(
+        BinaryOp::Le => Ok(Value::Integer(
             if matches!(
                 value_cmp(left, right),
                 Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
@@ -108,7 +108,7 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
                 0
             },
         )),
-        BinaryOp::Ge => Ok(Value::Int64(
+        BinaryOp::Ge => Ok(Value::Integer(
             if matches!(
                 value_cmp(left, right),
                 Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
@@ -121,19 +121,19 @@ fn eval_binary_op(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
         BinaryOp::And => {
             let l = is_truthy(left);
             let r = is_truthy(right);
-            Ok(Value::Int64(if l && r { 1 } else { 0 }))
+            Ok(Value::Integer(if l && r { 1 } else { 0 }))
         }
         BinaryOp::Or => {
             let l = is_truthy(left);
             let r = is_truthy(right);
-            Ok(Value::Int64(if l || r { 1 } else { 0 }))
+            Ok(Value::Integer(if l || r { 1 } else { 0 }))
         }
     }
 }
 
 fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
-        (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
+        (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
         (Value::Varchar(a), Value::Varchar(b)) => Some(a.cmp(b)),
         (Value::Varbinary(a), Value::Varbinary(b)) => Some(a.cmp(b)),
         _ => None,
@@ -142,7 +142,7 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 
 pub fn is_truthy(val: &Value) -> bool {
     match val {
-        Value::Int64(n) => *n != 0,
+        Value::Integer(n) => *n != 0,
         Value::Varchar(s) => !s.is_empty(),
         Value::Varbinary(b) => !b.is_empty(),
         Value::Null => false,
@@ -158,7 +158,7 @@ mod tests {
         let lookup = |_: &str| -> Option<Value> { None };
         assert_eq!(
             eval_expr(&Expr::IntLiteral(42), &lookup).unwrap(),
-            Value::Int64(42)
+            Value::Integer(42)
         );
         assert_eq!(
             eval_expr(&Expr::StringLiteral("hello".into()), &lookup).unwrap(),
@@ -170,7 +170,7 @@ mod tests {
     fn test_eval_comparison() {
         let lookup = |name: &str| -> Option<Value> {
             match name {
-                "id" => Some(Value::Int64(5)),
+                "id" => Some(Value::Integer(5)),
                 _ => None,
             }
         };
@@ -180,13 +180,13 @@ mod tests {
             op: BinaryOp::Eq,
             right: Box::new(Expr::IntLiteral(5)),
         };
-        assert_eq!(eval_expr(&expr, &lookup).unwrap(), Value::Int64(1));
+        assert_eq!(eval_expr(&expr, &lookup).unwrap(), Value::Integer(1));
 
         let expr = Expr::BinaryOp {
             left: Box::new(Expr::ColumnRef("id".into())),
             op: BinaryOp::Gt,
             right: Box::new(Expr::IntLiteral(10)),
         };
-        assert_eq!(eval_expr(&expr, &lookup).unwrap(), Value::Int64(0));
+        assert_eq!(eval_expr(&expr, &lookup).unwrap(), Value::Integer(0));
     }
 }

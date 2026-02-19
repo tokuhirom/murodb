@@ -208,22 +208,22 @@ LIMIT 10;
 
 Basic operators and DDL to make daily use practical.
 
-- [ ] DROP TABLE / DROP TABLE IF EXISTS
-- [ ] DROP INDEX
-- [ ] IF NOT EXISTS for CREATE TABLE / CREATE INDEX
-- [ ] SHOW CREATE TABLE
-- [ ] DESCRIBE / DESC table
-- [ ] LIKE / NOT LIKE (% and _ wildcards)
-- [ ] IN (value list)
-- [ ] BETWEEN ... AND ...
-- [ ] IS NULL / IS NOT NULL
-- [ ] NOT operator (general)
-- [ ] OFFSET (SELECT ... LIMIT n OFFSET m)
-- [ ] DEFAULT column values
-- [ ] AUTO_INCREMENT
-- [ ] Arithmetic operators in expressions (+, -, *, /, %)
-- [ ] BOOLEAN type (alias for TINYINT)
-- [ ] CHECK constraint
+- [x] DROP TABLE / DROP TABLE IF EXISTS
+- [x] DROP INDEX
+- [x] IF NOT EXISTS for CREATE TABLE / CREATE INDEX
+- [x] SHOW CREATE TABLE
+- [x] DESCRIBE / DESC table
+- [x] LIKE / NOT LIKE (% and _ wildcards)
+- [x] IN (value list)
+- [x] BETWEEN ... AND ...
+- [x] IS NULL / IS NOT NULL
+- [x] NOT operator (general)
+- [x] OFFSET (SELECT ... LIMIT n OFFSET m)
+- [x] DEFAULT column values
+- [x] AUTO_INCREMENT
+- [x] Arithmetic operators in expressions (+, -, *, /, %)
+- [x] BOOLEAN type (alias for TINYINT)
+- [x] CHECK constraint
 
 ### Phase 2 — Built-in Functions
 

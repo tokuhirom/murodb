@@ -3,7 +3,7 @@ use crate::btree::key_encoding::{encode_i16, encode_i32, encode_i64, encode_i8};
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::schema::catalog::{SystemCatalog, TableDef};
-use crate::schema::column::ColumnDef;
+use crate::schema::column::{ColumnDef, DefaultValue};
 use crate::schema::index::{IndexDef, IndexType};
 use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
@@ -54,11 +54,15 @@ pub fn execute_statement(
             // FTS index creation is handled in step 9
             Ok(ExecResult::Ok)
         }
+        Statement::DropTable(dt) => exec_drop_table(dt, pager, catalog),
+        Statement::DropIndex(di) => exec_drop_index(di, pager, catalog),
         Statement::Insert(ins) => exec_insert(ins, pager, catalog),
         Statement::Select(sel) => exec_select(sel, pager, catalog),
         Statement::Update(upd) => exec_update(upd, pager, catalog),
         Statement::Delete(del) => exec_delete(del, pager, catalog),
         Statement::ShowTables => exec_show_tables(pager, catalog),
+        Statement::ShowCreateTable(name) => exec_show_create_table(name, pager, catalog),
+        Statement::Describe(name) => exec_describe(name, pager, catalog),
         Statement::Begin | Statement::Commit | Statement::Rollback => Err(MuroError::Execution(
             "BEGIN/COMMIT/ROLLBACK must be handled by Session".into(),
         )),
@@ -70,6 +74,11 @@ fn exec_create_table(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    // Check IF NOT EXISTS
+    if ct.if_not_exists && catalog.get_table(pager, &ct.table_name)?.is_some() {
+        return Ok(ExecResult::Ok);
+    }
+
     let columns: Vec<ColumnDef> = ct
         .columns
         .iter()
@@ -83,6 +92,15 @@ fn exec_create_table(
             }
             if !cs.is_nullable {
                 col = col.not_null();
+            }
+            if cs.auto_increment {
+                col = col.with_auto_increment();
+            }
+            if let Some(default_expr) = &cs.default_value {
+                col.default_value = ast_expr_to_default(default_expr);
+            }
+            if let Some(check) = &cs.check_expr {
+                col.check_expr = Some(expr_to_string(check));
             }
             col
         })
@@ -109,11 +127,67 @@ fn exec_create_table(
     Ok(ExecResult::Ok)
 }
 
+/// Convert an AST expression (from DEFAULT clause) to a DefaultValue for storage.
+fn ast_expr_to_default(expr: &Expr) -> Option<DefaultValue> {
+    match expr {
+        Expr::IntLiteral(n) => Some(DefaultValue::Integer(*n)),
+        Expr::StringLiteral(s) => Some(DefaultValue::String(s.clone())),
+        Expr::Null => Some(DefaultValue::Null),
+        _ => None,
+    }
+}
+
+/// Convert an AST expression to a string representation for storage (CHECK constraints).
+fn expr_to_string(expr: &Expr) -> String {
+    match expr {
+        Expr::IntLiteral(n) => n.to_string(),
+        Expr::StringLiteral(s) => format!("'{}'", s),
+        Expr::Null => "NULL".to_string(),
+        Expr::ColumnRef(name) => name.clone(),
+        Expr::BinaryOp { left, op, right } => {
+            let op_str = match op {
+                BinaryOp::Eq => "=",
+                BinaryOp::Ne => "!=",
+                BinaryOp::Lt => "<",
+                BinaryOp::Gt => ">",
+                BinaryOp::Le => "<=",
+                BinaryOp::Ge => ">=",
+                BinaryOp::And => "AND",
+                BinaryOp::Or => "OR",
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Mod => "%",
+            };
+            format!(
+                "{} {} {}",
+                expr_to_string(left),
+                op_str,
+                expr_to_string(right)
+            )
+        }
+        Expr::UnaryOp { op, operand } => {
+            let op_str = match op {
+                UnaryOp::Not => "NOT ",
+                UnaryOp::Neg => "-",
+            };
+            format!("{}{}", op_str, expr_to_string(operand))
+        }
+        _ => "?".to_string(),
+    }
+}
+
 fn exec_create_index(
     ci: &CreateIndex,
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    // Check IF NOT EXISTS
+    if ci.if_not_exists && catalog.get_index(pager, &ci.index_name)?.is_some() {
+        return Ok(ExecResult::Ok);
+    }
+
     let table_def = catalog
         .get_table(pager, &ci.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", ci.table_name)))?;
@@ -190,6 +264,48 @@ fn exec_create_index(
     Ok(ExecResult::Ok)
 }
 
+fn exec_drop_table(
+    dt: &DropTable,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    if catalog.get_table(pager, &dt.table_name)?.is_none() {
+        if dt.if_exists {
+            return Ok(ExecResult::Ok);
+        }
+        return Err(MuroError::Schema(format!(
+            "Table '{}' does not exist",
+            dt.table_name
+        )));
+    }
+
+    // Delete all indexes for this table first
+    catalog.delete_indexes_for_table(pager, &dt.table_name)?;
+    // Delete the table
+    catalog.delete_table(pager, &dt.table_name)?;
+
+    Ok(ExecResult::Ok)
+}
+
+fn exec_drop_index(
+    di: &DropIndex,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    if catalog.get_index(pager, &di.index_name)?.is_none() {
+        if di.if_exists {
+            return Ok(ExecResult::Ok);
+        }
+        return Err(MuroError::Schema(format!(
+            "Index '{}' does not exist",
+            di.index_name
+        )));
+    }
+
+    catalog.delete_index(pager, &di.index_name)?;
+    Ok(ExecResult::Ok)
+}
+
 fn exec_insert(
     ins: &Insert,
     pager: &mut impl PageStore,
@@ -207,19 +323,74 @@ fn exec_insert(
     for value_row in &ins.values {
         let mut values = resolve_insert_values(&table_def, &ins.columns, value_row)?;
 
-        // Auto-generate _rowid for hidden PK columns
+        // Apply DEFAULT values for NULL columns that have defaults
+        for (i, col) in table_def.columns.iter().enumerate() {
+            if values[i].is_null() && !col.is_hidden {
+                if let Some(default) = &col.default_value {
+                    values[i] = match default {
+                        DefaultValue::Integer(n) => Value::Integer(*n),
+                        DefaultValue::String(s) => Value::Varchar(s.clone()),
+                        DefaultValue::Null => Value::Null,
+                    };
+                }
+            }
+        }
+
+        // Auto-generate for AUTO_INCREMENT columns
         let pk_idx = table_def
             .pk_column_index()
             .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
-        if table_def.columns[pk_idx].is_hidden && values[pk_idx].is_null() {
+
+        if table_def.columns[pk_idx].auto_increment && values[pk_idx].is_null() {
             table_def.next_rowid += 1;
             values[pk_idx] = Value::Integer(table_def.next_rowid);
+        } else if table_def.columns[pk_idx].is_hidden && values[pk_idx].is_null() {
+            // Auto-generate _rowid for hidden PK columns
+            table_def.next_rowid += 1;
+            values[pk_idx] = Value::Integer(table_def.next_rowid);
+        }
+
+        // Validate NOT NULL constraints
+        for (i, col) in table_def.columns.iter().enumerate() {
+            if !col.is_nullable && values[i].is_null() {
+                return Err(MuroError::Execution(format!(
+                    "Column '{}' cannot be NULL",
+                    col.name
+                )));
+            }
         }
 
         // Validate all values against their column types
         for (i, val) in values.iter().enumerate() {
             if !val.is_null() {
                 validate_value(val, &table_def.columns[i].data_type)?;
+            }
+        }
+
+        // Validate CHECK constraints
+        for (i, col) in table_def.columns.iter().enumerate() {
+            if let Some(check_sql) = &col.check_expr {
+                if !values[i].is_null() {
+                    let check_expr = crate::sql::parser::parse_sql(&format!(
+                        "SELECT * FROM _dummy WHERE {}",
+                        check_sql
+                    ));
+                    if let Ok(Statement::Select(sel)) = check_expr {
+                        if let Some(where_expr) = &sel.where_clause {
+                            let result = eval_expr(where_expr, &|name| {
+                                table_def
+                                    .column_index(name)
+                                    .and_then(|idx| values.get(idx).cloned())
+                            })?;
+                            if !is_truthy(&result) {
+                                return Err(MuroError::Execution(format!(
+                                    "CHECK constraint failed for column '{}'",
+                                    col.name
+                                )));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -376,6 +547,16 @@ fn exec_select(
     // ORDER BY
     if let Some(order_items) = &sel.order_by {
         sort_rows(&mut rows, order_items);
+    }
+
+    // OFFSET
+    if let Some(offset) = sel.offset {
+        let offset = offset as usize;
+        if offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows = rows.into_iter().skip(offset).collect();
+        }
     }
 
     // LIMIT
@@ -592,12 +773,22 @@ fn exec_select_join(
         });
     }
 
-    // 5. LIMIT (before projection for efficiency)
+    // 5. OFFSET
+    if let Some(offset) = sel.offset {
+        let offset = offset as usize;
+        if offset >= joined_rows.len() {
+            joined_rows.clear();
+        } else {
+            joined_rows = joined_rows.into_iter().skip(offset).collect();
+        }
+    }
+
+    // 6. LIMIT
     if let Some(limit) = sel.limit {
         joined_rows.truncate(limit as usize);
     }
 
-    // 6. Project SELECT columns
+    // 7. Project SELECT columns
     let mut rows: Vec<Row> = Vec::new();
     for jrow in &joined_rows {
         let row = build_join_row(jrow, &sel.columns, &hidden_columns)?;
@@ -766,6 +957,110 @@ fn exec_show_tables(pager: &mut impl PageStore, catalog: &mut SystemCatalog) -> 
             values: vec![("Table".to_string(), Value::Varchar(name))],
         })
         .collect();
+    Ok(ExecResult::Rows(rows))
+}
+
+fn exec_show_create_table(
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let table_def = catalog
+        .get_table(pager, table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
+
+    let mut sql = format!("CREATE TABLE {} (\n", table_name);
+    let visible_columns: Vec<&ColumnDef> =
+        table_def.columns.iter().filter(|c| !c.is_hidden).collect();
+
+    for (i, col) in visible_columns.iter().enumerate() {
+        sql.push_str(&format!("  {} {}", col.name, col.data_type));
+        if col.is_primary_key {
+            sql.push_str(" PRIMARY KEY");
+        }
+        if col.auto_increment {
+            sql.push_str(" AUTO_INCREMENT");
+        }
+        if col.is_unique && !col.is_primary_key {
+            sql.push_str(" UNIQUE");
+        }
+        if !col.is_nullable && !col.is_primary_key {
+            sql.push_str(" NOT NULL");
+        }
+        if let Some(default) = &col.default_value {
+            match default {
+                DefaultValue::Integer(n) => sql.push_str(&format!(" DEFAULT {}", n)),
+                DefaultValue::String(s) => sql.push_str(&format!(" DEFAULT '{}'", s)),
+                DefaultValue::Null => sql.push_str(" DEFAULT NULL"),
+            }
+        }
+        if let Some(check) = &col.check_expr {
+            sql.push_str(&format!(" CHECK ({})", check));
+        }
+        if i < visible_columns.len() - 1 {
+            sql.push(',');
+        }
+        sql.push('\n');
+    }
+    sql.push(')');
+
+    let rows = vec![Row {
+        values: vec![
+            ("Table".to_string(), Value::Varchar(table_name.to_string())),
+            ("Create Table".to_string(), Value::Varchar(sql)),
+        ],
+    }];
+    Ok(ExecResult::Rows(rows))
+}
+
+fn exec_describe(
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let table_def = catalog
+        .get_table(pager, table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
+
+    let mut rows = Vec::new();
+    for col in &table_def.columns {
+        if col.is_hidden {
+            continue;
+        }
+        let null_str = if col.is_nullable { "YES" } else { "NO" };
+        let key_str = if col.is_primary_key {
+            "PRI"
+        } else if col.is_unique {
+            "UNI"
+        } else {
+            ""
+        };
+        let default_str = match &col.default_value {
+            Some(DefaultValue::Integer(n)) => n.to_string(),
+            Some(DefaultValue::String(s)) => s.clone(),
+            Some(DefaultValue::Null) => "NULL".to_string(),
+            None => "NULL".to_string(),
+        };
+        let extra_str = if col.auto_increment {
+            "auto_increment"
+        } else {
+            ""
+        };
+
+        rows.push(Row {
+            values: vec![
+                ("Field".to_string(), Value::Varchar(col.name.clone())),
+                (
+                    "Type".to_string(),
+                    Value::Varchar(col.data_type.to_string()),
+                ),
+                ("Null".to_string(), Value::Varchar(null_str.to_string())),
+                ("Key".to_string(), Value::Varchar(key_str.to_string())),
+                ("Default".to_string(), Value::Varchar(default_str)),
+                ("Extra".to_string(), Value::Varchar(extra_str.to_string())),
+            ],
+        });
+    }
     Ok(ExecResult::Rows(rows))
 }
 
@@ -971,7 +1266,13 @@ fn resolve_insert_values(
                 let idx = table_def
                     .column_index(col_name)
                     .ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", col_name)))?;
-                values[idx] = eval_expr(expr, &|_| None)?;
+                let val = eval_expr(expr, &|_| None)?;
+                // Handle DEFAULT keyword
+                if matches!(expr, Expr::DefaultValue) {
+                    // Leave as Null - will be filled by default value logic
+                    continue;
+                }
+                values[idx] = val;
             }
         }
         None => {
@@ -980,15 +1281,35 @@ fn resolve_insert_values(
                 .columns
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| !c.is_hidden)
+                .filter(|(_, c)| !c.is_hidden && !c.auto_increment)
                 .map(|(i, _)| i)
                 .collect();
             if exprs.len() != visible_indices.len() {
+                // Also try with auto_increment columns included
+                let all_visible: Vec<usize> = table_def
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !c.is_hidden)
+                    .map(|(i, _)| i)
+                    .collect();
+                if exprs.len() == all_visible.len() {
+                    for (expr_idx, &col_idx) in all_visible.iter().enumerate() {
+                        if matches!(exprs[expr_idx], Expr::DefaultValue) {
+                            continue;
+                        }
+                        values[col_idx] = eval_expr(&exprs[expr_idx], &|_| None)?;
+                    }
+                    return Ok(values);
+                }
                 return Err(MuroError::Execution(
                     "Value count doesn't match column count".into(),
                 ));
             }
             for (expr_idx, &col_idx) in visible_indices.iter().enumerate() {
+                if matches!(exprs[expr_idx], Expr::DefaultValue) {
+                    continue;
+                }
                 values[col_idx] = eval_expr(&exprs[expr_idx], &|_| None)?;
             }
         }

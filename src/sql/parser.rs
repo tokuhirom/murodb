@@ -47,11 +47,25 @@ impl Parser {
     pub fn parse(&mut self) -> Result<Statement, String> {
         let stmt = match self.peek() {
             Some(Token::Create) => self.parse_create()?,
+            Some(Token::Drop) => self.parse_drop()?,
             Some(Token::Select) => Statement::Select(self.parse_select()?),
             Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
             Some(Token::Show) => self.parse_show()?,
+            Some(Token::Describe) => {
+                self.advance();
+                let table_name = self.expect_ident()?;
+                Statement::Describe(table_name)
+            }
+            Some(Token::Desc) => {
+                // DESC can be DESCRIBE (statement) if followed by an identifier
+                // But DESC is also ORDER BY direction, handled elsewhere
+                // At statement level, treat as DESCRIBE
+                self.advance();
+                let table_name = self.expect_ident()?;
+                Statement::Describe(table_name)
+            }
             Some(Token::Begin) => {
                 self.advance();
                 Statement::Begin
@@ -82,16 +96,25 @@ impl Parser {
         match self.peek() {
             Some(Token::Table) => {
                 self.advance();
-                Ok(Statement::CreateTable(self.parse_create_table()?))
+                let if_not_exists = self.parse_if_not_exists()?;
+                let mut ct = self.parse_create_table()?;
+                ct.if_not_exists = if_not_exists;
+                Ok(Statement::CreateTable(ct))
             }
             Some(Token::Unique) => {
                 self.advance();
                 self.expect(&Token::Index)?;
-                Ok(Statement::CreateIndex(self.parse_create_index(true)?))
+                let if_not_exists = self.parse_if_not_exists()?;
+                let mut ci = self.parse_create_index(true)?;
+                ci.if_not_exists = if_not_exists;
+                Ok(Statement::CreateIndex(ci))
             }
             Some(Token::Index) => {
                 self.advance();
-                Ok(Statement::CreateIndex(self.parse_create_index(false)?))
+                let if_not_exists = self.parse_if_not_exists()?;
+                let mut ci = self.parse_create_index(false)?;
+                ci.if_not_exists = if_not_exists;
+                Ok(Statement::CreateIndex(ci))
             }
             Some(Token::Fulltext) => {
                 self.advance();
@@ -101,6 +124,53 @@ impl Parser {
                 ))
             }
             _ => Err("Expected TABLE, INDEX, UNIQUE INDEX, or FULLTEXT INDEX after CREATE".into()),
+        }
+    }
+
+    fn parse_if_not_exists(&mut self) -> Result<bool, String> {
+        if self.peek() == Some(&Token::If) {
+            self.advance(); // IF
+            self.expect(&Token::Not)?;
+            self.expect(&Token::Exists)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn parse_if_exists(&mut self) -> Result<bool, String> {
+        if self.peek() == Some(&Token::If) {
+            self.advance(); // IF
+            self.expect(&Token::Exists)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn parse_drop(&mut self) -> Result<Statement, String> {
+        self.advance(); // DROP
+
+        match self.peek() {
+            Some(Token::Table) => {
+                self.advance();
+                let if_exists = self.parse_if_exists()?;
+                let table_name = self.expect_ident()?;
+                Ok(Statement::DropTable(DropTable {
+                    table_name,
+                    if_exists,
+                }))
+            }
+            Some(Token::Index) => {
+                self.advance();
+                let if_exists = self.parse_if_exists()?;
+                let index_name = self.expect_ident()?;
+                Ok(Statement::DropIndex(DropIndex {
+                    index_name,
+                    if_exists,
+                }))
+            }
+            _ => Err("Expected TABLE or INDEX after DROP".into()),
         }
     }
 
@@ -128,6 +198,7 @@ impl Parser {
         Ok(CreateTable {
             table_name,
             columns,
+            if_not_exists: false,
         })
     }
 
@@ -138,6 +209,9 @@ impl Parser {
         let mut is_primary_key = false;
         let mut is_unique = false;
         let mut is_nullable = true;
+        let mut default_value = None;
+        let mut auto_increment = false;
+        let mut check_expr = None;
 
         loop {
             match self.peek() {
@@ -155,6 +229,20 @@ impl Parser {
                     self.expect(&Token::Null)?;
                     is_nullable = false;
                 }
+                Some(Token::Default) => {
+                    self.advance();
+                    default_value = Some(self.parse_primary()?);
+                }
+                Some(Token::AutoIncrement) => {
+                    self.advance();
+                    auto_increment = true;
+                }
+                Some(Token::Check) => {
+                    self.advance();
+                    self.expect(&Token::LParen)?;
+                    check_expr = Some(self.parse_expr()?);
+                    self.expect(&Token::RParen)?;
+                }
                 _ => break,
             }
         }
@@ -165,26 +253,38 @@ impl Parser {
             is_primary_key,
             is_unique,
             is_nullable,
+            default_value,
+            auto_increment,
+            check_expr,
         })
     }
 
     fn parse_data_type(&mut self) -> Result<DataType, String> {
-        match self.advance() {
-            Some(Token::TinyIntType) => Ok(DataType::TinyInt),
-            Some(Token::SmallIntType) => Ok(DataType::SmallInt),
-            Some(Token::IntType) => Ok(DataType::Int),
-            Some(Token::BigIntType) => Ok(DataType::BigInt),
-            Some(Token::VarcharType) => {
-                let size = self.parse_optional_size()?;
-                Ok(DataType::Varchar(size))
+        match self.peek() {
+            Some(Token::Boolean) => {
+                self.advance();
+                // BOOLEAN is alias for TINYINT
+                // But we need to check it's not "BOOLEAN MODE" context
+                // At this point, we're parsing a data type, so it's definitely BOOLEAN type
+                Ok(DataType::TinyInt)
             }
-            Some(Token::VarbinaryType) => {
-                let size = self.parse_optional_size()?;
-                Ok(DataType::Varbinary(size))
-            }
-            Some(Token::TextType) => Ok(DataType::Text),
-            Some(t) => Err(format!("Expected data type, got {:?}", t)),
-            None => Err("Expected data type".into()),
+            _ => match self.advance() {
+                Some(Token::TinyIntType) => Ok(DataType::TinyInt),
+                Some(Token::SmallIntType) => Ok(DataType::SmallInt),
+                Some(Token::IntType) => Ok(DataType::Int),
+                Some(Token::BigIntType) => Ok(DataType::BigInt),
+                Some(Token::VarcharType) => {
+                    let size = self.parse_optional_size()?;
+                    Ok(DataType::Varchar(size))
+                }
+                Some(Token::VarbinaryType) => {
+                    let size = self.parse_optional_size()?;
+                    Ok(DataType::Varbinary(size))
+                }
+                Some(Token::TextType) => Ok(DataType::Text),
+                Some(t) => Err(format!("Expected data type, got {:?}", t)),
+                None => Err("Expected data type".into()),
+            },
         }
     }
 
@@ -220,6 +320,7 @@ impl Parser {
             table_name,
             column_name,
             is_unique,
+            if_not_exists: false,
         })
     }
 
@@ -283,12 +384,19 @@ impl Parser {
 
     fn parse_show(&mut self) -> Result<Statement, String> {
         self.advance(); // consume SHOW
+
         match self.peek() {
             Some(Token::Tables) => {
                 self.advance();
                 Ok(Statement::ShowTables)
             }
-            _ => Err("Expected TABLES after SHOW".into()),
+            Some(Token::Create) => {
+                self.advance(); // CREATE
+                self.expect(&Token::Table)?;
+                let table_name = self.expect_ident()?;
+                Ok(Statement::ShowCreateTable(table_name))
+            }
+            _ => Err("Expected TABLES or CREATE TABLE after SHOW".into()),
         }
     }
 
@@ -477,6 +585,16 @@ impl Parser {
             None
         };
 
+        let offset = if self.peek() == Some(&Token::Offset) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Integer(n)) => Some(n as u64),
+                _ => return Err("Expected integer after OFFSET".into()),
+            }
+        } else {
+            None
+        };
+
         Ok(Select {
             columns,
             table_name,
@@ -485,6 +603,7 @@ impl Parser {
             where_clause,
             order_by,
             limit,
+            offset,
         })
     }
 
@@ -496,6 +615,7 @@ impl Parser {
                 Token::Where
                     | Token::Order
                     | Token::Limit
+                    | Token::Offset
                     | Token::Join
                     | Token::Inner
                     | Token::Left
@@ -585,7 +705,9 @@ impl Parser {
         })
     }
 
-    // Expression parsing with precedence
+    // Expression parsing with precedence:
+    // parse_expr -> parse_or_expr -> parse_and_expr -> parse_not_expr
+    //   -> parse_comparison -> parse_additive -> parse_multiplicative -> parse_unary -> parse_primary
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_or_expr()
@@ -606,10 +728,10 @@ impl Parser {
     }
 
     fn parse_and_expr(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_comparison()?;
+        let mut left = self.parse_not_expr()?;
         while self.peek() == Some(&Token::And) {
             self.advance();
-            let right = self.parse_comparison()?;
+            let right = self.parse_not_expr()?;
             left = Expr::BinaryOp {
                 left: Box::new(left),
                 op: BinaryOp::And,
@@ -619,8 +741,99 @@ impl Parser {
         Ok(left)
     }
 
+    fn parse_not_expr(&mut self) -> Result<Expr, String> {
+        if self.peek() == Some(&Token::Not) {
+            self.advance();
+            let operand = self.parse_comparison()?;
+            Ok(Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand: Box::new(operand),
+            })
+        } else {
+            self.parse_comparison()
+        }
+    }
+
     fn parse_comparison(&mut self) -> Result<Expr, String> {
-        let left = self.parse_primary()?;
+        let left = self.parse_additive()?;
+
+        // IS [NOT] NULL
+        if self.peek() == Some(&Token::Is) {
+            self.advance();
+            let negated = if self.peek() == Some(&Token::Not) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            self.expect(&Token::Null)?;
+            return Ok(Expr::IsNull {
+                expr: Box::new(left),
+                negated,
+            });
+        }
+
+        // NOT LIKE / NOT IN / NOT BETWEEN
+        if self.peek() == Some(&Token::Not) {
+            let saved_pos = self.pos;
+            self.advance();
+            match self.peek() {
+                Some(Token::Like) => {
+                    self.advance();
+                    let pattern = self.parse_additive()?;
+                    return Ok(Expr::Like {
+                        expr: Box::new(left),
+                        pattern: Box::new(pattern),
+                        negated: true,
+                    });
+                }
+                Some(Token::In) => {
+                    self.advance();
+                    let list = self.parse_in_list()?;
+                    return Ok(Expr::InList {
+                        expr: Box::new(left),
+                        list,
+                        negated: true,
+                    });
+                }
+                Some(Token::Between) => {
+                    self.advance();
+                    return self.parse_between_rest(left, true);
+                }
+                _ => {
+                    // Not a valid postfix NOT, rewind
+                    self.pos = saved_pos;
+                }
+            }
+        }
+
+        // LIKE
+        if self.peek() == Some(&Token::Like) {
+            self.advance();
+            let pattern = self.parse_additive()?;
+            return Ok(Expr::Like {
+                expr: Box::new(left),
+                pattern: Box::new(pattern),
+                negated: false,
+            });
+        }
+
+        // IN
+        if self.peek() == Some(&Token::In) {
+            self.advance();
+            let list = self.parse_in_list()?;
+            return Ok(Expr::InList {
+                expr: Box::new(left),
+                list,
+                negated: false,
+            });
+        }
+
+        // BETWEEN
+        if self.peek() == Some(&Token::Between) {
+            self.advance();
+            return self.parse_between_rest(left, false);
+        }
 
         let op = match self.peek() {
             Some(Token::Eq) => Some(BinaryOp::Eq),
@@ -634,7 +847,7 @@ impl Parser {
 
         if let Some(op) = op {
             self.advance();
-            let right = self.parse_primary()?;
+            let right = self.parse_additive()?;
             Ok(Expr::BinaryOp {
                 left: Box::new(left),
                 op,
@@ -642,6 +855,98 @@ impl Parser {
             })
         } else {
             Ok(left)
+        }
+    }
+
+    fn parse_in_list(&mut self) -> Result<Vec<Expr>, String> {
+        self.expect(&Token::LParen)?;
+        let mut list = Vec::new();
+        loop {
+            list.push(self.parse_expr()?);
+            if self.peek() == Some(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(list)
+    }
+
+    fn parse_between_rest(&mut self, left: Expr, negated: bool) -> Result<Expr, String> {
+        let low = self.parse_additive()?;
+        self.expect(&Token::And)?;
+        let high = self.parse_additive()?;
+        Ok(Expr::Between {
+            expr: Box::new(left),
+            low: Box::new(low),
+            high: Box::new(high),
+            negated,
+        })
+    }
+
+    fn parse_additive(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek() {
+                Some(Token::Plus) => Some(BinaryOp::Add),
+                Some(Token::Minus) => Some(BinaryOp::Sub),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.advance();
+                let right = self.parse_multiplicative()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_unary()?;
+        loop {
+            let op = match self.peek() {
+                Some(Token::Star) => Some(BinaryOp::Mul),
+                Some(Token::Slash) => Some(BinaryOp::Div),
+                Some(Token::Percent) => Some(BinaryOp::Mod),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.advance();
+                let right = self.parse_unary()?;
+                left = Expr::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, String> {
+        if self.peek() == Some(&Token::Minus) {
+            self.advance();
+            let operand = self.parse_primary()?;
+            // Optimize: if it's an integer literal, negate it directly
+            if let Expr::IntLiteral(n) = operand {
+                Ok(Expr::IntLiteral(-n))
+            } else {
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    operand: Box::new(operand),
+                })
+            }
+        } else {
+            self.parse_primary()
         }
     }
 
@@ -658,6 +963,10 @@ impl Parser {
             Some(Token::Null) => {
                 self.advance();
                 Ok(Expr::Null)
+            }
+            Some(Token::Default) => {
+                self.advance();
+                Ok(Expr::DefaultValue)
             }
             Some(Token::Match) => self.parse_match_against(),
             Some(Token::FtsSnippet) => self.parse_fts_snippet(),
@@ -795,6 +1104,20 @@ mod tests {
             assert_eq!(ct.columns.len(), 3);
             assert!(ct.columns[0].is_primary_key);
             assert_eq!(ct.columns[1].data_type, DataType::Varchar(None));
+            assert!(!ct.if_not_exists);
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_if_not_exists() {
+        let stmt =
+            parse_sql("CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY, name VARCHAR)")
+                .unwrap();
+        if let Statement::CreateTable(ct) = stmt {
+            assert!(ct.if_not_exists);
+            assert_eq!(ct.table_name, "users");
         } else {
             panic!("Expected CreateTable");
         }
@@ -824,6 +1147,17 @@ mod tests {
             assert!(sel.where_clause.is_some());
             assert!(sel.order_by.is_some());
             assert_eq!(sel.limit, Some(10));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_select_with_offset() {
+        let stmt = parse_sql("SELECT * FROM t ORDER BY id LIMIT 10 OFFSET 5").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert_eq!(sel.limit, Some(10));
+            assert_eq!(sel.offset, Some(5));
         } else {
             panic!("Expected Select");
         }
@@ -884,6 +1218,234 @@ mod tests {
         .unwrap();
         if let Statement::Select(sel) = stmt {
             assert!(sel.where_clause.is_some());
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_table() {
+        let stmt = parse_sql("DROP TABLE t").unwrap();
+        if let Statement::DropTable(dt) = stmt {
+            assert_eq!(dt.table_name, "t");
+            assert!(!dt.if_exists);
+        } else {
+            panic!("Expected DropTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_table_if_exists() {
+        let stmt = parse_sql("DROP TABLE IF EXISTS t").unwrap();
+        if let Statement::DropTable(dt) = stmt {
+            assert_eq!(dt.table_name, "t");
+            assert!(dt.if_exists);
+        } else {
+            panic!("Expected DropTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_index() {
+        let stmt = parse_sql("DROP INDEX idx_name").unwrap();
+        if let Statement::DropIndex(di) = stmt {
+            assert_eq!(di.index_name, "idx_name");
+            assert!(!di.if_exists);
+        } else {
+            panic!("Expected DropIndex");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_create_table() {
+        let stmt = parse_sql("SHOW CREATE TABLE users").unwrap();
+        if let Statement::ShowCreateTable(name) = stmt {
+            assert_eq!(name, "users");
+        } else {
+            panic!("Expected ShowCreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_describe() {
+        let stmt = parse_sql("DESCRIBE users").unwrap();
+        if let Statement::Describe(name) = stmt {
+            assert_eq!(name, "users");
+        } else {
+            panic!("Expected Describe");
+        }
+    }
+
+    #[test]
+    fn test_parse_like() {
+        let stmt = parse_sql("SELECT * FROM t WHERE name LIKE '%foo%'").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::Like { negated: false, .. })
+            ));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_not_like() {
+        let stmt = parse_sql("SELECT * FROM t WHERE name NOT LIKE '%foo%'").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::Like { negated: true, .. })
+            ));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_in() {
+        let stmt = parse_sql("SELECT * FROM t WHERE id IN (1, 2, 3)").unwrap();
+        if let Statement::Select(sel) = stmt {
+            if let Some(Expr::InList { list, negated, .. }) = sel.where_clause {
+                assert!(!negated);
+                assert_eq!(list.len(), 3);
+            } else {
+                panic!("Expected InList");
+            }
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_between() {
+        let stmt = parse_sql("SELECT * FROM t WHERE id BETWEEN 1 AND 10").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::Between { negated: false, .. })
+            ));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_is_null() {
+        let stmt = parse_sql("SELECT * FROM t WHERE name IS NULL").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::IsNull { negated: false, .. })
+            ));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_is_not_null() {
+        let stmt = parse_sql("SELECT * FROM t WHERE name IS NOT NULL").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::IsNull { negated: true, .. })
+            ));
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_arithmetic() {
+        let stmt = parse_sql("SELECT a + b * c FROM t").unwrap();
+        if let Statement::Select(sel) = stmt {
+            // a + (b * c) due to precedence
+            if let SelectColumn::Expr(
+                Expr::BinaryOp {
+                    op: BinaryOp::Add, ..
+                },
+                _,
+            ) = &sel.columns[0]
+            {
+                // good
+            } else {
+                panic!("Expected addition at top level");
+            }
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_unary_minus() {
+        let stmt = parse_sql("SELECT * FROM t WHERE id = -1").unwrap();
+        if let Statement::Select(sel) = stmt {
+            if let Some(Expr::BinaryOp { right, .. }) = sel.where_clause {
+                assert!(matches!(*right, Expr::IntLiteral(-1)));
+            } else {
+                panic!("Expected BinaryOp");
+            }
+        } else {
+            panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_default_value() {
+        let stmt =
+            parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, status INT DEFAULT 0)").unwrap();
+        if let Statement::CreateTable(ct) = stmt {
+            assert!(ct.columns[1].default_value.is_some());
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_auto_increment() {
+        let stmt = parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR)")
+            .unwrap();
+        if let Statement::CreateTable(ct) = stmt {
+            assert!(ct.columns[0].auto_increment);
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_check_constraint() {
+        let stmt =
+            parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, age INT CHECK (age > 0))").unwrap();
+        if let Statement::CreateTable(ct) = stmt {
+            assert!(ct.columns[1].check_expr.is_some());
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_boolean_type() {
+        let stmt =
+            parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, active BOOLEAN DEFAULT 0)").unwrap();
+        if let Statement::CreateTable(ct) = stmt {
+            assert_eq!(ct.columns[1].data_type, DataType::TinyInt);
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_parse_not_operator() {
+        let stmt = parse_sql("SELECT * FROM t WHERE NOT id = 1").unwrap();
+        if let Statement::Select(sel) = stmt {
+            assert!(matches!(
+                sel.where_clause,
+                Some(Expr::UnaryOp {
+                    op: UnaryOp::Not,
+                    ..
+                })
+            ));
         } else {
             panic!("Expected Select");
         }

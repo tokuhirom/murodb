@@ -287,6 +287,46 @@ impl SystemCatalog {
         Ok(indexes)
     }
 
+    /// Delete a table from the catalog.
+    pub fn delete_table(&mut self, pager: &mut impl PageStore, name: &str) -> Result<()> {
+        let key = format!("table:{}", name);
+        if self.catalog_btree.search(pager, key.as_bytes())?.is_none() {
+            return Err(MuroError::Schema(format!(
+                "Table '{}' does not exist",
+                name
+            )));
+        }
+        self.catalog_btree.delete(pager, key.as_bytes())?;
+        Ok(())
+    }
+
+    /// Delete an index from the catalog.
+    pub fn delete_index(&mut self, pager: &mut impl PageStore, name: &str) -> Result<()> {
+        let key = format!("index:{}", name);
+        if self.catalog_btree.search(pager, key.as_bytes())?.is_none() {
+            return Err(MuroError::Schema(format!(
+                "Index '{}' does not exist",
+                name
+            )));
+        }
+        self.catalog_btree.delete(pager, key.as_bytes())?;
+        Ok(())
+    }
+
+    /// Delete all indexes for a table.
+    pub fn delete_indexes_for_table(
+        &mut self,
+        pager: &mut impl PageStore,
+        table_name: &str,
+    ) -> Result<()> {
+        let indexes = self.get_indexes_for_table(pager, table_name)?;
+        for idx in indexes {
+            let key = format!("index:{}", idx.name);
+            self.catalog_btree.delete(pager, key.as_bytes())?;
+        }
+        Ok(())
+    }
+
     /// List all table names.
     pub fn list_tables(&self, pager: &mut impl PageStore) -> Result<Vec<String>> {
         let mut tables = Vec::new();

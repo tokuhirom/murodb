@@ -3,7 +3,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{char, digit1, multispace0},
-    combinator::{opt, value},
+    combinator::value,
     IResult,
 };
 
@@ -55,6 +55,17 @@ pub enum Token {
     Rollback,
     Show,
     Tables,
+    Drop,
+    If,
+    Exists,
+    Like,
+    Between,
+    Offset,
+    Default,
+    AutoIncrement, // AUTO_INCREMENT
+    Check,
+    Describe,
+    Is,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
     TinyIntType,   // "TINYINT"
     SmallIntType,  // "SMALLINT"
@@ -63,6 +74,10 @@ pub enum Token {
     VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
     TextType,      // "TEXT"
+    BooleanType,   // "BOOLEAN" / "BOOL"
+
+    // Special function names
+    FtsSnippet, // "fts_snippet"
 
     // Literals
     Integer(i64),
@@ -84,9 +99,10 @@ pub enum Token {
     Le,
     Ge,
     Dot,
-
-    // Special function names
-    FtsSnippet, // "fts_snippet"
+    Plus,
+    Minus,
+    Slash,
+    Percent,
 }
 
 /// Tokenize a SQL string.
@@ -146,6 +162,10 @@ fn lex_symbol(input: &str) -> IResult<&str, Token> {
         value(Token::Lt, char('<')),
         value(Token::Gt, char('>')),
         value(Token::Dot, char('.')),
+        value(Token::Plus, char('+')),
+        value(Token::Minus, char('-')),
+        value(Token::Slash, char('/')),
+        value(Token::Percent, char('%')),
     ))(input)
 }
 
@@ -185,16 +205,11 @@ fn lex_string_literal(input: &str) -> IResult<&str, Token> {
 }
 
 fn lex_number(input: &str) -> IResult<&str, Token> {
-    let (input, neg) = opt(char('-'))(input)?;
     let (input, digits) = digit1(input)?;
 
-    let mut num: i64 = digits.parse().map_err(|_| {
+    let num: i64 = digits.parse().map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
     })?;
-
-    if neg.is_some() {
-        num = -num;
-    }
 
     Ok((input, Token::Integer(num)))
 }
@@ -229,7 +244,17 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "ORDER" => Token::Order,
         "BY" => Token::By,
         "ASC" => Token::Asc,
-        "DESC" => Token::Desc,
+        "DESC" | "DESCRIBE" => {
+            // Disambiguate: DESC is a keyword, DESCRIBE is a statement.
+            // "DESC" followed by table-like context means DESCRIBE.
+            // We'll handle this at the parser level.
+            // If the full word is DESCRIBE, emit Describe.
+            if upper == "DESCRIBE" {
+                Token::Describe
+            } else {
+                Token::Desc
+            }
+        }
         "LIMIT" => Token::Limit,
         "AS" => Token::As,
         "MATCH" => Token::Match,
@@ -238,7 +263,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "NATURAL" => Token::Natural,
         "LANGUAGE" => Token::Language,
         "MODE" => Token::Mode,
-        "BOOLEAN" => Token::Boolean,
+        "BOOLEAN" | "BOOL" => Token::Boolean,
         "JOIN" => Token::Join,
         "INNER" => Token::Inner,
         "LEFT" => Token::Left,
@@ -249,6 +274,16 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "ROLLBACK" => Token::Rollback,
         "SHOW" => Token::Show,
         "TABLES" => Token::Tables,
+        "DROP" => Token::Drop,
+        "IF" => Token::If,
+        "EXISTS" => Token::Exists,
+        "LIKE" => Token::Like,
+        "BETWEEN" => Token::Between,
+        "OFFSET" => Token::Offset,
+        "DEFAULT" => Token::Default,
+        "AUTO_INCREMENT" => Token::AutoIncrement,
+        "CHECK" => Token::Check,
+        "IS" => Token::Is,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"
             let rest = remaining.trim_start();
@@ -319,5 +354,50 @@ mod tests {
         assert!(tokens.contains(&Token::Match));
         assert!(tokens.contains(&Token::Against));
         assert!(tokens.contains(&Token::Natural));
+    }
+
+    #[test]
+    fn test_tokenize_drop_table() {
+        let tokens = tokenize("DROP TABLE IF EXISTS t").unwrap();
+        assert_eq!(tokens[0], Token::Drop);
+        assert_eq!(tokens[1], Token::Table);
+        assert_eq!(tokens[2], Token::If);
+        assert_eq!(tokens[3], Token::Exists);
+        assert_eq!(tokens[4], Token::Ident("t".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_arithmetic() {
+        let tokens = tokenize("SELECT a + b - c * d / e % f FROM t").unwrap();
+        assert!(tokens.contains(&Token::Plus));
+        assert!(tokens.contains(&Token::Minus));
+        assert!(tokens.contains(&Token::Star));
+        assert!(tokens.contains(&Token::Slash));
+        assert!(tokens.contains(&Token::Percent));
+    }
+
+    #[test]
+    fn test_tokenize_like() {
+        let tokens = tokenize("SELECT * FROM t WHERE name LIKE '%foo%'").unwrap();
+        assert!(tokens.contains(&Token::Like));
+    }
+
+    #[test]
+    fn test_tokenize_between() {
+        let tokens = tokenize("SELECT * FROM t WHERE id BETWEEN 1 AND 10").unwrap();
+        assert!(tokens.contains(&Token::Between));
+    }
+
+    #[test]
+    fn test_tokenize_is_null() {
+        let tokens = tokenize("SELECT * FROM t WHERE name IS NULL").unwrap();
+        assert!(tokens.contains(&Token::Is));
+        assert!(tokens.contains(&Token::Null));
+    }
+
+    #[test]
+    fn test_tokenize_auto_increment() {
+        let tokens = tokenize("CREATE TABLE t (id BIGINT PRIMARY KEY AUTO_INCREMENT)").unwrap();
+        assert!(tokens.contains(&Token::AutoIncrement));
     }
 }

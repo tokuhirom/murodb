@@ -8,6 +8,20 @@ pub struct ColumnDef {
     pub is_unique: bool,
     pub is_nullable: bool,
     pub is_hidden: bool,
+    pub auto_increment: bool,
+    /// Default value as a simple literal (integer or string).
+    /// Stored as serialized bytes in the column definition.
+    pub default_value: Option<DefaultValue>,
+    /// CHECK constraint expression text (stored as string, re-parsed at runtime).
+    pub check_expr: Option<String>,
+}
+
+/// Simple default values that can be serialized.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefaultValue {
+    Integer(i64),
+    String(String),
+    Null,
 }
 
 impl ColumnDef {
@@ -19,6 +33,9 @@ impl ColumnDef {
             is_unique: false,
             is_nullable: true,
             is_hidden: false,
+            auto_increment: false,
+            default_value: None,
+            check_expr: None,
         }
     }
 
@@ -43,10 +60,24 @@ impl ColumnDef {
         self
     }
 
+    pub fn with_auto_increment(mut self) -> Self {
+        self.auto_increment = true;
+        self
+    }
+
+    pub fn with_default(mut self, default: DefaultValue) -> Self {
+        self.default_value = Some(default);
+        self
+    }
+
+    pub fn with_check(mut self, check: &str) -> Self {
+        self.check_expr = Some(check.to_string());
+        self
+    }
+
     /// Serialize column definition to bytes.
     /// Format: [name_len(u16)][name][type_byte][flags][optional_size(u32)]
-    /// optional_size is written for Varchar and Varbinary types:
-    ///   0 = None, non-zero = Some(n)
+    ///         [default_tag(u8)][default_data...][check_len(u16)][check_str...]
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         // name length + name
@@ -77,6 +108,9 @@ impl ColumnDef {
         if self.is_hidden {
             flags |= 0x08;
         }
+        if self.auto_increment {
+            flags |= 0x10;
+        }
         buf.push(flags);
         // optional size for Varchar/Varbinary
         match self.data_type {
@@ -84,6 +118,30 @@ impl ColumnDef {
                 buf.extend_from_slice(&size.unwrap_or(0).to_le_bytes());
             }
             _ => {}
+        }
+        // default value
+        match &self.default_value {
+            None => buf.push(0), // no default
+            Some(DefaultValue::Null) => buf.push(1),
+            Some(DefaultValue::Integer(n)) => {
+                buf.push(2);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            Some(DefaultValue::String(s)) => {
+                buf.push(3);
+                let s_bytes = s.as_bytes();
+                buf.extend_from_slice(&(s_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(s_bytes);
+            }
+        }
+        // check expression
+        match &self.check_expr {
+            None => buf.extend_from_slice(&0u16.to_le_bytes()),
+            Some(expr) => {
+                let expr_bytes = expr.as_bytes();
+                buf.extend_from_slice(&(expr_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(expr_bytes);
+            }
         }
         buf
     }
@@ -141,6 +199,62 @@ impl ColumnDef {
             _ => return None,
         };
 
+        let auto_increment = flags & 0x10 != 0;
+
+        // default value
+        let default_value = if data.len() > consumed {
+            let tag = data[consumed];
+            consumed += 1;
+            match tag {
+                0 => None,
+                1 => Some(DefaultValue::Null),
+                2 => {
+                    if data.len() < consumed + 8 {
+                        return None;
+                    }
+                    let n = i64::from_le_bytes(data[consumed..consumed + 8].try_into().unwrap());
+                    consumed += 8;
+                    Some(DefaultValue::Integer(n))
+                }
+                3 => {
+                    if data.len() < consumed + 2 {
+                        return None;
+                    }
+                    let slen = u16::from_le_bytes(data[consumed..consumed + 2].try_into().unwrap())
+                        as usize;
+                    consumed += 2;
+                    if data.len() < consumed + slen {
+                        return None;
+                    }
+                    let s = String::from_utf8(data[consumed..consumed + slen].to_vec()).ok()?;
+                    consumed += slen;
+                    Some(DefaultValue::String(s))
+                }
+                _ => return None,
+            }
+        } else {
+            None
+        };
+
+        // check expression
+        let check_expr = if data.len() >= consumed + 2 {
+            let check_len =
+                u16::from_le_bytes(data[consumed..consumed + 2].try_into().unwrap()) as usize;
+            consumed += 2;
+            if check_len > 0 {
+                if data.len() < consumed + check_len {
+                    return None;
+                }
+                let s = String::from_utf8(data[consumed..consumed + check_len].to_vec()).ok()?;
+                consumed += check_len;
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let col = ColumnDef {
             name,
             data_type,
@@ -148,6 +262,9 @@ impl ColumnDef {
             is_unique: flags & 0x02 != 0,
             is_nullable: flags & 0x04 != 0,
             is_hidden: flags & 0x08 != 0,
+            auto_increment,
+            default_value,
+            check_expr,
         };
         Some((col, consumed))
     }
@@ -195,5 +312,52 @@ mod tests {
             let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
             assert_eq!(col2.data_type, dt, "Roundtrip failed for {:?}", dt);
         }
+    }
+
+    #[test]
+    fn test_column_roundtrip_auto_increment() {
+        let col = ColumnDef::new("id", DataType::BigInt)
+            .primary_key()
+            .with_auto_increment();
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert!(col2.auto_increment);
+        assert!(col2.is_primary_key);
+    }
+
+    #[test]
+    fn test_column_roundtrip_default_integer() {
+        let col = ColumnDef::new("status", DataType::Int).with_default(DefaultValue::Integer(0));
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert_eq!(col2.default_value, Some(DefaultValue::Integer(0)));
+    }
+
+    #[test]
+    fn test_column_roundtrip_default_string() {
+        let col = ColumnDef::new("name", DataType::Varchar(None))
+            .with_default(DefaultValue::String("unknown".into()));
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert_eq!(
+            col2.default_value,
+            Some(DefaultValue::String("unknown".into()))
+        );
+    }
+
+    #[test]
+    fn test_column_roundtrip_default_null() {
+        let col = ColumnDef::new("name", DataType::Varchar(None)).with_default(DefaultValue::Null);
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert_eq!(col2.default_value, Some(DefaultValue::Null));
+    }
+
+    #[test]
+    fn test_column_roundtrip_check() {
+        let col = ColumnDef::new("age", DataType::Int).with_check("age > 0");
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert_eq!(col2.check_expr, Some("age > 0".into()));
     }
 }

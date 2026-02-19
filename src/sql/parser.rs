@@ -52,6 +52,18 @@ impl Parser {
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
             Some(Token::Show) => self.parse_show()?,
+            Some(Token::Begin) => {
+                self.advance();
+                Statement::Begin
+            }
+            Some(Token::Commit) => {
+                self.advance();
+                Statement::Commit
+            }
+            Some(Token::Rollback) => {
+                self.advance();
+                Statement::Rollback
+            }
             Some(t) => return Err(format!("Unexpected token: {:?}", t)),
             None => return Err("Empty input".into()),
         };
@@ -321,6 +333,77 @@ impl Parser {
         self.expect(&Token::From)?;
         let table_name = self.expect_ident()?;
 
+        // Optional table alias
+        let table_alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        // Parse JOIN clauses
+        let mut joins = Vec::new();
+        loop {
+            let join_type = match self.peek() {
+                Some(Token::Join) => {
+                    self.advance();
+                    Some(JoinType::Inner)
+                }
+                Some(Token::Inner) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Inner)
+                }
+                Some(Token::Left) => {
+                    self.advance();
+                    // optional OUTER keyword (not a token, but could be an ident)
+                    if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                    {
+                        self.advance();
+                    }
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Left)
+                }
+                Some(Token::Cross) => {
+                    self.advance();
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Cross)
+                }
+                _ => None,
+            };
+
+            match join_type {
+                Some(jt) => {
+                    let jt_table = self.expect_ident()?;
+                    let jt_alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_ident()?)
+                    } else if matches!(self.peek(), Some(Token::Ident(_)))
+                        && !self.is_keyword_ahead()
+                    {
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+                    let on_condition = if jt == JoinType::Cross {
+                        None
+                    } else {
+                        self.expect(&Token::On)?;
+                        Some(self.parse_expr()?)
+                    };
+                    joins.push(JoinClause {
+                        join_type: jt,
+                        table_name: jt_table,
+                        alias: jt_alias,
+                        on_condition,
+                    });
+                }
+                None => break,
+            }
+        }
+
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
             Some(self.parse_expr()?)
@@ -368,10 +451,31 @@ impl Parser {
         Ok(Select {
             columns,
             table_name,
+            table_alias,
+            joins,
             where_clause,
             order_by,
             limit,
         })
+    }
+
+    /// Check if the next token is a SQL keyword (not a table alias).
+    fn is_keyword_ahead(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(
+                Token::Where
+                    | Token::Order
+                    | Token::Limit
+                    | Token::Join
+                    | Token::Inner
+                    | Token::Left
+                    | Token::Right
+                    | Token::Cross
+                    | Token::On
+                    | Token::Semicolon
+            )
+        )
     }
 
     fn parse_select_columns(&mut self) -> Result<Vec<SelectColumn>, String> {
@@ -536,7 +640,21 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                Ok(Expr::ColumnRef(name))
+                // Check for table.column qualified name
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance(); // consume '.'
+                                    // After dot: could be Ident or Star
+                    if self.peek() == Some(&Token::Star) {
+                        self.advance();
+                        // table.* — encode as special ColumnRef
+                        Ok(Expr::ColumnRef(format!("{}.*", name)))
+                    } else {
+                        let col = self.expect_ident()?;
+                        Ok(Expr::ColumnRef(format!("{}.{}", name, col)))
+                    }
+                } else {
+                    Ok(Expr::ColumnRef(name))
+                }
             }
             Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
             None => Err("Unexpected end of input in expression".into()),

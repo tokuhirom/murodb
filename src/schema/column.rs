@@ -7,6 +7,7 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_nullable: bool,
+    pub is_hidden: bool,
 }
 
 impl ColumnDef {
@@ -17,6 +18,7 @@ impl ColumnDef {
             is_primary_key: false,
             is_unique: false,
             is_nullable: true,
+            is_hidden: false,
         }
     }
 
@@ -33,6 +35,11 @@ impl ColumnDef {
 
     pub fn not_null(mut self) -> Self {
         self.is_nullable = false;
+        self
+    }
+
+    pub fn hidden(mut self) -> Self {
+        self.is_hidden = true;
         self
     }
 
@@ -59,6 +66,9 @@ impl ColumnDef {
         }
         if self.is_nullable {
             flags |= 0x04;
+        }
+        if self.is_hidden {
+            flags |= 0x08;
         }
         buf.push(flags);
         buf
@@ -87,6 +97,7 @@ impl ColumnDef {
             is_primary_key: flags & 0x01 != 0,
             is_unique: flags & 0x02 != 0,
             is_nullable: flags & 0x04 != 0,
+            is_hidden: flags & 0x08 != 0,
         };
         Some((col, 2 + name_len + 2))
     }

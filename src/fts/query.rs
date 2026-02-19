@@ -9,7 +9,7 @@ use crate::fts::index::FtsIndex;
 use crate::fts::postings::PostingList;
 use crate::fts::scoring::bm25_score;
 use crate::fts::tokenizer::tokenize_bigram;
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 
 /// FTS search result for a single document.
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ pub struct FtsResult {
 /// Execute a NATURAL LANGUAGE MODE query.
 pub fn query_natural(
     fts_index: &FtsIndex,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     query: &str,
 ) -> Result<Vec<FtsResult>> {
     let query_tokens = tokenize_bigram(query);
@@ -106,7 +106,7 @@ enum BooleanTerm {
 /// Execute a BOOLEAN MODE query.
 pub fn query_boolean(
     fts_index: &FtsIndex,
-    pager: &mut Pager,
+    pager: &mut impl PageStore,
     query: &str,
 ) -> Result<Vec<FtsResult>> {
     let terms = parse_boolean_query(query);
@@ -241,7 +241,11 @@ fn parse_boolean_query(query: &str) -> Vec<BooleanTerm> {
 }
 
 /// Find documents matching a phrase (consecutive bigrams).
-fn find_phrase_matches(fts_index: &FtsIndex, pager: &mut Pager, phrase: &str) -> Result<Vec<u64>> {
+fn find_phrase_matches(
+    fts_index: &FtsIndex,
+    pager: &mut impl PageStore,
+    phrase: &str,
+) -> Result<Vec<u64>> {
     let bigrams = tokenize_bigram(phrase);
     if bigrams.is_empty() {
         return Ok(Vec::new());
@@ -322,6 +326,7 @@ mod tests {
     use super::*;
     use crate::crypto::aead::MasterKey;
     use crate::fts::index::FtsPendingOp;
+    use crate::storage::pager::Pager;
     use tempfile::TempDir;
 
     fn test_key() -> MasterKey {

@@ -6,7 +6,7 @@ use crate::btree::key_encoding::compare_keys;
 use crate::btree::node::*;
 use crate::error::{MuroError, Result};
 use crate::storage::page::{Page, PageId};
-use crate::storage::pager::Pager;
+use crate::storage::page_store::PageStore;
 
 /// Minimum number of entries before considering merge/rebalance.
 const MIN_ENTRIES: u16 = 2;
@@ -18,7 +18,7 @@ pub struct BTree {
 
 impl BTree {
     /// Create a new B-tree with a fresh root leaf page.
-    pub fn create(pager: &mut Pager) -> Result<Self> {
+    pub fn create(pager: &mut impl PageStore) -> Result<Self> {
         let mut root = pager.allocate_page()?;
         let root_id = root.page_id();
         init_leaf(&mut root);
@@ -38,13 +38,13 @@ impl BTree {
     }
 
     /// Search for a key. Returns the value if found.
-    pub fn search(&self, pager: &mut Pager, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn search(&self, pager: &mut impl PageStore, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.search_in_page(pager, self.root_page_id, key)
     }
 
     fn search_in_page(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page_id: PageId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>> {
@@ -72,7 +72,7 @@ impl BTree {
     }
 
     /// Insert a key-value pair. If key exists, update the value.
-    pub fn insert(&mut self, pager: &mut Pager, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn insert(&mut self, pager: &mut impl PageStore, key: &[u8], value: &[u8]) -> Result<()> {
         let result = self.insert_into_page(pager, self.root_page_id, key, value)?;
 
         if let Some(split) = result {
@@ -95,7 +95,7 @@ impl BTree {
     /// Result of inserting into a node that caused a split.
     fn insert_into_page(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page_id: PageId,
         key: &[u8],
         value: &[u8],
@@ -111,7 +111,7 @@ impl BTree {
 
     fn insert_into_leaf(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page: Page,
         key: &[u8],
         value: &[u8],
@@ -187,7 +187,7 @@ impl BTree {
 
     fn split_leaf(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         old_page: &Page,
         new_key: &[u8],
         new_value: &[u8],
@@ -244,7 +244,7 @@ impl BTree {
 
     fn insert_into_internal(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page: Page,
         key: &[u8],
         value: &[u8],
@@ -359,7 +359,7 @@ impl BTree {
 
     fn split_internal(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         old_id: PageId,
         entries: &[Vec<u8>],
         current_right: PageId,
@@ -398,7 +398,7 @@ impl BTree {
     }
 
     /// Delete a key. Returns true if the key was found and deleted.
-    pub fn delete(&mut self, pager: &mut Pager, key: &[u8]) -> Result<bool> {
+    pub fn delete(&mut self, pager: &mut impl PageStore, key: &[u8]) -> Result<bool> {
         let (deleted, _) = self.delete_from_page(pager, self.root_page_id, key)?;
 
         if deleted {
@@ -420,7 +420,7 @@ impl BTree {
     /// Returns (was_deleted, is_underfull).
     fn delete_from_page(
         &mut self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page_id: PageId,
         key: &[u8],
     ) -> Result<(bool, bool)> {
@@ -488,14 +488,19 @@ impl BTree {
 
     /// Iterate over all key-value pairs in sorted order.
     /// Calls the callback with (key, value) for each entry.
-    pub fn scan<F>(&self, pager: &mut Pager, mut callback: F) -> Result<()>
+    pub fn scan<F>(&self, pager: &mut impl PageStore, mut callback: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>, // return false to stop
     {
         self.scan_page(pager, self.root_page_id, &mut callback)
     }
 
-    fn scan_page<F>(&self, pager: &mut Pager, page_id: PageId, callback: &mut F) -> Result<()>
+    fn scan_page<F>(
+        &self,
+        pager: &mut impl PageStore,
+        page_id: PageId,
+        callback: &mut F,
+    ) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
@@ -528,7 +533,12 @@ impl BTree {
     }
 
     /// Range scan: iterate over entries where key >= start_key.
-    pub fn scan_from<F>(&self, pager: &mut Pager, start_key: &[u8], mut callback: F) -> Result<()>
+    pub fn scan_from<F>(
+        &self,
+        pager: &mut impl PageStore,
+        start_key: &[u8],
+        mut callback: F,
+    ) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
@@ -537,7 +547,7 @@ impl BTree {
 
     fn scan_from_page<F>(
         &self,
-        pager: &mut Pager,
+        pager: &mut impl PageStore,
         page_id: PageId,
         start_key: &[u8],
         callback: &mut F,
@@ -601,6 +611,7 @@ mod tests {
     use super::*;
     use crate::btree::key_encoding::encode_i64;
     use crate::crypto::aead::MasterKey;
+    use crate::storage::pager::Pager;
     use tempfile::NamedTempFile;
 
     fn setup() -> (Pager, std::path::PathBuf) {

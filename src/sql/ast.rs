@@ -10,6 +10,9 @@ pub enum Statement {
     Update(Update),
     Delete(Delete),
     ShowTables,
+    Begin,
+    Commit,
+    Rollback,
 }
 
 #[derive(Debug, Clone)]
@@ -52,10 +55,27 @@ pub struct Insert {
     pub values: Vec<Vec<Expr>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Cross,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub join_type: JoinType,
+    pub table_name: String,
+    pub alias: Option<String>,
+    pub on_condition: Option<Expr>, // None for CROSS JOIN
+}
+
 #[derive(Debug, Clone)]
 pub struct Select {
     pub columns: Vec<SelectColumn>,
     pub table_name: String,
+    pub table_alias: Option<String>,
+    pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,
     pub order_by: Option<Vec<OrderByItem>>,
     pub limit: Option<u64>,

@@ -259,6 +259,24 @@ impl Pager {
     }
 }
 
+impl crate::storage::page_store::PageStore for Pager {
+    fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        Pager::read_page(self, page_id)
+    }
+
+    fn write_page(&mut self, page: &Page) -> Result<()> {
+        Pager::write_page(self, page)
+    }
+
+    fn allocate_page(&mut self) -> Result<Page> {
+        Pager::allocate_page(self)
+    }
+
+    fn free_page(&mut self, page_id: PageId) {
+        Pager::free_page(self, page_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,6 +3,7 @@ use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::ExecResult;
 use murodb::sql::session::Session;
 use murodb::storage::pager::Pager;
+use murodb::wal::writer::WalWriter;
 use tempfile::TempDir;
 
 fn test_key() -> MasterKey {
@@ -12,11 +13,13 @@ fn test_key() -> MasterKey {
 fn setup_session() -> (Session, TempDir) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let catalog = SystemCatalog::create(&mut pager).unwrap();
     pager.set_catalog_root(catalog.root_page_id());
     pager.flush_meta().unwrap();
-    (Session::new(pager, catalog), dir)
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    (Session::new(pager, catalog, wal), dir)
 }
 
 fn count_rows(session: &mut Session, sql: &str) -> usize {
@@ -233,4 +236,99 @@ fn test_database_into_session() {
     session.execute("COMMIT").unwrap();
 
     assert_eq!(count_rows(&mut session, "SELECT * FROM t"), 1);
+}
+
+#[test]
+fn test_delete_updates_secondary_index() {
+    let (mut session, _dir) = setup_session();
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR UNIQUE)")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (1, 'a@b.com')")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (2, 'c@d.com')")
+        .unwrap();
+
+    // Delete the row with email 'a@b.com'
+    session.execute("DELETE FROM t WHERE id = 1").unwrap();
+
+    // Now re-inserting the same email should succeed (index entry was removed)
+    session
+        .execute("INSERT INTO t VALUES (3, 'a@b.com')")
+        .unwrap();
+
+    assert_eq!(count_rows(&mut session, "SELECT * FROM t"), 2);
+}
+
+#[test]
+fn test_update_updates_secondary_index() {
+    let (mut session, _dir) = setup_session();
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR UNIQUE)")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (1, 'a@b.com')")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (2, 'c@d.com')")
+        .unwrap();
+
+    // Update email for id=1
+    session
+        .execute("UPDATE t SET email = 'new@b.com' WHERE id = 1")
+        .unwrap();
+
+    // Old email should now be available
+    session
+        .execute("INSERT INTO t VALUES (3, 'a@b.com')")
+        .unwrap();
+
+    assert_eq!(count_rows(&mut session, "SELECT * FROM t"), 3);
+}
+
+#[test]
+fn test_update_unique_constraint_check() {
+    let (mut session, _dir) = setup_session();
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR UNIQUE)")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (1, 'a@b.com')")
+        .unwrap();
+    session
+        .execute("INSERT INTO t VALUES (2, 'c@d.com')")
+        .unwrap();
+
+    // Updating to a duplicate email should fail
+    let result = session.execute("UPDATE t SET email = 'c@d.com' WHERE id = 1");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_wal_session_commit_rollback() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    // Create database, insert data, close
+    {
+        let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'Alice')").unwrap();
+        db.execute("INSERT INTO t VALUES (2, 'Bob')").unwrap();
+    }
+
+    // Reopen and verify data persisted via WAL
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 2),
+            _ => panic!("Expected rows"),
+        }
+    }
 }

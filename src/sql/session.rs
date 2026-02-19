@@ -7,25 +7,29 @@ use crate::storage::pager::Pager;
 use crate::tx::page_store::TxPageStore;
 use crate::tx::transaction::Transaction;
 use crate::wal::record::TxId;
+use crate::wal::writer::WalWriter;
 
 /// A session that manages explicit transaction state.
 ///
 /// - `BEGIN` starts a transaction (dirty-page buffering).
-/// - `COMMIT` flushes dirty pages to disk.
-/// - `ROLLBACK` discards dirty pages.
-/// - Without `BEGIN`, statements execute in auto-commit mode (direct pager I/O).
+/// - `COMMIT` flushes dirty pages via WAL, then to disk.
+/// - `ROLLBACK` discards dirty pages and writes an Abort record.
+/// - Without `BEGIN`, each statement executes in auto-commit mode
+///   (wrapped in an implicit transaction with WAL).
 pub struct Session {
     pager: Pager,
     catalog: SystemCatalog,
+    wal: WalWriter,
     active_tx: Option<Transaction>,
     next_txid: TxId,
 }
 
 impl Session {
-    pub fn new(pager: Pager, catalog: SystemCatalog) -> Self {
+    pub fn new(pager: Pager, catalog: SystemCatalog, wal: WalWriter) -> Self {
         Session {
             pager,
             catalog,
+            wal,
             active_tx: None,
             next_txid: 1,
         }
@@ -43,8 +47,8 @@ impl Session {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
                 } else {
-                    // Auto-commit: execute directly against pager
-                    execute_statement(&stmt, &mut self.pager, &mut self.catalog)
+                    // Auto-commit: wrap in an implicit transaction with WAL
+                    self.execute_auto_commit(&stmt)
                 }
             }
         }
@@ -56,7 +60,8 @@ impl Session {
         }
         let txid = self.next_txid;
         self.next_txid += 1;
-        self.active_tx = Some(Transaction::begin(txid, 0));
+        let snapshot_lsn = self.wal.current_lsn();
+        self.active_tx = Some(Transaction::begin(txid, snapshot_lsn));
         Ok(ExecResult::Ok)
     }
 
@@ -65,7 +70,7 @@ impl Session {
             .active_tx
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
-        tx.commit_no_wal(&mut self.pager)?;
+        tx.commit(&mut self.pager, &mut self.wal)?;
         // Update catalog root in pager header
         self.pager.set_catalog_root(self.catalog.root_page_id());
         self.pager.flush_meta()?;
@@ -77,11 +82,42 @@ impl Session {
             .active_tx
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
-        tx.rollback_no_wal();
+        tx.rollback(&mut self.wal)?;
         // Reload catalog from disk since in-memory catalog may have been modified
         let catalog_root = self.pager.catalog_root();
         self.catalog = SystemCatalog::open(catalog_root);
         Ok(ExecResult::Ok)
+    }
+
+    /// Execute a statement in auto-commit mode: wrap in an implicit transaction.
+    fn execute_auto_commit(&mut self, stmt: &Statement) -> Result<ExecResult> {
+        let txid = self.next_txid;
+        self.next_txid += 1;
+        let snapshot_lsn = self.wal.current_lsn();
+        let tx = Transaction::begin(txid, snapshot_lsn);
+
+        // Save catalog state for rollback on error
+        let catalog_root_before = self.catalog.root_page_id();
+
+        let mut store = TxPageStore::new(tx, &mut self.pager);
+        let result = execute_statement(stmt, &mut store, &mut self.catalog);
+        let mut tx = store.into_tx();
+
+        match result {
+            Ok(exec_result) => {
+                // Commit via WAL
+                tx.commit(&mut self.pager, &mut self.wal)?;
+                self.pager.set_catalog_root(self.catalog.root_page_id());
+                self.pager.flush_meta()?;
+                Ok(exec_result)
+            }
+            Err(e) => {
+                // Rollback: discard dirty pages, restore catalog
+                tx.rollback_no_wal();
+                self.catalog = SystemCatalog::open(catalog_root_before);
+                Err(e)
+            }
+        }
     }
 
     /// Execute a statement within an active transaction.

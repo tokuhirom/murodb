@@ -880,6 +880,8 @@ fn exec_update(
         .get_table(pager, &upd.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", upd.table_name)))?;
 
+    let indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
+
     let data_btree = BTree::open(table_def.data_btree_root);
 
     // Collect rows to update (to avoid modifying during scan)
@@ -895,7 +897,9 @@ fn exec_update(
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut count = 0u64;
 
-    for (pk_key, mut values) in to_update {
+    for (pk_key, old_values) in to_update {
+        let mut new_values = old_values.clone();
+
         // Apply assignments
         for (col_name, expr) in &upd.assignments {
             let col_idx = table_def
@@ -904,12 +908,56 @@ fn exec_update(
             let new_val = eval_expr(expr, &|name| {
                 table_def
                     .column_index(name)
-                    .and_then(|i| values.get(i).cloned())
+                    .and_then(|i| new_values.get(i).cloned())
             })?;
-            values[col_idx] = new_val;
+            new_values[col_idx] = new_val;
         }
 
-        let row_data = serialize_row(&values, &table_def.columns);
+        // Check unique constraints on updated indexed columns
+        for idx in &indexes {
+            if idx.is_unique && idx.index_type == IndexType::BTree {
+                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let old_val = &old_values[col_idx];
+                let new_val = &new_values[col_idx];
+                if old_val != new_val && !new_val.is_null() {
+                    let idx_key = encode_value(new_val, &table_def.columns[col_idx].data_type);
+                    let idx_btree = BTree::open(idx.btree_root);
+                    if idx_btree.search(pager, &idx_key)?.is_some() {
+                        return Err(MuroError::UniqueViolation(format!(
+                            "Duplicate value in unique column '{}'",
+                            idx.column_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Update secondary indexes: remove old entries, insert new entries
+        for idx in &indexes {
+            if idx.index_type == IndexType::BTree {
+                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let old_val = &old_values[col_idx];
+                let new_val = &new_values[col_idx];
+                if old_val != new_val {
+                    // Remove old index entry
+                    if !old_val.is_null() {
+                        let old_idx_key =
+                            encode_value(old_val, &table_def.columns[col_idx].data_type);
+                        let mut idx_btree = BTree::open(idx.btree_root);
+                        idx_btree.delete(pager, &old_idx_key)?;
+                    }
+                    // Insert new index entry
+                    if !new_val.is_null() {
+                        let new_idx_key =
+                            encode_value(new_val, &table_def.columns[col_idx].data_type);
+                        let mut idx_btree = BTree::open(idx.btree_root);
+                        idx_btree.insert(pager, &new_idx_key, &pk_key)?;
+                    }
+                }
+            }
+        }
+
+        let row_data = serialize_row(&new_values, &table_def.columns);
         data_btree.insert(pager, &pk_key, &row_data)?;
         count += 1;
     }
@@ -926,14 +974,16 @@ fn exec_delete(
         .get_table(pager, &del.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", del.table_name)))?;
 
+    let indexes = catalog.get_indexes_for_table(pager, &del.table_name)?;
+
     let data_btree = BTree::open(table_def.data_btree_root);
 
-    // Collect keys to delete
-    let mut to_delete: Vec<Vec<u8>> = Vec::new();
+    // Collect keys and row values to delete
+    let mut to_delete: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
     data_btree.scan(pager, |k, v| {
         let values = deserialize_row(v, &table_def.columns)?;
         if matches_where(&del.where_clause, &table_def, &values)? {
-            to_delete.push(k.to_vec());
+            to_delete.push((k.to_vec(), values));
         }
         Ok(true)
     })?;
@@ -941,8 +991,21 @@ fn exec_delete(
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut count = 0u64;
 
-    for pk_key in to_delete {
-        data_btree.delete(pager, &pk_key)?;
+    for (pk_key, values) in &to_delete {
+        // Delete from secondary indexes
+        for idx in &indexes {
+            if idx.index_type == IndexType::BTree {
+                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let val = &values[col_idx];
+                if !val.is_null() {
+                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
+                    let mut idx_btree = BTree::open(idx.btree_root);
+                    idx_btree.delete(pager, &idx_key)?;
+                }
+            }
+        }
+
+        data_btree.delete(pager, pk_key)?;
         count += 1;
     }
 

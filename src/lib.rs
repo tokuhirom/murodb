@@ -29,14 +29,20 @@ use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
 use crate::storage::pager::Pager;
+use crate::wal::writer::WalWriter;
 
 /// Main database handle.
 pub struct Database {
-    pager: Pager,
-    catalog: SystemCatalog,
+    session: Session,
     lock_manager: LockManager,
     #[allow(dead_code)]
+    master_key: MasterKey,
+    #[allow(dead_code)]
     db_path: PathBuf,
+}
+
+fn wal_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("wal")
 }
 
 impl Database {
@@ -45,28 +51,42 @@ impl Database {
         let mut pager = Pager::create(path, master_key)?;
         let catalog = SystemCatalog::create(&mut pager)?;
         pager.set_catalog_root(catalog.root_page_id());
-        let lock_manager = LockManager::new(path)?;
         pager.flush_meta()?;
 
+        let wal = WalWriter::create(&wal_path(path), master_key)?;
+        let lock_manager = LockManager::new(path)?;
+        let session = Session::new(pager, catalog, wal);
+
         Ok(Database {
-            pager,
-            catalog,
+            session,
             lock_manager,
+            master_key: master_key.clone(),
             db_path: path.to_path_buf(),
         })
     }
 
     /// Open an existing database.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
+        let wp = wal_path(path);
+
+        // Run WAL recovery before opening
+        if wp.exists() {
+            crate::wal::recovery::recover(path, &wp, master_key)?;
+            // Truncate WAL after successful recovery
+            std::fs::File::create(&wp)?;
+        }
+
         let pager = Pager::open(path, master_key)?;
         let catalog_root = pager.catalog_root();
         let catalog = SystemCatalog::open(catalog_root);
+        let wal = WalWriter::create(&wp, master_key)?;
         let lock_manager = LockManager::new(path)?;
+        let session = Session::new(pager, catalog, wal);
 
         Ok(Database {
-            pager,
-            catalog,
+            session,
             lock_manager,
+            master_key: master_key.clone(),
             db_path: path.to_path_buf(),
         })
     }
@@ -78,13 +98,16 @@ impl Database {
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
         let catalog = SystemCatalog::create(&mut pager)?;
         pager.set_catalog_root(catalog.root_page_id());
-        let lock_manager = LockManager::new(path)?;
         pager.flush_meta()?;
 
+        let wal = WalWriter::create(&wal_path(path), &master_key)?;
+        let lock_manager = LockManager::new(path)?;
+        let session = Session::new(pager, catalog, wal);
+
         Ok(Database {
-            pager,
-            catalog,
+            session,
             lock_manager,
+            master_key,
             db_path: path.to_path_buf(),
         })
     }
@@ -99,13 +122,13 @@ impl Database {
     /// Execute a SQL statement. Returns the result.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
         let _guard = self.lock_manager.write_lock()?;
-        sql::executor::execute(sql, &mut self.pager, &mut self.catalog)
+        self.session.execute(sql)
     }
 
     /// Execute a SQL query and return rows.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
         let _guard = self.lock_manager.read_lock()?;
-        match sql::executor::execute(sql, &mut self.pager, &mut self.catalog)? {
+        match self.session.execute(sql)? {
             ExecResult::Rows(rows) => Ok(rows),
             _ => Ok(Vec::new()),
         }
@@ -113,20 +136,22 @@ impl Database {
 
     /// Get the catalog root page ID (needed for reopening).
     pub fn catalog_root(&self) -> u64 {
-        self.catalog.root_page_id()
+        self.session.catalog().root_page_id()
     }
 
     /// Flush all data to disk.
     pub fn flush(&mut self) -> Result<()> {
-        self.pager.set_catalog_root(self.catalog.root_page_id());
-        self.pager.flush_meta()
+        let catalog_root = self.session.catalog().root_page_id();
+        let pager = self.session.pager_mut();
+        pager.set_catalog_root(catalog_root);
+        pager.flush_meta()
     }
 
     /// Create a `Session` that supports BEGIN/COMMIT/ROLLBACK.
     ///
     /// This consumes the Database and returns a Session. The Session owns the
-    /// pager and catalog, and manages explicit transaction state.
+    /// pager, catalog, and WAL writer, and manages explicit transaction state.
     pub fn into_session(self) -> Session {
-        Session::new(self.pager, self.catalog)
+        self.session
     }
 }

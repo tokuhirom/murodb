@@ -1,0 +1,10 @@
+[book]
+title = "MuroDB Documentation"
+authors = ["tokuhirom"]
+language = "ja"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/tokuhirom/murodb"

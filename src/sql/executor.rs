@@ -63,9 +63,11 @@ pub fn execute_statement(
         Statement::ShowTables => exec_show_tables(pager, catalog),
         Statement::ShowCreateTable(name) => exec_show_create_table(name, pager, catalog),
         Statement::Describe(name) => exec_describe(name, pager, catalog),
-        Statement::Begin | Statement::Commit | Statement::Rollback => Err(MuroError::Execution(
-            "BEGIN/COMMIT/ROLLBACK must be handled by Session".into(),
-        )),
+        Statement::Begin | Statement::Commit | Statement::Rollback | Statement::ShowCheckpointStats => {
+            Err(MuroError::Execution(
+                "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS must be handled by Session".into(),
+            ))
+        }
     }
 }
 

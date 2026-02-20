@@ -1,15 +1,25 @@
 use crate::error::{MuroError, Result};
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::ast::Statement;
-use crate::sql::executor::{execute_statement, ExecResult};
+use crate::sql::executor::{execute_statement, ExecResult, Row};
 use crate::sql::parser::parse_sql;
 use crate::storage::pager::Pager;
 use crate::tx::page_store::TxPageStore;
 use crate::tx::transaction::Transaction;
+use crate::types::Value;
 use crate::wal::record::TxId;
 use crate::wal::writer::WalWriter;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
+
+/// Checkpoint operation statistics for observability.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointStats {
+    pub total_checkpoints: u64,
+    pub failed_checkpoints: u64,
+    pub last_failure_error: Option<String>,
+    pub last_failure_timestamp_ms: Option<u64>,
+}
 
 /// A session that manages explicit transaction state.
 ///
@@ -24,6 +34,7 @@ pub struct Session {
     wal: WalWriter,
     active_tx: Option<Transaction>,
     next_txid: TxId,
+    checkpoint_stats: CheckpointStats,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
 }
@@ -36,6 +47,7 @@ impl Session {
             wal,
             active_tx: None,
             next_txid: 1,
+            checkpoint_stats: CheckpointStats::default(),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
         }
@@ -49,6 +61,7 @@ impl Session {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
+            Statement::ShowCheckpointStats => self.handle_show_checkpoint_stats(),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
@@ -156,18 +169,77 @@ impl Session {
     }
 
     fn post_commit_checkpoint(&mut self) {
+        self.checkpoint_stats.total_checkpoints += 1;
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
+            self.checkpoint_stats.failed_checkpoints += 1;
+            self.checkpoint_stats.last_failure_error = Some(format!("{}", e));
+            self.checkpoint_stats.last_failure_timestamp_ms = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
             self.emit_checkpoint_warning("post-commit", attempts, &e);
         }
     }
 
     fn post_rollback_checkpoint(&mut self) {
+        self.checkpoint_stats.total_checkpoints += 1;
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
+            self.checkpoint_stats.failed_checkpoints += 1;
+            self.checkpoint_stats.last_failure_error = Some(format!("{}", e));
+            self.checkpoint_stats.last_failure_timestamp_ms = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
             self.emit_checkpoint_warning("post-rollback", attempts, &e);
         }
+    }
+
+    fn handle_show_checkpoint_stats(&self) -> Result<ExecResult> {
+        let stats = &self.checkpoint_stats;
+        let rows = vec![
+            Row {
+                values: vec![
+                    ("stat".to_string(), Value::Varchar("total_checkpoints".to_string())),
+                    ("value".to_string(), Value::Varchar(stats.total_checkpoints.to_string())),
+                ],
+            },
+            Row {
+                values: vec![
+                    ("stat".to_string(), Value::Varchar("failed_checkpoints".to_string())),
+                    ("value".to_string(), Value::Varchar(stats.failed_checkpoints.to_string())),
+                ],
+            },
+            Row {
+                values: vec![
+                    ("stat".to_string(), Value::Varchar("last_failure_error".to_string())),
+                    ("value".to_string(), Value::Varchar(
+                        stats.last_failure_error.clone().unwrap_or_default(),
+                    )),
+                ],
+            },
+            Row {
+                values: vec![
+                    ("stat".to_string(), Value::Varchar("last_failure_timestamp_ms".to_string())),
+                    ("value".to_string(), Value::Varchar(
+                        stats.last_failure_timestamp_ms
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    )),
+                ],
+            },
+        ];
+        Ok(ExecResult::Rows(rows))
+    }
+
+    pub fn checkpoint_stats(&self) -> &CheckpointStats {
+        &self.checkpoint_stats
     }
 
     fn emit_checkpoint_warning(&self, phase: &str, attempts: usize, error: &MuroError) {
@@ -440,6 +512,78 @@ mod tests {
         match session.execute("SELECT * FROM t").unwrap() {
             ExecResult::Rows(rows) => assert_eq!(rows.len(), 1),
             _ => panic!("Expected rows"),
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_stats_tracked() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        // Initial stats should be zero
+        assert_eq!(session.checkpoint_stats().total_checkpoints, 0);
+        assert_eq!(session.checkpoint_stats().failed_checkpoints, 0);
+
+        // Successful checkpoint
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        assert_eq!(session.checkpoint_stats().total_checkpoints, 1);
+        assert_eq!(session.checkpoint_stats().failed_checkpoints, 0);
+
+        // Failed checkpoint (all retries exhausted)
+        session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
+        session.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(session.checkpoint_stats().total_checkpoints, 2);
+        assert_eq!(session.checkpoint_stats().failed_checkpoints, 1);
+        assert!(session.checkpoint_stats().last_failure_error.is_some());
+        assert!(session.checkpoint_stats().last_failure_timestamp_ms.is_some());
+    }
+
+    #[test]
+    fn test_show_checkpoint_stats_sql() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        // Execute a commit to get some stats
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+
+        // Query stats via SQL
+        match session.execute("SHOW CHECKPOINT STATS").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 4);
+                // First row: total_checkpoints
+                assert_eq!(
+                    rows[0].get("stat"),
+                    Some(&crate::types::Value::Varchar("total_checkpoints".to_string()))
+                );
+                assert_eq!(
+                    rows[0].get("value"),
+                    Some(&crate::types::Value::Varchar("1".to_string()))
+                );
+                // Second row: failed_checkpoints
+                assert_eq!(
+                    rows[1].get("value"),
+                    Some(&crate::types::Value::Varchar("0".to_string()))
+                );
+            }
+            _ => panic!("Expected rows from SHOW CHECKPOINT STATS"),
         }
     }
 }

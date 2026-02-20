@@ -111,51 +111,67 @@ impl Transaction {
 
         // Build a speculative freelist snapshot without mutating the pager's freelist.
         // This avoids leaking freed pages into the pager if WAL commit fails below.
-        use crate::storage::page::{PAGE_HEADER_SIZE, PAGE_SIZE};
-        let freelist_data = {
+        use crate::storage::page::PAGE_HEADER_SIZE;
+        let pages_needed = {
             let fl = pager.freelist_mut();
-            // Temporarily apply freed pages to compute serialized form
+            // Temporarily apply freed pages to compute needed pages
             for &page_id in &self.freed_pages {
                 fl.free(page_id);
             }
-            let data = fl.serialize();
-            // Roll back: remove the pages we just added
+            let needed = fl.page_count_needed();
+            // Roll back
+            for _ in &self.freed_pages {
+                fl.undo_last_free();
+            }
+            needed
+        };
+
+        // Allocate freelist pages. Reuse existing freelist page as the first one.
+        let mut fl_page_ids = Vec::with_capacity(pages_needed);
+        let existing_fl_page_id = pager.freelist_page_id();
+        if existing_fl_page_id != 0 {
+            fl_page_ids.push(existing_fl_page_id);
+        }
+        // Allocate additional pages as needed
+        while fl_page_ids.len() < pages_needed {
+            let new_page = pager.allocate_page()?;
+            let pid = new_page.page_id();
+            fl_page_ids.push(pid);
+            let needed = pid + 1;
+            if needed > page_count {
+                page_count = needed;
+            }
+        }
+
+        // Build speculative freelist and serialize to pages
+        let fl_pages_data = {
+            let fl = pager.freelist_mut();
+            for &page_id in &self.freed_pages {
+                fl.free(page_id);
+            }
+            let data = fl.serialize_pages(&fl_page_ids);
             for _ in &self.freed_pages {
                 fl.undo_last_free();
             }
             data
         };
 
-        // Check that the serialized freelist fits in a single page
-        let max_freelist_data_size = PAGE_SIZE - PAGE_HEADER_SIZE;
-        if freelist_data.len() > max_freelist_data_size {
-            return Err(MuroError::Internal(format!(
-                "freelist too large to fit in a single page: {} bytes (max {})",
-                freelist_data.len(),
-                max_freelist_data_size
-            )));
+        // Write freelist pages to WAL
+        let mut fl_disk_pages = Vec::with_capacity(fl_pages_data.len());
+        for (pid, data_area) in &fl_pages_data {
+            let mut fl_page = Page::new(*pid);
+            fl_page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + data_area.len()]
+                .copy_from_slice(data_area);
+            wal.append(&WalRecord::PagePut {
+                txid: self.txid,
+                page_id: *pid,
+                data: fl_page.data.to_vec(),
+            })?;
+            fl_disk_pages.push(fl_page);
         }
 
-        // Persist freelist: serialize and write to a dedicated page
-        let mut freelist_page_id = pager.freelist_page_id();
-        if freelist_page_id == 0 {
-            // Allocate a new page for freelist storage
-            let fl_page = pager.allocate_page()?;
-            freelist_page_id = fl_page.page_id();
-            let needed = freelist_page_id + 1;
-            if needed > page_count {
-                page_count = needed;
-            }
-        }
-        let mut fl_page = Page::new(freelist_page_id);
-        // Write freelist data after page header to preserve page_id
-        fl_page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + freelist_data.len()]
-            .copy_from_slice(&freelist_data);
-        wal.append(&WalRecord::PagePut {
-            txid: self.txid,
-            page_id: freelist_page_id,
-            data: fl_page.data.to_vec(),
-        })?;
+        // The first page in the chain is the freelist root
+        let freelist_page_id = fl_page_ids[0];
 
         // Write MetaUpdate so recovery can restore catalog_root, page_count, and freelist_page_id
         wal.append(&WalRecord::MetaUpdate {
@@ -185,8 +201,10 @@ impl Transaction {
         for page in self.dirty_pages.values() {
             pager.write_page(page)?;
         }
-        // Write the freelist page to the data file
-        pager.write_page(&fl_page)?;
+        // Write freelist pages to the data file
+        for fl_page in &fl_disk_pages {
+            pager.write_page(fl_page)?;
+        }
 
         // Update pager metadata atomically before single flush_meta
         pager.set_catalog_root(catalog_root);
@@ -335,58 +353,81 @@ mod tests {
 
         let freelist_len_before = pager.freelist_mut().len();
 
-        // Second transaction: free a page then attempt commit via /dev/full,
-        // which accepts open() but returns ENOSPC on write(), causing
-        // wal.append() to fail mid-commit.
-        let mut tx2 = Transaction::begin(2, 0);
+        // Second transaction: free a page then attempt commit with injected write failure
+        let mut tx2 = Transaction::begin(2, wal.current_lsn());
         tx2.free_page(page_a_id);
         let mut page_b_dirty = pager.read_page(page_b_id).unwrap();
         page_b_dirty.insert_cell(b"modified").unwrap();
         tx2.write_page(page_b_dirty);
 
-        let dev_full = std::path::Path::new("/dev/full");
-        if let (true, Ok(mut wal_full)) =
-            (dev_full.exists(), WalWriter::open(dev_full, &test_key(), 0))
-        {
-            // tx.commit should fail because /dev/full returns ENOSPC on write
-            let result = tx2.commit(&mut pager, &mut wal_full, 0);
-            assert!(result.is_err(), "commit must fail when WAL write fails");
+        // Inject a write failure so wal.append() fails mid-commit
+        wal.set_inject_write_failure(Some(std::io::ErrorKind::Other));
+        let result = tx2.commit(&mut pager, &mut wal, 0);
+        assert!(result.is_err(), "commit must fail when WAL write fails");
 
-            // Freelist must be unchanged — the freed page must NOT have leaked
-            assert_eq!(
-                pager.freelist_mut().len(),
-                freelist_len_before,
-                "freelist must not change when WAL commit fails"
-            );
+        // Freelist must be unchanged — the freed page must NOT have leaked
+        assert_eq!(
+            pager.freelist_mut().len(),
+            freelist_len_before,
+            "freelist must not change when WAL commit fails"
+        );
 
-            // Verify a subsequent commit on the real WAL works correctly
-            let mut tx3 = Transaction::begin(3, wal.current_lsn());
-            tx3.free_page(page_a_id);
-            let page_b_read = pager.read_page(page_b_id).unwrap();
-            tx3.write_page(page_b_read);
-            tx3.commit(&mut pager, &mut wal, 0).unwrap();
-            assert_eq!(
-                pager.freelist_mut().len(),
-                freelist_len_before + 1,
-                "freelist should grow by 1 after successful commit with free_page"
-            );
-        } else {
-            // /dev/full not available (rare); fall back to verifying the
-            // speculative path does not mutate the freelist before commit.
-            // Drop tx2 without committing.
-            drop(tx2);
-            assert_eq!(
-                pager.freelist_mut().len(),
-                freelist_len_before,
-                "freelist must not change when tx is dropped without commit"
-            );
-        }
+        // Clear the injection and verify a subsequent commit works correctly
+        wal.set_inject_write_failure(None);
+        let mut tx3 = Transaction::begin(3, wal.current_lsn());
+        tx3.free_page(page_a_id);
+        let page_b_read = pager.read_page(page_b_id).unwrap();
+        tx3.write_page(page_b_read);
+        tx3.commit(&mut pager, &mut wal, 0).unwrap();
+        assert_eq!(
+            pager.freelist_mut().len(),
+            freelist_len_before + 1,
+            "freelist should grow by 1 after successful commit with free_page"
+        );
     }
 
-    /// Regression test: freelist serialization size must be checked.
+    /// Test that freelist is not leaked when WAL sync (fsync) fails.
     #[test]
-    fn test_freelist_overflow_returns_error() {
-        use crate::storage::page::{PAGE_HEADER_SIZE, PAGE_SIZE};
+    fn test_freelist_not_leaked_on_wal_sync_failure() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+
+        // First transaction: allocate and commit
+        let mut tx1 = Transaction::begin(1, 0);
+        let page_a = tx1.allocate_page(&mut pager).unwrap();
+        let page_a_id = page_a.page_id();
+        tx1.write_page(page_a);
+        tx1.commit(&mut pager, &mut wal, 0).unwrap();
+
+        let freelist_len_before = pager.freelist_mut().len();
+
+        // Second transaction: free a page, inject sync failure
+        let mut tx2 = Transaction::begin(2, wal.current_lsn());
+        tx2.free_page(page_a_id);
+        let page_a_read = pager.read_page(page_a_id).unwrap();
+        tx2.write_page(page_a_read);
+
+        wal.set_inject_sync_failure(Some(std::io::ErrorKind::Other));
+        let result = tx2.commit(&mut pager, &mut wal, 0);
+        assert!(result.is_err(), "commit must fail when WAL sync fails");
+
+        assert_eq!(
+            pager.freelist_mut().len(),
+            freelist_len_before,
+            "freelist must not change when WAL sync fails"
+        );
+
+        wal.set_inject_sync_failure(None);
+    }
+
+    /// Test that large freelists spanning multiple pages work correctly.
+    #[test]
+    fn test_large_freelist_multi_page() {
+        use crate::storage::freelist::ENTRIES_PER_FREELIST_PAGE;
 
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -395,26 +436,34 @@ mod tests {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
         let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
 
-        let mut tx = Transaction::begin(1, 0);
-
-        // Each free page entry takes 8 bytes, plus 8 byte count header.
-        // Max = (PAGE_SIZE - PAGE_HEADER_SIZE - 8) / 8
-        let max_entries = (PAGE_SIZE - PAGE_HEADER_SIZE - 8) / 8;
-        // Free more pages than can fit
-        for i in 0..=(max_entries as u64) {
-            tx.free_page(i + 100); // Use high IDs to avoid conflicts
+        // First, allocate many pages
+        let num_pages = ENTRIES_PER_FREELIST_PAGE + 10; // More than fits in one page
+        let mut tx1 = Transaction::begin(1, 0);
+        let mut page_ids = Vec::new();
+        for _ in 0..num_pages {
+            let page = tx1.allocate_page(&mut pager).unwrap();
+            let pid = page.page_id();
+            tx1.write_page(page);
+            page_ids.push(pid);
         }
+        tx1.commit(&mut pager, &mut wal, 0).unwrap();
 
-        let result = tx.commit(&mut pager, &mut wal, 0);
+        // Free all those pages in a second transaction
+        let mut tx2 = Transaction::begin(2, wal.current_lsn());
+        for &pid in &page_ids {
+            tx2.free_page(pid);
+        }
+        // Need at least one dirty page for the commit
+        let dummy_page = tx2.allocate_page(&mut pager).unwrap();
+        tx2.write_page(dummy_page);
+        tx2.commit(&mut pager, &mut wal, 0).unwrap();
+
+        // Verify freelist size is correct
         assert!(
-            result.is_err(),
-            "commit should fail when freelist is too large"
-        );
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("freelist too large"),
-            "error should mention freelist size: {}",
-            err_msg
+            pager.freelist_mut().len() >= num_pages,
+            "freelist should contain at least {} entries, got {}",
+            num_pages,
+            pager.freelist_mut().len()
         );
     }
 }

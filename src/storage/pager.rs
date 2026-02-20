@@ -104,12 +104,29 @@ impl Pager {
             let _page0 = pager.read_page_from_disk(0)?;
         }
 
-        // Load persisted freelist if present
+        // Load persisted freelist if present (supports multi-page chain)
         if pager.freelist_page_id != 0 {
-            let fl_page = pager.read_page_from_disk(pager.freelist_page_id)?;
-            pager.freelist = FreeList::deserialize(
-                &fl_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..],
-            );
+            let first_page = pager.read_page_from_disk(pager.freelist_page_id)?;
+            let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+
+            if FreeList::is_multi_page_format(data_area) {
+                // Multi-page chain: walk the chain
+                let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
+                pages_data_owned.push(data_area.to_vec());
+                // Read next pointer from first page
+                let mut next_page_id = u64::from_le_bytes(data_area[0..8].try_into().unwrap());
+                while next_page_id != 0 {
+                    let next_page = pager.read_page_from_disk(next_page_id)?;
+                    let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+                    next_page_id = u64::from_le_bytes(next_data[0..8].try_into().unwrap());
+                    pages_data_owned.push(next_data.to_vec());
+                }
+                let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
+                pager.freelist = FreeList::deserialize_pages(&pages_refs);
+            } else {
+                // Legacy single-page format
+                pager.freelist = FreeList::deserialize(data_area);
+            }
         }
 
         Ok(pager)
@@ -161,6 +178,15 @@ impl Pager {
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+
+        // Reject future versions we don't understand
+        if version > FORMAT_VERSION {
+            return Err(MuroError::Wal(format!(
+                "unsupported database format version {}",
+                version
+            )));
+        }
+
         self.salt.copy_from_slice(&header[12..28]);
         self.catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
         self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
@@ -173,6 +199,12 @@ impl Pager {
             if stored_crc != computed_crc {
                 return Err(MuroError::Wal("header corrupted".into()));
             }
+        }
+
+        // Auto-upgrade v1 → v2: rewrite header with CRC and freelist_page_id
+        if version == 1 {
+            self.write_plaintext_header()?;
+            self.file.sync_all()?;
         }
 
         Ok(())

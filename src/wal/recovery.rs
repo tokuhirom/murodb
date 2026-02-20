@@ -1,12 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::crypto::aead::MasterKey;
-use crate::error::Result;
+use crate::error::{MuroError, Result};
 use crate::storage::page::{Page, PageId, PAGE_SIZE};
 use crate::storage::pager::Pager;
 use crate::wal::reader::WalReader;
 use crate::wal::record::{TxId, WalRecord};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxTerminalState {
+    Committed,
+    Aborted,
+}
 
 /// Recover the database from WAL.
 /// Replays committed transactions, discards uncommitted ones.
@@ -31,17 +37,25 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
         });
     }
 
-    // Phase 1: Identify committed and aborted transactions
-    let mut committed: HashSet<TxId> = HashSet::new();
-    let mut aborted: HashSet<TxId> = HashSet::new();
-
-    for (_, record) in &records {
+    // Phase 1: Validate terminal records and determine final tx outcome.
+    // If both Commit/Abort appear for one txid, the later record wins.
+    let mut terminal: HashMap<TxId, TxTerminalState> = HashMap::new();
+    for (lsn, record) in &records {
         match record {
-            WalRecord::Commit { txid, .. } => {
-                committed.insert(*txid);
+            WalRecord::Commit {
+                txid,
+                lsn: commit_lsn,
+            } => {
+                if *commit_lsn != *lsn {
+                    return Err(MuroError::Wal(format!(
+                        "Commit LSN mismatch for txid {}: record lsn={}, declared lsn={}",
+                        txid, lsn, commit_lsn
+                    )));
+                }
+                terminal.insert(*txid, TxTerminalState::Committed);
             }
             WalRecord::Abort { txid } => {
-                aborted.insert(*txid);
+                terminal.insert(*txid, TxTerminalState::Aborted);
             }
             _ => {}
         }
@@ -59,7 +73,10 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 page_id,
                 data,
             } => {
-                if committed.contains(txid) {
+                if matches!(
+                    terminal.get(txid),
+                    Some(TxTerminalState::Committed)
+                ) {
                     page_updates.insert(*page_id, data.clone());
                 }
             }
@@ -68,7 +85,10 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 catalog_root,
                 page_count,
             } => {
-                if committed.contains(txid) {
+                if matches!(
+                    terminal.get(txid),
+                    Some(TxTerminalState::Committed)
+                ) {
                     latest_catalog_root = Some(*catalog_root);
                     latest_page_count = Some(*page_count);
                 }
@@ -81,14 +101,20 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
     let mut pager = Pager::open(db_path, master_key)?;
     let mut pages_replayed = 0;
 
-    for data in page_updates.values() {
-        if data.len() == PAGE_SIZE {
-            let mut page_data = [0u8; PAGE_SIZE];
-            page_data.copy_from_slice(data);
-            let page = Page::from_bytes(page_data);
-            pager.write_page(&page)?;
-            pages_replayed += 1;
+    for (&page_id, data) in &page_updates {
+        if data.len() != PAGE_SIZE {
+            return Err(MuroError::Wal(format!(
+                "Committed PagePut has invalid size for page {}: got {}, expected {}",
+                page_id,
+                data.len(),
+                PAGE_SIZE
+            )));
         }
+        let mut page_data = [0u8; PAGE_SIZE];
+        page_data.copy_from_slice(data);
+        let page = Page::from_bytes(page_data);
+        pager.write_page(&page)?;
+        pages_replayed += 1;
     }
 
     // Phase 4: Restore metadata from WAL MetaUpdate records
@@ -113,8 +139,26 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
     pager.flush_meta()?;
 
     Ok(RecoveryResult {
-        committed_txids: committed.into_iter().collect(),
-        aborted_txids: aborted.into_iter().collect(),
+        committed_txids: terminal
+            .iter()
+            .filter_map(|(txid, state)| {
+                if *state == TxTerminalState::Committed {
+                    Some(*txid)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        aborted_txids: terminal
+            .iter()
+            .filter_map(|(txid, state)| {
+                if *state == TxTerminalState::Aborted {
+                    Some(*txid)
+                } else {
+                    None
+                }
+            })
+            .collect(),
         pages_replayed,
     })
 }
@@ -278,5 +322,73 @@ mod tests {
         let pager = Pager::open(&db_path, &test_key()).unwrap();
         assert!(pager.page_count() >= 2);
         assert_eq!(pager.catalog_root(), 42);
+    }
+
+    #[test]
+    fn test_recovery_rejects_commit_lsn_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            // Actual LSN here is 1, but declared as 999.
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 999 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
+        match err {
+            MuroError::Wal(msg) => assert!(msg.contains("Commit LSN mismatch")),
+            other => panic!("Expected WAL error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovery_uses_last_terminal_record_for_tx_outcome() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 0,
+                    data: Page::new(0).data.to_vec(),
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 0,
+                    page_count: 1,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 3 })
+                .unwrap();
+            // Conflicting terminal record: later Abort should win.
+            writer.append(&WalRecord::Abort { txid: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let result = recover(&db_path, &wal_path, &test_key()).unwrap();
+        assert_eq!(result.pages_replayed, 0);
+        assert!(result.committed_txids.is_empty());
+        assert_eq!(result.aborted_txids, vec![1]);
     }
 }

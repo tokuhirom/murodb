@@ -28,10 +28,30 @@ impl WalReader {
 
     /// Check whether the current file position is at or near the end of the WAL.
     /// "At tail" means there are no more complete frames after the current position.
+    ///
+    /// This peeks at the next frame's length header (if present) and checks whether
+    /// the claimed payload actually fits in the remaining file space. This catches
+    /// cases where 4+ bytes remain but they don't form a complete frame.
     fn is_at_tail(&mut self) -> bool {
         let pos = self.file.stream_position().unwrap_or(self.file_len);
-        // If there isn't even room for another frame header (4 bytes), we're at tail.
-        self.file_len.saturating_sub(pos) < 4
+        let remaining = self.file_len.saturating_sub(pos);
+
+        // Not even room for a frame length header.
+        if remaining < 4 {
+            return true;
+        }
+
+        // Peek at the next frame's length header to see if its payload fits.
+        let mut len_buf = [0u8; 4];
+        if self.file.read_exact(&mut len_buf).is_err() {
+            return true;
+        }
+        // Seek back so we don't consume the header.
+        let _ = self.file.seek(SeekFrom::Start(pos));
+
+        let next_frame_len = u32::from_le_bytes(len_buf) as u64;
+        // If the claimed payload doesn't fit in the remaining space, we're at tail.
+        remaining < 4 + next_frame_len
     }
 
     /// Read the next WAL record. Returns None at end-of-file.
@@ -210,6 +230,39 @@ mod tests {
         let mut reader = WalReader::open(&path, &test_key()).unwrap();
         let records = reader.read_all().unwrap();
         assert_eq!(records.len(), 1); // valid Begin record recovered
+    }
+
+    /// Edge case: 4+ bytes remain after the last valid frame but they claim a payload
+    /// that doesn't fit. This should be treated as tail (crash during header write),
+    /// not mid-log corruption.
+    #[test]
+    fn test_incomplete_next_frame_treated_as_tail() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write one valid record
+        {
+            let mut writer = WalWriter::create(&path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Append a frame header claiming 200 bytes but only write 10 bytes of payload.
+        // Total appended = 4 (header) + 10 (partial payload) = 14 bytes, which is >= 4
+        // so the old `remaining < 4` check would NOT consider this tail.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&200u32.to_le_bytes()).unwrap();
+            file.write_all(&[0xAB; 10]).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let mut reader = WalReader::open(&path, &test_key()).unwrap();
+        let records = reader.read_all().unwrap();
+        assert_eq!(records.len(), 1); // valid Begin recovered, incomplete frame ignored
     }
 
     #[test]

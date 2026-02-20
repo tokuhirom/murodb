@@ -4,6 +4,11 @@
 
 **MuroDB は WAL ベースのクラッシュ耐性を持つ。** すべての書き込みは WAL を経由し、クラッシュ後のリカバリが可能。
 
+主要機能:
+- WAL MetaUpdate にヘッダ CRC32 チェックサムを含む（破損検出）
+- freelist_page_id を WAL MetaUpdate に含め、クラッシュ後も freelist を復元
+- データファイルヘッダの fsync 強化（WAL sync 後、データファイル flush_meta で fsync）
+
 ## Write Path の概要
 
 ### Auto-Commit モード（BEGIN なし）
@@ -39,7 +44,7 @@ COMMIT
   → tx.commit(&mut pager, &mut wal)   ← WAL-first commit
     1. WAL に Begin レコード書き込み
     2. WAL に各 dirty page の PagePut レコード書き込み
-    3. WAL に MetaUpdate（catalog_root, page_count）書き込み
+    3. WAL に MetaUpdate（catalog_root, freelist_page_id, page_count）書き込み
     4. WAL に Commit レコード書き込み
     5. wal.sync()                      ← WAL を fsync
     6. dirty pages をデータファイルに書き込み
@@ -93,6 +98,14 @@ API:
   - `0`: 問題なし
   - `10`: malformed tx 検出（診断成功）
   - `20`: 致命エラー（復号失敗/IOエラー/strict検証失敗など）
+- `--inspect-wal` は quarantine ファイル（`*.wal.quarantine.*`）も直接指定可能
+
+### JSON Schema Versioning Policy
+
+- `schema_version` はブレイキング変更（既存キーの削除・型変更）時のみインクリメントする
+- 新しいキーの追加ではバージョンを据え置く（consumer は未知のキーを無視すべき）
+- `RecoverySkipCode` の `as_str()` 文字列値は凍結（回帰テストで固定）
+- `InspectFatalKind` の `as_str()` 文字列値は凍結（回帰テストで固定）
 
 ## TLA+ と実装の対応
 
@@ -107,6 +120,7 @@ TLA+ モデルで使っている中心不変条件を、実装側で明示チェ
 | PagePut は対象ページIDと内容が一致する | `PagePut.page_id` とページヘッダ `page_id` の不一致を拒否 | `test_recovery_rejects_pageput_page_id_mismatch` |
 | tail 破損は許容、mid-log 破損は拒否 | `src/wal/reader.rs` で tail のみ許容、途中破損はエラー | `test_tail_truncation_tolerated`, `test_mid_log_corruption_is_error` |
 | 異常フレーム長で安全性を落とさない | Reader/Writer 双方で共通定数の WAL フレーム長上限チェックを導入 | `test_oversized_tail_frame_tolerated`, `test_append_rejects_oversized_frame_without_advancing_lsn` |
+| freelist は committed MetaUpdate から復旧 | `freelist_page_id` を WAL MetaUpdate に含め recovery で復元 | `test_freelist_wal_recovery`, `test_freelist_persisted_across_reopen` |
 
 この対応により、TLA+ で想定した「有効な遷移のみを復旧対象にする」方針を実装でも強制している。
 
@@ -169,6 +183,13 @@ WAL commit 後の `flush_meta()` で永続化される。
 - チェックポイント失敗時は `WARNING` を stderr に出力し、`wal_path` / `wal_size_bytes` を含めて運用で検知可能にする
 - チェックポイント失敗注入の unit test で「コミット成功を壊さない」経路を回帰固定している
 - 失敗時は従来どおり `Database::open()` 時の recovery + truncate が安全網になる
+
+## Format Version History
+
+| Version | 変更内容 |
+|---|---|
+| v1 | 初版: Begin, PagePut, MetaUpdate(catalog_root, page_count), Commit, Abort |
+| v2 | MetaUpdate に `freelist_page_id` フィールド追加、データファイルヘッダに CRC32 チェックサム追加。旧 v1 MetaUpdate (25 bytes) は `freelist_page_id=0` としてデコード（後方互換） |
 
 ## 関連コード
 

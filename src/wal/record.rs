@@ -28,6 +28,7 @@ pub enum WalRecord {
         txid: TxId,
         catalog_root: u64,
         page_count: u64,
+        freelist_page_id: u64,
     },
     Commit {
         txid: TxId,
@@ -81,12 +82,14 @@ impl WalRecord {
                 txid,
                 catalog_root,
                 page_count,
+                freelist_page_id,
             } => {
-                let mut buf = Vec::with_capacity(1 + 8 + 8 + 8);
+                let mut buf = Vec::with_capacity(1 + 8 + 8 + 8 + 8);
                 buf.push(TAG_META_UPDATE);
                 buf.extend_from_slice(&txid.to_le_bytes());
                 buf.extend_from_slice(&catalog_root.to_le_bytes());
                 buf.extend_from_slice(&page_count.to_le_bytes());
+                buf.extend_from_slice(&freelist_page_id.to_le_bytes());
                 buf
             }
             WalRecord::Commit { txid, lsn } => {
@@ -143,10 +146,17 @@ impl WalRecord {
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 let catalog_root = u64::from_le_bytes(data[9..17].try_into().unwrap());
                 let page_count = u64::from_le_bytes(data[17..25].try_into().unwrap());
+                // Backward compatible: old records (25 bytes) have no freelist_page_id
+                let freelist_page_id = if data.len() >= 33 {
+                    u64::from_le_bytes(data[25..33].try_into().unwrap())
+                } else {
+                    0
+                };
                 Some(WalRecord::MetaUpdate {
                     txid,
                     catalog_root,
                     page_count,
+                    freelist_page_id,
                 })
             }
             TAG_COMMIT => {
@@ -202,6 +212,7 @@ mod tests {
                 txid: 1,
                 catalog_root: 10,
                 page_count: 50,
+                freelist_page_id: 0,
             },
             WalRecord::Commit { txid: 1, lsn: 5 },
             WalRecord::Abort { txid: 2 },
@@ -220,6 +231,7 @@ mod tests {
             txid: 3,
             catalog_root: 42,
             page_count: 100,
+            freelist_page_id: 7,
         };
         let serialized = record.serialize();
         let deserialized = WalRecord::deserialize(&serialized).unwrap();
@@ -227,11 +239,13 @@ mod tests {
             txid,
             catalog_root,
             page_count,
+            freelist_page_id,
         } = deserialized
         {
             assert_eq!(txid, 3);
             assert_eq!(catalog_root, 42);
             assert_eq!(page_count, 100);
+            assert_eq!(freelist_page_id, 7);
         } else {
             panic!("Expected MetaUpdate");
         }

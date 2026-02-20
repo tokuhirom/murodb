@@ -26,6 +26,7 @@ This folder contains a small TLA+ model for MuroDB crash resilience.
 - `NoUncommittedInfluence`: uncommitted txs do not influence recovered state
 - `CommitRequiresMeta`: committed tx always has metadata update
 - `UniqueCommittedOrder`: each tx appears at most once in commit order
+- `FreelistPreserved`: after recovery, freelist ID equals the last committed freelist ID
 
 ## Run TLC
 

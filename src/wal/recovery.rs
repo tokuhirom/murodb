@@ -312,6 +312,7 @@ fn recover_with_mode_internal(
     let mut page_updates: HashMap<PageId, Vec<u8>> = HashMap::new();
     let mut latest_catalog_root: Option<u64> = None;
     let mut latest_page_count: Option<u64> = None;
+    let mut latest_freelist_page_id: Option<u64> = None;
 
     for (_, record) in &records {
         match record {
@@ -328,10 +329,12 @@ fn recover_with_mode_internal(
                 txid,
                 catalog_root,
                 page_count,
+                freelist_page_id,
             } => {
                 if matches!(terminal.get(txid), Some(TxTerminalState::Committed)) {
                     latest_catalog_root = Some(*catalog_root);
                     latest_page_count = Some(*page_count);
+                    latest_freelist_page_id = Some(*freelist_page_id);
                 }
             }
             _ => {}
@@ -391,6 +394,9 @@ fn recover_with_mode_internal(
             if page_count > p.page_count() {
                 p.set_page_count(page_count);
             }
+        }
+        if let Some(freelist_page_id) = latest_freelist_page_id {
+            p.set_freelist_page_id(freelist_page_id);
         }
 
         // Also ensure page_count covers all replayed pages (fallback safety)
@@ -501,6 +507,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 0,
                     page_count: 2,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             writer
@@ -601,6 +608,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 42,
                     page_count: 2,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             writer
@@ -635,6 +643,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 0,
                     page_count: 1,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             // Actual LSN here is 2, but declared as 999.
@@ -676,6 +685,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 0,
                     page_count: 1,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             writer
@@ -775,6 +785,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 0,
                     page_count: 2,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             writer
@@ -851,6 +862,7 @@ mod tests {
                     txid: 1,
                     catalog_root: 0,
                     page_count: 2,
+                    freelist_page_id: 0,
                 })
                 .unwrap();
             writer

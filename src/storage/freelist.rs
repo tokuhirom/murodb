@@ -22,6 +22,12 @@ impl FreeList {
         self.free_pages.push(page_id);
     }
 
+    /// Undo the most recent `free()` call. Used to speculatively compute
+    /// a freelist snapshot without permanently mutating state.
+    pub fn undo_last_free(&mut self) {
+        self.free_pages.pop();
+    }
+
     /// Number of free pages.
     pub fn len(&self) -> usize {
         self.free_pages.len()

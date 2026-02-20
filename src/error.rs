@@ -49,6 +49,9 @@ pub enum MuroError {
 
     #[error("KDF error: {0}")]
     Kdf(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, MuroError>;

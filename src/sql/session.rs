@@ -153,14 +153,32 @@ impl Session {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
         if let Err(e) = self.wal.checkpoint_truncate() {
-            eprintln!("WARNING: post-commit WAL checkpoint failed: {}", e);
+            let wal_path = self.wal.wal_path().display();
+            let wal_size = self.wal.file_size_bytes().ok();
+            eprintln!(
+                "WARNING: post-commit WAL checkpoint failed: {} (wal_path={}, wal_size_bytes={})",
+                e,
+                wal_path,
+                wal_size
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
         }
     }
 
     fn post_rollback_checkpoint(&mut self) {
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
         if let Err(e) = self.wal.checkpoint_truncate() {
-            eprintln!("WARNING: post-rollback WAL checkpoint failed: {}", e);
+            let wal_path = self.wal.wal_path().display();
+            let wal_size = self.wal.file_size_bytes().ok();
+            eprintln!(
+                "WARNING: post-rollback WAL checkpoint failed: {} (wal_path={}, wal_size_bytes={})",
+                e,
+                wal_path,
+                wal_size
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
         }
     }
 }

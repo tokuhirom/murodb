@@ -164,7 +164,7 @@ WAL commit 後の `flush_meta()` で永続化される。
 補足:
 - チェックポイントは best-effort で、失敗してもコミット成功結果は維持する
 - チェックポイント時は WAL 本体 `fsync` に加えて、親ディレクトリの `fsync` も best-effort 実施
-- チェックポイント失敗時は `WARNING` を stderr に出力し、運用で検知可能にする
+- チェックポイント失敗時は `WARNING` を stderr に出力し、`wal_path` / `wal_size_bytes` を含めて運用で検知可能にする
 - 失敗時は従来どおり `Database::open()` 時の recovery + truncate が安全網になる
 
 ## 関連コード

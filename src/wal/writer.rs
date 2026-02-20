@@ -103,6 +103,10 @@ impl WalWriter {
         Ok(self.file.metadata()?.len())
     }
 
+    pub fn wal_path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn current_lsn(&self) -> Lsn {
         self.current_lsn
     }

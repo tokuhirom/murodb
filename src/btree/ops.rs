@@ -786,7 +786,8 @@ impl BTree {
     /// Collect all page IDs in this B-tree (for freeing).
     pub fn collect_all_pages(&self, pager: &mut impl PageStore) -> Result<Vec<PageId>> {
         let mut pages = Vec::new();
-        self.collect_pages_recursive(pager, self.root_page_id, &mut pages, 0)?;
+        let mut visited = std::collections::HashSet::new();
+        self.collect_pages_recursive(pager, self.root_page_id, &mut pages, &mut visited, 0)?;
         Ok(pages)
     }
 
@@ -795,12 +796,19 @@ impl BTree {
         pager: &mut impl PageStore,
         page_id: PageId,
         pages: &mut Vec<PageId>,
+        visited: &mut std::collections::HashSet<PageId>,
         depth: usize,
     ) -> Result<()> {
         if depth > MAX_BTREE_DEPTH {
             return Err(MuroError::Corruption(
                 "B-tree depth exceeds maximum (possible cycle)".into(),
             ));
+        }
+        if !visited.insert(page_id) {
+            return Err(MuroError::Corruption(format!(
+                "B-tree cycle detected: page {} visited twice during collection",
+                page_id
+            )));
         }
         pages.push(page_id);
         let page = pager.read_page(page_id)?;
@@ -810,11 +818,11 @@ impl BTree {
                 let n = num_entries(&page);
                 for i in 0..n {
                     if let Some(child) = internal_left_child(&page, i) {
-                        self.collect_pages_recursive(pager, child, pages, depth + 1)?;
+                        self.collect_pages_recursive(pager, child, pages, visited, depth + 1)?;
                     }
                 }
                 if let Some(right) = right_child(&page) {
-                    self.collect_pages_recursive(pager, right, pages, depth + 1)?;
+                    self.collect_pages_recursive(pager, right, pages, visited, depth + 1)?;
                 }
                 Ok(())
             }
@@ -973,6 +981,110 @@ mod tests {
         assert_eq!(scanned.len(), count as usize);
         for i in 0..scanned.len() - 1 {
             assert!(scanned[i] < scanned[i + 1], "Entries not in order at {}", i);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_collect_all_pages_no_duplicates() {
+        let (mut pager, path) = setup();
+        let mut btree = BTree::create(&mut pager).unwrap();
+
+        // Insert enough entries with large values to force splits
+        for i in 0..200 {
+            let key = encode_i64(i);
+            let value = vec![0xABu8; 100];
+            btree.insert(&mut pager, &key, &value).unwrap();
+        }
+
+        let pages = btree.collect_all_pages(&mut pager).unwrap();
+        assert!(pages.len() > 1, "tree should span multiple pages");
+
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for &pid in &pages {
+            assert!(
+                seen.insert(pid),
+                "duplicate page ID {} in collect_all_pages",
+                pid
+            );
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_collect_all_pages_detects_cycle() {
+        use crate::btree::node::init_internal;
+
+        let (mut pager, path) = setup();
+
+        // Create an internal node whose right_child points back to itself (cycle)
+        let root = pager.allocate_page().unwrap();
+        let root_id = root.page_id();
+        let mut root_page = Page::new(root_id);
+        init_internal(&mut root_page, root_id); // right_child = self → cycle
+        pager.write_page(&root_page).unwrap();
+
+        let btree = BTree::open(root_id);
+        let result = btree.collect_all_pages(&mut pager);
+
+        match result {
+            Err(MuroError::Corruption(msg)) => {
+                assert!(msg.contains("cycle"), "expected cycle error, got: {}", msg);
+            }
+            other => panic!("expected Corruption error, got: {:?}", other),
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_collect_all_pages_detects_shared_child() {
+        use crate::btree::node::{init_internal, init_leaf};
+
+        let (mut pager, path) = setup();
+
+        // Create a leaf page
+        let leaf = pager.allocate_page().unwrap();
+        let leaf_id = leaf.page_id();
+        let mut leaf_page = Page::new(leaf_id);
+        init_leaf(&mut leaf_page);
+        pager.write_page(&leaf_page).unwrap();
+
+        // Create an internal node with right_child = leaf and also an entry
+        // whose left_child = leaf (same page referenced twice → duplicate)
+        let root = pager.allocate_page().unwrap();
+        let root_id = root.page_id();
+        let mut root_page = Page::new(root_id);
+        init_internal(&mut root_page, leaf_id); // right_child = leaf
+
+        // Add an internal entry with left_child = leaf_id (same page!)
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&leaf_id.to_le_bytes()); // left child pointer
+        let key = b"key";
+        let val = b"val";
+        entry.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        entry.extend_from_slice(key);
+        entry.extend_from_slice(&(val.len() as u16).to_le_bytes());
+        entry.extend_from_slice(val);
+        root_page.insert_cell(&entry).unwrap();
+
+        pager.write_page(&root_page).unwrap();
+
+        let btree = BTree::open(root_id);
+        let result = btree.collect_all_pages(&mut pager);
+
+        match result {
+            Err(MuroError::Corruption(msg)) => {
+                assert!(
+                    msg.contains("cycle") || msg.contains("visited twice"),
+                    "expected cycle/duplicate error, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Corruption error, got: {:?}", other),
         }
 
         std::fs::remove_file(&path).ok();

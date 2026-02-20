@@ -38,12 +38,16 @@ murodb mydb.db -e "SHOW TABLES"
 
 # Interactive REPL
 murodb mydb.db
+
+# Open with permissive recovery mode (salvage valid committed txs)
+murodb mydb.db --recovery-mode permissive
 ```
 
 Options:
 - `-e <SQL>` — Execute SQL and exit
 - `--create` — Create a new database
 - `--password <PW>` — Password (prompts if omitted)
+- `--recovery-mode <strict|permissive>` — WAL recovery policy for open
 
 ## Components
 

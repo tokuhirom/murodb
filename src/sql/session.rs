@@ -72,6 +72,7 @@ impl Session {
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
         let catalog_root = self.catalog.root_page_id();
         tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
+        self.post_commit_checkpoint();
         Ok(ExecResult::Ok)
     }
 
@@ -106,6 +107,7 @@ impl Session {
                 // Commit via WAL (catalog_root included in WAL MetaUpdate)
                 let catalog_root = self.catalog.root_page_id();
                 tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
+                self.post_commit_checkpoint();
                 Ok(exec_result)
             }
             Err(e) => {
@@ -144,5 +146,11 @@ impl Session {
     /// Get a reference to the catalog.
     pub fn catalog(&self) -> &SystemCatalog {
         &self.catalog
+    }
+
+    fn post_commit_checkpoint(&mut self) {
+        // Best-effort: commit already reached durable state in data file.
+        // If WAL truncate fails, keep serving and rely on startup recovery path.
+        let _ = self.wal.checkpoint_truncate();
     }
 }

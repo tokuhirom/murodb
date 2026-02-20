@@ -375,3 +375,24 @@ fn test_catalog_root_durable_after_commit() {
         }
     }
 }
+
+/// Issue #10: Successful commits should checkpoint WAL to avoid unbounded growth
+/// during long-running sessions.
+#[test]
+fn test_wal_is_checkpointed_after_successful_commit() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+    db.execute("INSERT INTO t VALUES (2, 'bob')").unwrap();
+
+    let wal_size = std::fs::metadata(&wal_path).unwrap().len();
+    assert_eq!(
+        wal_size, 0,
+        "WAL should be truncated after successful commits"
+    );
+}

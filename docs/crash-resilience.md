@@ -83,6 +83,7 @@ API:
 - `Database::open(path, key)` は strict
 - `Database::open_with_recovery_mode(path, key, RecoveryMode::Permissive)` で permissive を選択可能
 - `Database::open_with_recovery_mode_and_report(...)` で recovery report を取得可能
+- CLI: `murodb <db> --inspect-wal <wal> --recovery-mode permissive` で WAL 診断のみ実行可能
 
 ## TLA+ と実装の対応
 

@@ -41,6 +41,9 @@ murodb mydb.db
 
 # Open with permissive recovery mode (salvage valid committed txs)
 murodb mydb.db --recovery-mode permissive
+
+# Inspect WAL consistency only (no replay/apply)
+murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive
 ```
 
 Options:
@@ -48,6 +51,7 @@ Options:
 - `--create` — Create a new database
 - `--password <PW>` — Password (prompts if omitted)
 - `--recovery-mode <strict|permissive>` — WAL recovery policy for open
+- `--inspect-wal <PATH>` — Analyze WAL consistency and exit
 
 ## Components
 

@@ -19,7 +19,7 @@ Session::execute_auto_commit(stmt)
          → TxPageStore::write_page()
            → Transaction::write_page()  ← HashMap に保存（メモリのみ）
   4. tx.commit(&mut pager, &mut wal)    ← WAL-first commit
-       → WAL に Begin + PagePut + Commit レコード書き込み
+       → WAL に Begin + PagePut + MetaUpdate + Commit レコード書き込み
        → wal.sync()                     ← WAL を fsync
        → dirty pages をデータファイルに書き込み
        → pager.flush_meta()             ← データファイルを fsync
@@ -39,10 +39,11 @@ COMMIT
   → tx.commit(&mut pager, &mut wal)   ← WAL-first commit
     1. WAL に Begin レコード書き込み
     2. WAL に各 dirty page の PagePut レコード書き込み
-    3. WAL に Commit レコード書き込み
-    4. wal.sync()                      ← WAL を fsync
-    5. dirty pages をデータファイルに書き込み
-    6. pager.flush_meta()              ← データファイルを fsync
+    3. WAL に MetaUpdate（catalog_root, page_count）書き込み
+    4. WAL に Commit レコード書き込み
+    5. wal.sync()                      ← WAL を fsync
+    6. dirty pages をデータファイルに書き込み
+    7. pager.flush_meta()              ← データファイルを fsync
 
 ROLLBACK
   → tx.rollback(&mut wal)             ← WAL に Abort レコード書き込み
@@ -54,12 +55,32 @@ ROLLBACK
 ```
 Database::open(path, master_key)
   1. WAL ファイルが存在すれば recovery::recover() を実行
-     → WAL をスキャンし committed/aborted トランザクションを識別
+     → WAL をスキャンしトランザクション遷移を検証
+       (Begin 前の PagePut/MetaUpdate/Commit/Abort を拒否)
+       (Commit/Abort 後の追加レコードを拒否)
+       (Commit.lsn と実LSNの不一致を拒否)
      → committed トランザクションの最新ページイメージを収集
      → データファイルにリプレイ
   2. WAL ファイルをトランケート（空にする）
+     → WAL ファイルを fsync
+     → 親ディレクトリを best-effort fsync
   3. Pager + Catalog + WalWriter を生成して Session を構築
 ```
+
+## TLA+ と実装の対応
+
+TLA+ モデルで使っている中心不変条件を、実装側で明示チェックする構成にした。
+
+| TLA+ 側の意図 | 実装での担保 | 回帰テスト |
+|---|---|---|
+| `Init -> Begin -> ... -> Commit/Abort` 以外は無効 | `src/wal/recovery.rs` で状態遷移検証（Begin 前レコード拒否） | `test_recovery_rejects_pageput_before_begin` |
+| `Commit/Abort` は終端（終端後遷移禁止） | 同一 txid の重複終端/終端後レコードを拒否 | `test_recovery_rejects_duplicate_terminal_record_for_tx` |
+| Commit は整合した終端情報を持つ | `Commit.lsn == 実LSN` を検証し不一致は拒否 | `test_recovery_rejects_commit_lsn_mismatch` |
+| Commit にはメタデータ確定が必要 | `MetaUpdate` なし Commit を拒否 | `test_recovery_rejects_commit_without_meta_update` |
+| tail 破損は許容、mid-log 破損は拒否 | `src/wal/reader.rs` で tail のみ許容、途中破損はエラー | `test_tail_truncation_tolerated`, `test_mid_log_corruption_is_error` |
+| 異常フレーム長で安全性を落とさない | WAL フレーム長上限チェックを導入 | `test_oversized_tail_frame_tolerated` |
+
+この対応により、TLA+ で想定した「有効な遷移のみを復旧対象にする」方針を実装でも強制している。
 
 ## セカンダリインデックスの整合性
 

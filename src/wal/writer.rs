@@ -3,7 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
-use crate::error::Result;
+use crate::error::{MuroError, Result};
+use crate::storage::page::PAGE_SIZE;
 use crate::wal::record::{crc32, Lsn, WalRecord};
 
 /// WAL writer: append-only log with encryption.
@@ -13,6 +14,10 @@ use crate::wal::record::{crc32, Lsn, WalRecord};
 ///
 /// Encrypted payload contains:
 ///   [record bytes] [crc32: u4]
+///
+/// Keep this bound in sync with `wal::reader::MAX_WAL_FRAME_LEN`.
+const MAX_WAL_FRAME_LEN: usize = PAGE_SIZE + 1024;
+
 pub struct WalWriter {
     file: File,
     path: PathBuf,
@@ -59,6 +64,13 @@ impl WalWriter {
 
         // Encrypt with LSN as "page_id" and 0 as epoch
         let encrypted = self.crypto.encrypt(lsn, 0, &payload)?;
+        if encrypted.len() > MAX_WAL_FRAME_LEN {
+            return Err(MuroError::Wal(format!(
+                "WAL frame length {} exceeds max {}",
+                encrypted.len(),
+                MAX_WAL_FRAME_LEN
+            )));
+        }
 
         let frame_len = encrypted.len() as u32;
         self.file.write_all(&frame_len.to_le_bytes())?;
@@ -104,6 +116,7 @@ impl WalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::MuroError;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -151,5 +164,23 @@ mod tests {
 
         let lsn = writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
         assert_eq!(lsn, 0);
+    }
+
+    #[test]
+    fn test_append_rejects_oversized_frame_without_advancing_lsn() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let key = MasterKey::new([0x42u8; 32]);
+        let mut writer = WalWriter::create(&path, &key).unwrap();
+        let res = writer.append(&WalRecord::PagePut {
+            txid: 1,
+            page_id: 0,
+            data: vec![0xAB; PAGE_SIZE * 2],
+        });
+
+        assert!(matches!(res, Err(MuroError::Wal(_))));
+        assert_eq!(writer.current_lsn(), 0);
+        assert_eq!(writer.file_size_bytes().unwrap(), 0);
     }
 }

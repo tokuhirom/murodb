@@ -183,6 +183,14 @@ fn json_mode_str(mode: RecoveryMode) -> &'static str {
 }
 
 fn emit_inspect_json_success(mode: RecoveryMode, wal_path: &Path, report: &RecoveryResult) {
+    println!("{}", build_inspect_json_success(mode, wal_path, report));
+}
+
+fn build_inspect_json_success(
+    mode: RecoveryMode,
+    wal_path: &Path,
+    report: &RecoveryResult,
+) -> String {
     let generated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -218,7 +226,7 @@ fn emit_inspect_json_success(mode: RecoveryMode, wal_path: &Path, report: &Recov
         .map(|p| format!("\"{}\"", json_escape(p)))
         .unwrap_or_else(|| "null".to_string());
 
-    println!(
+    format!(
         "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{},\"fatal_error\":null}}",
         json_mode_str(mode),
         json_escape(&wal_path.display().to_string()),
@@ -228,21 +236,25 @@ fn emit_inspect_json_success(mode: RecoveryMode, wal_path: &Path, report: &Recov
         report.pages_replayed,
         skipped,
         quarantine
-    );
+    )
 }
 
 fn emit_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, msg: &str) {
+    println!("{}", build_inspect_json_fatal(mode, wal_path, msg));
+}
+
+fn build_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, msg: &str) -> String {
     let generated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    println!(
+    format!(
         "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[],\"aborted_txids\":[],\"pages_replayed\":0,\"skipped\":[],\"wal_quarantine_path\":null,\"fatal_error\":\"{}\"}}",
         json_mode_str(mode),
         json_escape(&wal_path.display().to_string()),
         generated_at,
         json_escape(msg)
-    );
+    )
 }
 
 fn inspect_fatal_and_exit(
@@ -256,6 +268,45 @@ fn inspect_fatal_and_exit(
         OutputFormatArg::Json => emit_inspect_json_fatal(mode, wal_path, msg),
     }
     process::exit(EXIT_FATAL_ERROR);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use murodb::wal::recovery::{RecoverySkipCode, RecoverySkippedTx};
+
+    #[test]
+    fn inspect_json_success_has_null_fatal_error() {
+        let wal_path = Path::new("/tmp/test.wal");
+        let report = RecoveryResult {
+            committed_txids: vec![1, 2],
+            aborted_txids: vec![3],
+            pages_replayed: 4,
+            skipped: vec![RecoverySkippedTx {
+                txid: 9,
+                code: RecoverySkipCode::CommitWithoutMetaUpdate,
+                reason: "missing meta".to_string(),
+            }],
+            wal_quarantine_path: Some("/tmp/test.wal.quarantine".to_string()),
+        };
+
+        let json = build_inspect_json_success(RecoveryMode::Permissive, wal_path, &report);
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains("\"mode\":\"permissive\""));
+        assert!(json.contains("\"fatal_error\":null"));
+        assert!(json.contains("\"code\":\"COMMIT_WITHOUT_META\""));
+    }
+
+    #[test]
+    fn inspect_json_fatal_includes_error_message() {
+        let wal_path = Path::new("/tmp/test.wal");
+        let json = build_inspect_json_fatal(RecoveryMode::Strict, wal_path, "boom");
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains("\"mode\":\"strict\""));
+        assert!(json.contains("\"fatal_error\":\"boom\""));
+        assert!(json.contains("\"committed_txids\":[]"));
+        assert!(json.contains("\"skipped\":[]"));
+    }
 }
 
 fn execute_sql(db: &mut Database, sql: &str) {

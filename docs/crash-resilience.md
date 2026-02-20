@@ -85,6 +85,7 @@ API:
 - `Database::open_with_recovery_mode_and_report(...)` で recovery report を取得可能
 - CLI: `murodb <db> --inspect-wal <wal> --recovery-mode permissive` で WAL 診断のみ実行可能
 - CLI: `--format json` で WAL 診断結果を機械可読形式で出力可能
+  - JSON は `schema_version=1` を含み、`skipped[].code` で機械向け分類を提供
 
 ## TLA+ と実装の対応
 

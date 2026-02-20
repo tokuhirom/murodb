@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use murodb::crypto::kdf;
@@ -267,10 +268,19 @@ fn main() {
                 println!("  replayable pages: {}", report.pages_replayed);
                 println!("  skipped malformed txs: {}", report.skipped.len());
                 for skipped in &report.skipped {
-                    println!("  - txid {}: {}", skipped.txid, skipped.reason);
+                    println!(
+                        "  - txid {} [{}]: {}",
+                        skipped.txid,
+                        skipped.code.as_str(),
+                        skipped.reason
+                    );
                 }
             }
             OutputFormatArg::Json => {
+                let generated_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
                 let committed = report
                     .committed_txids
                     .iter()
@@ -288,8 +298,9 @@ fn main() {
                     .iter()
                     .map(|s| {
                         format!(
-                            "{{\"txid\":{},\"reason\":\"{}\"}}",
+                            "{{\"txid\":{},\"code\":\"{}\",\"reason\":\"{}\"}}",
                             s.txid,
+                            s.code.as_str(),
                             json_escape(&s.reason)
                         )
                     })
@@ -302,8 +313,18 @@ fn main() {
                     .unwrap_or_else(|| "null".to_string());
 
                 println!(
-                    "{{\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{}}}",
-                    committed, aborted, report.pages_replayed, skipped, quarantine
+                    "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{}}}",
+                    match recovery_mode {
+                        RecoveryMode::Strict => "strict",
+                        RecoveryMode::Permissive => "permissive",
+                    },
+                    json_escape(&wal_path.display().to_string()),
+                    generated_at,
+                    committed,
+                    aborted,
+                    report.pages_replayed,
+                    skipped,
+                    quarantine
                 );
             }
         }

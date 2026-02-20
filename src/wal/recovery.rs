@@ -15,6 +15,39 @@ pub enum RecoveryMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverySkipCode {
+    DuplicateBegin,
+    BeginAfterTerminal,
+    PagePutBeforeBegin,
+    PagePutAfterTerminal,
+    MetaUpdateBeforeBegin,
+    MetaUpdateAfterTerminal,
+    CommitBeforeBegin,
+    DuplicateTerminal,
+    CommitWithoutMetaUpdate,
+    CommitLsnMismatch,
+    AbortBeforeBegin,
+}
+
+impl RecoverySkipCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoverySkipCode::DuplicateBegin => "DUPLICATE_BEGIN",
+            RecoverySkipCode::BeginAfterTerminal => "BEGIN_AFTER_TERMINAL",
+            RecoverySkipCode::PagePutBeforeBegin => "PAGEPUT_BEFORE_BEGIN",
+            RecoverySkipCode::PagePutAfterTerminal => "PAGEPUT_AFTER_TERMINAL",
+            RecoverySkipCode::MetaUpdateBeforeBegin => "METAUPDATE_BEFORE_BEGIN",
+            RecoverySkipCode::MetaUpdateAfterTerminal => "METAUPDATE_AFTER_TERMINAL",
+            RecoverySkipCode::CommitBeforeBegin => "COMMIT_BEFORE_BEGIN",
+            RecoverySkipCode::DuplicateTerminal => "DUPLICATE_TERMINAL",
+            RecoverySkipCode::CommitWithoutMetaUpdate => "COMMIT_WITHOUT_META",
+            RecoverySkipCode::CommitLsnMismatch => "COMMIT_LSN_MISMATCH",
+            RecoverySkipCode::AbortBeforeBegin => "ABORT_BEFORE_BEGIN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxTerminalState {
     Committed,
     Aborted,
@@ -103,13 +136,17 @@ fn recover_with_mode_internal(
     //   Init -> Begin -> (PagePut | MetaUpdate)* -> (Commit | Abort)
     // No record is allowed after Commit/Abort for the same txid.
     let mut tx_states: HashMap<TxId, TxValidationState> = HashMap::new();
-    let mut invalid_txs: HashMap<TxId, String> = HashMap::new();
+    let mut invalid_txs: HashMap<TxId, RecoverySkippedTx> = HashMap::new();
 
-    let mut invalidate_or_err = |txid: TxId, msg: String| -> Result<()> {
+    let mut invalidate_or_err = |txid: TxId, code: RecoverySkipCode, msg: String| -> Result<()> {
         match mode {
             RecoveryMode::Strict => Err(MuroError::Wal(msg)),
             RecoveryMode::Permissive => {
-                invalid_txs.entry(txid).or_insert(msg);
+                invalid_txs.entry(txid).or_insert(RecoverySkippedTx {
+                    txid,
+                    code,
+                    reason: msg,
+                });
                 Ok(())
             }
         }
@@ -124,6 +161,7 @@ fn recover_with_mode_internal(
                 if state.seen_begin {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::DuplicateBegin,
                         format!("Duplicate Begin for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -131,6 +169,7 @@ fn recover_with_mode_internal(
                 if state.terminal.is_some() {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::BeginAfterTerminal,
                         format!(
                             "Begin after terminal record for txid {} at LSN {}",
                             txid, lsn
@@ -147,6 +186,7 @@ fn recover_with_mode_internal(
                 if !state.seen_begin {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::PagePutBeforeBegin,
                         format!("PagePut before Begin for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -154,6 +194,7 @@ fn recover_with_mode_internal(
                 if state.terminal.is_some() {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::PagePutAfterTerminal,
                         format!(
                             "PagePut after terminal record for txid {} at LSN {}",
                             txid, lsn
@@ -169,6 +210,7 @@ fn recover_with_mode_internal(
                 if !state.seen_begin {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::MetaUpdateBeforeBegin,
                         format!("MetaUpdate before Begin for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -176,6 +218,7 @@ fn recover_with_mode_internal(
                 if state.terminal.is_some() {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::MetaUpdateAfterTerminal,
                         format!(
                             "MetaUpdate after terminal record for txid {} at LSN {}",
                             txid, lsn
@@ -195,6 +238,7 @@ fn recover_with_mode_internal(
                 if !state.seen_begin {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::CommitBeforeBegin,
                         format!("Commit before Begin for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -202,6 +246,7 @@ fn recover_with_mode_internal(
                 if state.terminal.is_some() {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::DuplicateTerminal,
                         format!("Duplicate terminal record for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -209,6 +254,7 @@ fn recover_with_mode_internal(
                 if !state.seen_meta_update {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::CommitWithoutMetaUpdate,
                         format!("Commit without MetaUpdate for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -216,6 +262,7 @@ fn recover_with_mode_internal(
                 if *commit_lsn != *lsn {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::CommitLsnMismatch,
                         format!(
                             "Commit LSN mismatch for txid {}: record lsn={}, declared lsn={}",
                             txid, lsn, commit_lsn
@@ -232,6 +279,7 @@ fn recover_with_mode_internal(
                 if !state.seen_begin {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::AbortBeforeBegin,
                         format!("Abort before Begin for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -239,6 +287,7 @@ fn recover_with_mode_internal(
                 if state.terminal.is_some() {
                     invalidate_or_err(
                         *txid,
+                        RecoverySkipCode::DuplicateTerminal,
                         format!("Duplicate terminal record for txid {} at LSN {}", txid, lsn),
                     )?;
                     continue;
@@ -377,10 +426,11 @@ fn recover_with_mode_internal(
             })
             .collect(),
         pages_replayed,
-        skipped: invalid_txs
-            .into_iter()
-            .map(|(txid, reason)| RecoverySkippedTx { txid, reason })
-            .collect(),
+        skipped: {
+            let mut skipped = invalid_txs.into_values().collect::<Vec<_>>();
+            skipped.sort_by_key(|x| x.txid);
+            skipped
+        },
         wal_quarantine_path: None,
     })
 }
@@ -406,6 +456,7 @@ pub struct RecoveryResult {
 #[derive(Debug)]
 pub struct RecoverySkippedTx {
     pub txid: TxId,
+    pub code: RecoverySkipCode,
     pub reason: String,
 }
 
@@ -765,6 +816,10 @@ mod tests {
         assert!(result.aborted_txids.is_empty());
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(result.skipped[0].txid, 1);
+        assert_eq!(
+            result.skipped[0].code,
+            RecoverySkipCode::CommitWithoutMetaUpdate
+        );
         assert!(result.skipped[0]
             .reason
             .contains("Commit without MetaUpdate"));
@@ -827,6 +882,10 @@ mod tests {
 
         let result = inspect_wal(&wal_path, &test_key(), RecoveryMode::Permissive).unwrap();
         assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].code,
+            RecoverySkipCode::CommitWithoutMetaUpdate
+        );
         assert!(result.skipped[0]
             .reason
             .contains("Commit without MetaUpdate"));

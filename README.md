@@ -56,6 +56,7 @@ Options:
 - `--recovery-mode <strict|permissive>` — WAL recovery policy for open
 - `--inspect-wal <PATH>` — Analyze WAL consistency and exit
 - `--format <text|json>` — Output format (mainly for `--inspect-wal`)
+  - JSON includes stable fields: `schema_version`, `mode`, `wal_path`, `generated_at`, `skipped[].code`
 
 ## Components
 

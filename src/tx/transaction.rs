@@ -226,31 +226,6 @@ impl Transaction {
         self.dirty_pages.values()
     }
 
-    /// Commit without WAL: flush dirty pages directly to pager.
-    pub(crate) fn commit_no_wal(&mut self, pager: &mut Pager) -> Result<()> {
-        if self.state != TxState::Active {
-            return Err(MuroError::Transaction(
-                "Cannot commit non-active transaction".into(),
-            ));
-        }
-
-        for page in self.dirty_pages.values() {
-            pager.write_page(page)?;
-        }
-
-        // Apply freed pages to freelist
-        for &page_id in &self.freed_pages {
-            pager.freelist_mut().free(page_id);
-        }
-
-        pager.flush_meta()?;
-
-        self.state = TxState::Committed;
-        self.dirty_pages.clear();
-        self.freed_pages.clear();
-        Ok(())
-    }
-
     /// Rollback without WAL: just discard dirty pages.
     pub(crate) fn rollback_no_wal(&mut self) {
         self.dirty_pages.clear();
@@ -360,35 +335,53 @@ mod tests {
 
         let freelist_len_before = pager.freelist_mut().len();
 
-        // Second transaction: free a page, then simulate WAL failure by dropping WAL
-        let mut tx2 = Transaction::begin(2, wal.current_lsn());
+        // Second transaction: free a page then attempt commit via /dev/full,
+        // which accepts open() but returns ENOSPC on write(), causing
+        // wal.append() to fail mid-commit.
+        let mut tx2 = Transaction::begin(2, 0);
         tx2.free_page(page_a_id);
-        // Use a read-only path as WAL to force write failure
-        let bad_wal_path = dir.path().join("nonexistent_dir/test.wal");
-        let bad_wal = WalWriter::create(&bad_wal_path, &test_key());
-        if bad_wal.is_err() {
-            // Expected: can't create WAL in nonexistent dir.
-            // Manually verify the freelist is unchanged.
-            // Since we can't commit with bad WAL, just verify the speculative approach:
-            // freelist should still be at freelist_len_before
+        let mut page_b_dirty = pager.read_page(page_b_id).unwrap();
+        page_b_dirty.insert_cell(b"modified").unwrap();
+        tx2.write_page(page_b_dirty);
+
+        let dev_full = std::path::Path::new("/dev/full");
+        if dev_full.exists() {
+            let mut wal_full =
+                WalWriter::open(dev_full, &test_key(), 0).unwrap();
+
+            // tx.commit should fail because /dev/full returns ENOSPC on write
+            let result = tx2.commit(&mut pager, &mut wal_full, 0);
+            assert!(result.is_err(), "commit must fail when WAL write fails");
+
+            // Freelist must be unchanged — the freed page must NOT have leaked
             assert_eq!(
                 pager.freelist_mut().len(),
                 freelist_len_before,
-                "freelist should not change when commit has not been attempted"
+                "freelist must not change when WAL commit fails"
             );
 
-            // Also verify that a successful tx2 with the real WAL does update it
-            let _lsn = tx2.commit(&mut pager, &mut wal, 0).unwrap();
+            // Verify a subsequent commit on the real WAL works correctly
+            let mut tx3 = Transaction::begin(3, wal.current_lsn());
+            tx3.free_page(page_a_id);
+            let page_b_read = pager.read_page(page_b_id).unwrap();
+            tx3.write_page(page_b_read);
+            tx3.commit(&mut pager, &mut wal, 0).unwrap();
             assert_eq!(
                 pager.freelist_mut().len(),
                 freelist_len_before + 1,
                 "freelist should grow by 1 after successful commit with free_page"
             );
+        } else {
+            // /dev/full not available (rare); fall back to verifying the
+            // speculative path does not mutate the freelist before commit.
+            // Drop tx2 without committing.
+            drop(tx2);
+            assert_eq!(
+                pager.freelist_mut().len(),
+                freelist_len_before,
+                "freelist must not change when tx is dropped without commit"
+            );
         }
-
-        // Verify page_b is still usable (was not freed)
-        let page = pager.read_page(page_b_id).unwrap();
-        assert_eq!(page.page_id(), page_b_id);
     }
 
     /// Regression test: freelist serialization size must be checked.

@@ -76,6 +76,7 @@ Database::open(path, master_key)
   - 不正なトランザクションを無視し、有効な committed トランザクションのみ復旧する
   - 破損環境からの救出用途（調査・緊急復旧）向け
   - `RecoveryResult.skipped` で無視した txid と理由を取得できる
+  - `skipped` がある場合、元 WAL は `*.wal.quarantine.*` に退避される
 
 API:
 

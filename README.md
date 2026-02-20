@@ -161,6 +161,7 @@ LIMIT 10;
   - strict (default): `Database::open(...)`
   - permissive: `Database::open_with_recovery_mode(..., RecoveryMode::Permissive)`
   - report: `Database::open_with_recovery_mode_and_report(...)` returns skipped malformed tx details
+  - permissive + skipped tx: original WAL is quarantined to `*.wal.quarantine.*`
 - All WAL records encrypted
 
 ### Formal Verification

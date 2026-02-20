@@ -20,6 +20,7 @@ pub mod types;
 pub mod wal;
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::concurrency::LockManager;
 use crate::crypto::aead::MasterKey;
@@ -58,6 +59,36 @@ fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+
+    let mut dest = PathBuf::from(format!("{}.quarantine.{}.{}", wal_path.display(), ts, pid));
+    let mut attempt = 0u32;
+    while dest.exists() {
+        attempt += 1;
+        dest = PathBuf::from(format!(
+            "{}.quarantine.{}.{}.{}",
+            wal_path.display(),
+            ts,
+            pid,
+            attempt
+        ));
+    }
+
+    std::fs::rename(wal_path, &dest)?;
+    if let Some(parent) = wal_path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(dest)
 }
 
 impl Database {
@@ -105,14 +136,16 @@ impl Database {
 
         // Run WAL recovery before opening
         if wp.exists() {
-            recovery_report = Some(crate::wal::recovery::recover_with_mode(
-                path,
-                &wp,
-                master_key,
-                recovery_mode,
-            )?);
-            // Truncate WAL after successful recovery
-            truncate_wal_durably(&wp)?;
+            let mut report =
+                crate::wal::recovery::recover_with_mode(path, &wp, master_key, recovery_mode)?;
+            if recovery_mode == RecoveryMode::Permissive && !report.skipped.is_empty() {
+                let quarantine = quarantine_wal_durably(&wp)?;
+                report.wal_quarantine_path = Some(quarantine.display().to_string());
+            } else {
+                // Truncate WAL after successful recovery
+                truncate_wal_durably(&wp)?;
+            }
+            recovery_report = Some(report);
         }
 
         let pager = Pager::open(path, master_key)?;

@@ -104,7 +104,7 @@ TLA+ モデルで使っている中心不変条件を、実装側で明示チェ
 | Commit にはメタデータ確定が必要 | `MetaUpdate` なし Commit を拒否 | `test_recovery_rejects_commit_without_meta_update` |
 | PagePut は対象ページIDと内容が一致する | `PagePut.page_id` とページヘッダ `page_id` の不一致を拒否 | `test_recovery_rejects_pageput_page_id_mismatch` |
 | tail 破損は許容、mid-log 破損は拒否 | `src/wal/reader.rs` で tail のみ許容、途中破損はエラー | `test_tail_truncation_tolerated`, `test_mid_log_corruption_is_error` |
-| 異常フレーム長で安全性を落とさない | Reader/Writer 双方で WAL フレーム長上限チェックを導入 | `test_oversized_tail_frame_tolerated`, `test_append_rejects_oversized_frame_without_advancing_lsn` |
+| 異常フレーム長で安全性を落とさない | Reader/Writer 双方で共通定数の WAL フレーム長上限チェックを導入 | `test_oversized_tail_frame_tolerated`, `test_append_rejects_oversized_frame_without_advancing_lsn` |
 
 この対応により、TLA+ で想定した「有効な遷移のみを復旧対象にする」方針を実装でも強制している。
 

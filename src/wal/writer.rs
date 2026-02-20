@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
-use crate::storage::page::PAGE_SIZE;
 use crate::wal::record::{crc32, Lsn, WalRecord};
-
+use crate::wal::MAX_WAL_FRAME_LEN;
 /// WAL writer: append-only log with encryption.
 ///
 /// Framing on disk:
@@ -14,9 +13,6 @@ use crate::wal::record::{crc32, Lsn, WalRecord};
 ///
 /// Encrypted payload contains:
 ///   [record bytes] [crc32: u4]
-///
-/// Keep this bound in sync with `wal::reader::MAX_WAL_FRAME_LEN`.
-const MAX_WAL_FRAME_LEN: usize = PAGE_SIZE + 1024;
 
 pub struct WalWriter {
     file: File,
@@ -117,6 +113,7 @@ impl WalWriter {
 mod tests {
     use super::*;
     use crate::error::MuroError;
+    use crate::storage::page::PAGE_SIZE;
     use tempfile::NamedTempFile;
 
     #[test]

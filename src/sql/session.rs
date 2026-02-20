@@ -245,4 +245,35 @@ mod tests {
         };
         assert_eq!(rows.len(), 0);
     }
+
+    #[test]
+    fn test_rollback_survives_checkpoint_failure_and_discards_uncommitted_data() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        session.execute("BEGIN").unwrap();
+        session
+            .execute("INSERT INTO t VALUES (1, 'alice')")
+            .unwrap();
+
+        session.inject_checkpoint_failure_once_for_test();
+        let result = session.execute("ROLLBACK").unwrap();
+        assert!(matches!(result, ExecResult::Ok));
+
+        let rows = match session.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => rows,
+            _ => panic!("Expected rows"),
+        };
+        assert_eq!(rows.len(), 0);
+    }
 }

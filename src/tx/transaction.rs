@@ -199,20 +199,27 @@ impl Transaction {
             pager.freelist_mut().free(page_id);
         }
 
-        // Now flush dirty pages to the data file
-        for page in self.dirty_pages.values() {
-            pager.write_page(page)?;
-        }
-        // Write freelist pages to the data file
-        for fl_page in &fl_disk_pages {
-            pager.write_page(fl_page)?;
-        }
+        // Post-sync data flush — errors become CommitInDoubt since WAL is durable
+        let flush_result: Result<()> = (|| {
+            for page in self.dirty_pages.values() {
+                pager.write_page(page)?;
+            }
+            for fl_page in &fl_disk_pages {
+                pager.write_page(fl_page)?;
+            }
+            pager.set_catalog_root(catalog_root);
+            pager.set_page_count(page_count);
+            pager.set_freelist_page_id(freelist_page_id);
+            pager.flush_meta()?;
+            Ok(())
+        })();
 
-        // Update pager metadata atomically before single flush_meta
-        pager.set_catalog_root(catalog_root);
-        pager.set_page_count(page_count);
-        pager.set_freelist_page_id(freelist_page_id);
-        pager.flush_meta()?;
+        if let Err(e) = flush_result {
+            self.state = TxState::Committed; // WAL is durable
+            self.dirty_pages.clear();
+            self.freed_pages.clear();
+            return Err(MuroError::CommitInDoubt(format!("{}", e)));
+        }
 
         self.state = TxState::Committed;
         self.dirty_pages.clear();

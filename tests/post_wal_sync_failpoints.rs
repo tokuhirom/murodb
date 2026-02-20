@@ -6,6 +6,7 @@
 /// current session sees an error. On restart, WAL recovery must replay the
 /// committed transaction and converge to the correct state.
 use murodb::crypto::aead::MasterKey;
+use murodb::error::MuroError;
 use murodb::storage::pager::Pager;
 use murodb::tx::transaction::Transaction;
 use murodb::wal::recovery::recover;
@@ -60,9 +61,10 @@ fn setup_with_post_sync_failure(
 
     let result = tx2.commit(&mut pager, &mut wal, 0);
     assert!(
-        result.is_err(),
-        "commit must return error when {} fails",
-        fail_at
+        matches!(&result, Err(MuroError::CommitInDoubt(_))),
+        "commit must return CommitInDoubt when {} fails, got: {:?}",
+        fail_at,
+        result
     );
 
     // Drop pager and WAL to simulate process crash (WAL is NOT truncated)
@@ -206,7 +208,7 @@ fn test_write_page_failure_with_freed_pages_recovery() {
     // Inject write_page failure
     pager.set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
     let result = tx2.commit(&mut pager, &mut wal, 0);
-    assert!(result.is_err());
+    assert!(matches!(&result, Err(MuroError::CommitInDoubt(_))));
 
     drop(pager);
     drop(wal);
@@ -251,7 +253,7 @@ fn test_flush_meta_failure_with_freed_pages_recovery() {
     // Inject flush_meta failure (pages are written, but metadata isn't fsynced)
     pager.set_inject_flush_meta_failure(Some(std::io::ErrorKind::Other));
     let result = tx2.commit(&mut pager, &mut wal, 0);
-    assert!(result.is_err());
+    assert!(matches!(&result, Err(MuroError::CommitInDoubt(_))));
 
     drop(pager);
     drop(wal);

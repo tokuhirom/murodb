@@ -60,6 +60,7 @@ pub fn recover_with_mode(
             aborted_txids: Vec::new(),
             pages_replayed: 0,
             skipped: Vec::new(),
+            wal_quarantine_path: None,
         });
     }
 
@@ -72,6 +73,7 @@ pub fn recover_with_mode(
             aborted_txids: Vec::new(),
             pages_replayed: 0,
             skipped: Vec::new(),
+            wal_quarantine_path: None,
         });
     }
 
@@ -350,6 +352,7 @@ pub fn recover_with_mode(
             .into_iter()
             .map(|(txid, reason)| RecoverySkippedTx { txid, reason })
             .collect(),
+        wal_quarantine_path: None,
     })
 }
 
@@ -368,6 +371,7 @@ pub struct RecoveryResult {
     pub aborted_txids: Vec<TxId>,
     pub pages_replayed: usize,
     pub skipped: Vec<RecoverySkippedTx>,
+    pub wal_quarantine_path: Option<String>,
 }
 
 #[derive(Debug)]

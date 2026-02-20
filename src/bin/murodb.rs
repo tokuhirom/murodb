@@ -240,6 +240,9 @@ fn main() {
                         "WARNING: permissive recovery skipped {} malformed transaction(s)",
                         report.skipped.len()
                     );
+                    if let Some(path) = &report.wal_quarantine_path {
+                        eprintln!("  - quarantined WAL: {}", path);
+                    }
                     for skipped in &report.skipped {
                         eprintln!("  - txid {}: {}", skipped.txid, skipped.reason);
                     }

@@ -4,7 +4,7 @@ use murodb::storage::page::Page;
 use murodb::storage::pager::Pager;
 use murodb::wal::reader::WalReader;
 use murodb::wal::record::WalRecord;
-use murodb::wal::recovery::recover;
+use murodb::wal::recovery::{recover, RecoveryMode};
 use murodb::wal::writer::WalWriter;
 use std::io::Write;
 use tempfile::TempDir;
@@ -167,6 +167,42 @@ fn test_recovery_restores_metadata_prevents_page_reuse() {
             _ => panic!("Expected rows"),
         }
     }
+}
+
+#[test]
+fn test_permissive_open_quarantines_malformed_wal() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    {
+        let _pager = Pager::create(&db_path, &test_key()).unwrap();
+    }
+
+    // Malformed tx: Begin + Commit (without MetaUpdate).
+    {
+        let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+        writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 1 })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+
+    let (_db, report_opt) = murodb::Database::open_with_recovery_mode_and_report(
+        &db_path,
+        &test_key(),
+        RecoveryMode::Permissive,
+    )
+    .unwrap();
+    let report = report_opt.expect("expected recovery report");
+
+    assert_eq!(report.skipped.len(), 1);
+    assert!(report.wal_quarantine_path.is_some());
+
+    let quarantine_path = std::path::PathBuf::from(report.wal_quarantine_path.unwrap());
+    assert!(quarantine_path.exists(), "quarantine WAL should exist");
+    assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), 0);
 }
 
 /// Issue #8: Truncated WAL tail should not prevent recovery of prior committed records.

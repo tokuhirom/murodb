@@ -54,6 +54,27 @@ pub fn recover_with_mode(
     master_key: &MasterKey,
     mode: RecoveryMode,
 ) -> Result<RecoveryResult> {
+    recover_with_mode_internal(Some(db_path), wal_path, master_key, mode, true)
+}
+
+/// Inspect WAL consistency without applying pages to a DB file.
+///
+/// This is useful for diagnostics and post-mortem analysis.
+pub fn inspect_wal(
+    wal_path: &Path,
+    master_key: &MasterKey,
+    mode: RecoveryMode,
+) -> Result<RecoveryResult> {
+    recover_with_mode_internal(None, wal_path, master_key, mode, false)
+}
+
+fn recover_with_mode_internal(
+    db_path: Option<&Path>,
+    wal_path: &Path,
+    master_key: &MasterKey,
+    mode: RecoveryMode,
+    apply_to_db: bool,
+) -> Result<RecoveryResult> {
     if !wal_path.exists() {
         return Ok(RecoveryResult {
             committed_txids: Vec::new(),
@@ -268,8 +289,12 @@ pub fn recover_with_mode(
         }
     }
 
-    // Phase 3: Apply page updates to the database
-    let mut pager = Pager::open(db_path, master_key)?;
+    // Phase 3: Validate/collect replayable page updates and optionally apply to DB.
+    let mut pager = if apply_to_db {
+        Some(Pager::open(db_path.expect("db path required"), master_key)?)
+    } else {
+        None
+    };
     let mut pages_replayed = 0;
 
     for (&page_id, data) in &page_updates {
@@ -301,30 +326,34 @@ pub fn recover_with_mode(
                 RecoveryMode::Permissive => continue,
             }
         }
-        pager.write_page(&page)?;
+        if let Some(p) = pager.as_mut() {
+            p.write_page(&page)?;
+        }
         pages_replayed += 1;
     }
 
-    // Phase 4: Restore metadata from WAL MetaUpdate records
-    if let Some(catalog_root) = latest_catalog_root {
-        pager.set_catalog_root(catalog_root);
-    }
-    if let Some(page_count) = latest_page_count {
-        // Only increase page_count, never decrease it
-        if page_count > pager.page_count() {
-            pager.set_page_count(page_count);
+    // Phase 4: Restore metadata from WAL MetaUpdate records (DB apply mode only)
+    if let Some(p) = pager.as_mut() {
+        if let Some(catalog_root) = latest_catalog_root {
+            p.set_catalog_root(catalog_root);
         }
-    }
-
-    // Also ensure page_count covers all replayed pages (fallback safety)
-    for &page_id in page_updates.keys() {
-        let needed = page_id + 1;
-        if needed > pager.page_count() {
-            pager.set_page_count(needed);
+        if let Some(page_count) = latest_page_count {
+            // Only increase page_count, never decrease it
+            if page_count > p.page_count() {
+                p.set_page_count(page_count);
+            }
         }
-    }
 
-    pager.flush_meta()?;
+        // Also ensure page_count covers all replayed pages (fallback safety)
+        for &page_id in page_updates.keys() {
+            let needed = page_id + 1;
+            if needed > p.page_count() {
+                p.set_page_count(needed);
+            }
+        }
+
+        p.flush_meta()?;
+    }
 
     Ok(RecoveryResult {
         committed_txids: terminal
@@ -780,5 +809,28 @@ mod tests {
         assert_eq!(result.pages_replayed, 0);
         assert_eq!(result.committed_txids, vec![1]);
         assert!(result.skipped.is_empty());
+    }
+
+    #[test]
+    fn test_inspect_wal_permissive_reports_skipped_reason() {
+        let dir = TempDir::new().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 1 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let result = inspect_wal(&wal_path, &test_key(), RecoveryMode::Permissive).unwrap();
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0]
+            .reason
+            .contains("Commit without MetaUpdate"));
+        assert!(result.committed_txids.is_empty());
+        assert_eq!(result.pages_replayed, 0);
     }
 }

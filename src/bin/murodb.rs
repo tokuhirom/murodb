@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, ValueEnum};
+use murodb::crypto::kdf;
 use murodb::sql::executor::ExecResult;
+use murodb::storage::pager::Pager;
 use murodb::types::Value;
-use murodb::wal::recovery::RecoveryMode;
+use murodb::wal::recovery::{inspect_wal, RecoveryMode};
 use murodb::Database;
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -26,7 +28,7 @@ impl From<RecoveryModeArg> for RecoveryMode {
 #[command(name = "murodb", about = "MuroDB - Encrypted embedded SQL database")]
 struct Cli {
     /// Path to the database file
-    db_path: PathBuf,
+    db_path: Option<PathBuf>,
 
     /// Execute SQL and exit
     #[arg(short = 'e')]
@@ -43,6 +45,10 @@ struct Cli {
     /// WAL recovery behavior when opening existing DB
     #[arg(long, value_enum, default_value = "strict")]
     recovery_mode: RecoveryModeArg,
+
+    /// Inspect WAL file consistency and exit (no DB replay)
+    #[arg(long)]
+    inspect_wal: Option<PathBuf>,
 }
 
 fn get_password(cli_password: &Option<String>) -> String {
@@ -209,23 +215,60 @@ fn main() {
     let password = get_password(&cli.password);
     let recovery_mode: RecoveryMode = cli.recovery_mode.clone().into();
 
+    if let Some(wal_path) = &cli.inspect_wal {
+        let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
+            eprintln!("ERROR: db_path is required with --inspect-wal");
+            process::exit(1);
+        });
+        let salt = Pager::read_salt_from_file(db_path).unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to read DB salt: {}", e);
+            process::exit(1);
+        });
+        let key = kdf::derive_key(password.as_bytes(), &salt).unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to derive key: {}", e);
+            process::exit(1);
+        });
+        let report = inspect_wal(wal_path, &key, recovery_mode).unwrap_or_else(|e| {
+            eprintln!("ERROR: WAL inspection failed: {}", e);
+            process::exit(1);
+        });
+
+        println!("WAL inspection summary:");
+        println!("  committed txs: {}", report.committed_txids.len());
+        println!("  aborted txs: {}", report.aborted_txids.len());
+        println!("  replayable pages: {}", report.pages_replayed);
+        println!("  skipped malformed txs: {}", report.skipped.len());
+        for skipped in &report.skipped {
+            println!("  - txid {}: {}", skipped.txid, skipped.reason);
+        }
+        return;
+    }
+
     let mut db = if cli.create {
-        if cli.db_path.exists() {
-            eprintln!("ERROR: File already exists: {}", cli.db_path.display());
+        let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
+            eprintln!("ERROR: db_path is required unless --inspect-wal is used");
+            process::exit(1);
+        });
+        if db_path.exists() {
+            eprintln!("ERROR: File already exists: {}", db_path.display());
             process::exit(1);
         }
-        Database::create_with_password(&cli.db_path, &password).unwrap_or_else(|e| {
+        Database::create_with_password(db_path, &password).unwrap_or_else(|e| {
             eprintln!("ERROR: Failed to create database: {}", e);
             process::exit(1);
         })
     } else {
-        if !cli.db_path.exists() {
-            eprintln!("ERROR: Database file not found: {}", cli.db_path.display());
+        let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
+            eprintln!("ERROR: db_path is required unless --inspect-wal is used");
+            process::exit(1);
+        });
+        if !db_path.exists() {
+            eprintln!("ERROR: Database file not found: {}", db_path.display());
             eprintln!("Use --create to create a new database");
             process::exit(1);
         }
         let (db, report) = Database::open_with_password_and_recovery_mode_and_report(
-            &cli.db_path,
+            db_path,
             &password,
             recovery_mode,
         )

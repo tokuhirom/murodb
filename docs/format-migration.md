@@ -39,10 +39,10 @@ Users must upgrade their MuroDB binary to open databases created by newer versio
 In format version 2, the freelist may span multiple pages linked as a chain:
 
 ```
-[next_freelist_page_id: u64] [count_in_this_page: u64] [page_id entries: u64...]
+[magic "FLMP": 4B] [next_freelist_page_id: u64] [count_in_this_page: u64] [page_id entries: u64...]
 ```
 
 - `next_freelist_page_id = 0` indicates end of chain
 - Each page holds up to `ENTRIES_PER_FREELIST_PAGE` entries
 - The header's `freelist_page_id` points to the first page in the chain
-- Single-page freelists from older v2 databases are detected and read correctly (backward compatible)
+- For backward compatibility, pages without `FLMP` magic are treated as legacy single-page freelist format (`[count:u64][entries...]`)

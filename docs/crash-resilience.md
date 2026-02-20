@@ -46,7 +46,8 @@ COMMIT
     7. pager.flush_meta()              ← データファイルを fsync
 
 ROLLBACK
-  → tx.rollback(&mut wal)             ← WAL に Abort レコード書き込み
+  → tx.rollback_no_wal()              ← dirty buffer を破棄（WAL 追記なし）
+  → Session の post_rollback_checkpoint() で WAL を空に維持
   → カタログをディスクから再読み込み
 ```
 

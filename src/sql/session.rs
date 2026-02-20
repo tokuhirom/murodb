@@ -13,7 +13,7 @@ use crate::wal::writer::WalWriter;
 ///
 /// - `BEGIN` starts a transaction (dirty-page buffering).
 /// - `COMMIT` flushes dirty pages via WAL, then to disk.
-/// - `ROLLBACK` discards dirty pages and writes an Abort record.
+/// - `ROLLBACK` discards dirty pages without WAL append.
 /// - Without `BEGIN`, each statement executes in auto-commit mode
 ///   (wrapped in an implicit transaction with WAL).
 pub struct Session {
@@ -81,7 +81,7 @@ impl Session {
             .active_tx
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
-        tx.rollback(&mut self.wal)?;
+        tx.rollback_no_wal();
         self.post_rollback_checkpoint();
         // Reload catalog from disk since in-memory catalog may have been modified
         let catalog_root = self.pager.catalog_root();

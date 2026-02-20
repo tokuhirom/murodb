@@ -11,19 +11,34 @@ pub struct WalReader {
     file: File,
     crypto: PageCrypto,
     current_lsn: Lsn,
+    file_len: u64,
 }
 
 impl WalReader {
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
         Ok(WalReader {
             file,
             crypto: PageCrypto::new(master_key),
             current_lsn: 0,
+            file_len,
         })
     }
 
+    /// Check whether the current file position is at or near the end of the WAL.
+    /// "At tail" means there are no more complete frames after the current position.
+    fn is_at_tail(&mut self) -> bool {
+        let pos = self.file.stream_position().unwrap_or(self.file_len);
+        // If there isn't even room for another frame header (4 bytes), we're at tail.
+        self.file_len.saturating_sub(pos) < 4
+    }
+
     /// Read the next WAL record. Returns None at end-of-file.
+    ///
+    /// Tolerates partial/corrupt frames only at the WAL tail (last frame position).
+    /// Mid-log corruption is returned as a hard error to avoid silently dropping
+    /// committed records that follow.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<(Lsn, WalRecord)>> {
         // Read frame length
@@ -40,23 +55,34 @@ impl WalReader {
         match self.file.read_exact(&mut encrypted) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Trailing partial frame: payload was truncated (crash during write).
-                // Treat as end-of-log.
+                // Payload was truncated — this can only happen at the WAL tail
+                // (crash during frame write). Safe to treat as end-of-log.
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),
         }
 
         let lsn = self.current_lsn;
+        let at_tail = self.is_at_tail();
+
         let payload = match self.crypto.decrypt(lsn, 0, &encrypted) {
             Ok(p) => p,
-            Err(_) => {
-                // Trailing frame with corrupt/incomplete encryption: treat as end-of-log.
+            Err(_) if at_tail => {
+                // Corrupt frame at WAL tail: partial write before crash.
                 return Ok(None);
+            }
+            Err(_) => {
+                return Err(MuroError::Wal(format!(
+                    "Failed to decrypt WAL record at LSN {} (mid-log corruption)",
+                    lsn
+                )));
             }
         };
 
         if payload.len() < 4 {
+            if at_tail {
+                return Ok(None);
+            }
             return Err(MuroError::Wal("WAL record too short".into()));
         }
 
@@ -64,16 +90,25 @@ impl WalReader {
         let stored_crc = u32::from_le_bytes(payload[payload.len() - 4..].try_into().unwrap());
 
         if crc32(record_bytes) != stored_crc {
-            // CRC mismatch at tail: frame was partially written before crash.
-            // Treat as end-of-log (safe to stop here).
-            return Ok(None);
+            if at_tail {
+                return Ok(None);
+            }
+            return Err(MuroError::Wal(format!(
+                "CRC mismatch at LSN {} (mid-log corruption)",
+                lsn
+            )));
         }
 
         let record = match WalRecord::deserialize(record_bytes) {
             Some(r) => r,
             None => {
-                // Invalid record at tail: treat as end-of-log.
-                return Ok(None);
+                if at_tail {
+                    return Ok(None);
+                }
+                return Err(MuroError::Wal(format!(
+                    "Invalid record at LSN {} (mid-log corruption)",
+                    lsn
+                )));
             }
         };
 
@@ -98,7 +133,12 @@ impl WalReader {
 mod tests {
     use super::*;
     use crate::wal::writer::WalWriter;
+    use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn test_key() -> MasterKey {
+        MasterKey::new([0x42u8; 32])
+    }
 
     #[test]
     fn test_write_and_read_back() {
@@ -142,5 +182,60 @@ mod tests {
                 WalRecord::Commit { txid: 1, lsn: 2 }
             ));
         }
+    }
+
+    #[test]
+    fn test_tail_truncation_tolerated() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write one valid record
+        {
+            let mut writer = WalWriter::create(&path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Append truncated garbage at tail
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&500u32.to_le_bytes()).unwrap();
+            file.write_all(&[0xDE; 5]).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let mut reader = WalReader::open(&path, &test_key()).unwrap();
+        let records = reader.read_all().unwrap();
+        assert_eq!(records.len(), 1); // valid Begin record recovered
+    }
+
+    #[test]
+    fn test_mid_log_corruption_is_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write two valid records
+        {
+            let mut writer = WalWriter::create(&path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Read file to find first frame boundary, then corrupt the first frame's payload
+        let file_bytes = std::fs::read(&path).unwrap();
+        let first_frame_len = u32::from_le_bytes(file_bytes[0..4].try_into().unwrap()) as usize;
+        // Corrupt a byte in the first frame's encrypted payload (after the 4-byte length header)
+        let mut corrupted = file_bytes.clone();
+        corrupted[4 + first_frame_len / 2] ^= 0xFF;
+        std::fs::write(&path, &corrupted).unwrap();
+
+        let mut reader = WalReader::open(&path, &test_key()).unwrap();
+        let result = reader.read_all();
+        // Should be a hard error because there's a valid frame after the corrupt one
+        assert!(result.is_err());
     }
 }

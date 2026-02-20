@@ -4,12 +4,8 @@ use std::path::Path;
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
-use crate::storage::page::PAGE_SIZE;
 use crate::wal::record::{crc32, Lsn, WalRecord};
-
-// Upper bound for one encrypted WAL frame payload size.
-// PagePut with one full page is the largest record currently emitted.
-const MAX_WAL_FRAME_LEN: usize = PAGE_SIZE + 1024;
+use crate::wal::MAX_WAL_FRAME_LEN;
 
 /// WAL reader: iterate through WAL records for recovery/snapshot.
 pub struct WalReader {

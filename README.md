@@ -153,6 +153,9 @@ LIMIT 10;
 
 - Records: BEGIN, PAGE_PUT, META_UPDATE, COMMIT, ABORT
 - Recovery: replay committed transactions, discard uncommitted
+- Recovery mode:
+  - strict (default): `Database::open(...)`
+  - permissive: `Database::open_with_recovery_mode(..., RecoveryMode::Permissive)`
 - All WAL records encrypted
 
 ### Formal Verification

@@ -29,6 +29,7 @@ use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
 use crate::storage::pager::Pager;
+use crate::wal::recovery::RecoveryMode;
 use crate::wal::writer::WalWriter;
 
 /// Main database handle.
@@ -81,11 +82,20 @@ impl Database {
 
     /// Open an existing database.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
+        Self::open_with_recovery_mode(path, master_key, RecoveryMode::Strict)
+    }
+
+    /// Open an existing database with configurable WAL recovery behavior.
+    pub fn open_with_recovery_mode(
+        path: &Path,
+        master_key: &MasterKey,
+        recovery_mode: RecoveryMode,
+    ) -> Result<Self> {
         let wp = wal_path(path);
 
         // Run WAL recovery before opening
         if wp.exists() {
-            crate::wal::recovery::recover(path, &wp, master_key)?;
+            crate::wal::recovery::recover_with_mode(path, &wp, master_key, recovery_mode)?;
             // Truncate WAL after successful recovery
             truncate_wal_durably(&wp)?;
         }
@@ -131,6 +141,17 @@ impl Database {
         let salt = Pager::read_salt_from_file(path)?;
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         Self::open(path, &master_key)
+    }
+
+    /// Open an existing database with a password and configurable recovery behavior.
+    pub fn open_with_password_and_recovery_mode(
+        path: &Path,
+        password: &str,
+        recovery_mode: RecoveryMode,
+    ) -> Result<Self> {
+        let salt = Pager::read_salt_from_file(path)?;
+        let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
+        Self::open_with_recovery_mode(path, &master_key, recovery_mode)
     }
 
     /// Execute a SQL statement. Returns the result.

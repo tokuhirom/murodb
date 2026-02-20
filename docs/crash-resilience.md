@@ -67,6 +67,20 @@ Database::open(path, master_key)
   3. Pager + Catalog + WalWriter を生成して Session を構築
 ```
 
+### Recovery Mode（strict / permissive）
+
+- `strict`（デフォルト）:
+  - WAL プロトコル不整合を検出したら `open` を失敗させる
+  - 例: Begin 前レコード、Commit LSN 不一致、終端重複、PagePut 整合性不一致
+- `permissive`:
+  - 不正なトランザクションを無視し、有効な committed トランザクションのみ復旧する
+  - 破損環境からの救出用途（調査・緊急復旧）向け
+
+API:
+
+- `Database::open(path, key)` は strict
+- `Database::open_with_recovery_mode(path, key, RecoveryMode::Permissive)` で permissive を選択可能
+
 ## TLA+ と実装の対応
 
 TLA+ モデルで使っている中心不変条件を、実装側で明示チェックする構成にした。

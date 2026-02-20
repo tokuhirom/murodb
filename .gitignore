@@ -2,3 +2,5 @@
 /.tools/
 
 /specs/tla/states/
+
+docs-site/book/

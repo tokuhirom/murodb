@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::Result;
@@ -15,6 +15,7 @@ use crate::wal::record::{crc32, Lsn, WalRecord};
 ///   [record bytes] [crc32: u4]
 pub struct WalWriter {
     file: File,
+    path: PathBuf,
     crypto: PageCrypto,
     current_lsn: Lsn,
 }
@@ -29,6 +30,7 @@ impl WalWriter {
 
         Ok(WalWriter {
             file,
+            path: path.to_path_buf(),
             crypto: PageCrypto::new(master_key),
             current_lsn: 0,
         })
@@ -39,6 +41,7 @@ impl WalWriter {
 
         Ok(WalWriter {
             file,
+            path: path.to_path_buf(),
             crypto: PageCrypto::new(master_key),
             current_lsn: start_lsn,
         })
@@ -78,6 +81,12 @@ impl WalWriter {
     pub fn checkpoint_truncate(&mut self) -> Result<()> {
         self.file.set_len(0)?;
         self.file.sync_all()?;
+        // Best-effort parent directory fsync to harden metadata persistence.
+        if let Some(parent) = self.path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         self.current_lsn = 0;
         Ok(())
     }

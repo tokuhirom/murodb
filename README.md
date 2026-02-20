@@ -57,6 +57,10 @@ Options:
 - `--inspect-wal <PATH>` — Analyze WAL consistency and exit
 - `--format <text|json>` — Output format (mainly for `--inspect-wal`)
   - JSON includes stable fields: `schema_version`, `mode`, `wal_path`, `generated_at`, `skipped[].code`
+- `--inspect-wal` exit codes:
+  - `0` no malformed tx detected
+  - `10` malformed tx detected (inspect succeeded)
+  - `20` fatal error (decrypt/IO/strict failure, etc.)
 
 ## Components
 

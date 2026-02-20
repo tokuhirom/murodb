@@ -62,7 +62,9 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
     for (lsn, record) in &records {
         match record {
             WalRecord::Begin { txid } => {
-                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                let state = tx_states
+                    .entry(*txid)
+                    .or_insert_with(TxValidationState::new);
                 if state.seen_begin {
                     return Err(MuroError::Wal(format!(
                         "Duplicate Begin for txid {} at LSN {}",
@@ -78,7 +80,9 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 state.seen_begin = true;
             }
             WalRecord::PagePut { txid, .. } => {
-                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                let state = tx_states
+                    .entry(*txid)
+                    .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
                     return Err(MuroError::Wal(format!(
                         "PagePut before Begin for txid {} at LSN {}",
@@ -93,7 +97,9 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 }
             }
             WalRecord::MetaUpdate { txid, .. } => {
-                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                let state = tx_states
+                    .entry(*txid)
+                    .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
                     return Err(MuroError::Wal(format!(
                         "MetaUpdate before Begin for txid {} at LSN {}",
@@ -112,7 +118,9 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 txid,
                 lsn: commit_lsn,
             } => {
-                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                let state = tx_states
+                    .entry(*txid)
+                    .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
                     return Err(MuroError::Wal(format!(
                         "Commit before Begin for txid {} at LSN {}",
@@ -140,7 +148,9 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 state.terminal = Some(TxTerminalState::Committed);
             }
             WalRecord::Abort { txid } => {
-                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                let state = tx_states
+                    .entry(*txid)
+                    .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
                     return Err(MuroError::Wal(format!(
                         "Abort before Begin for txid {} at LSN {}",
@@ -175,10 +185,7 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 page_id,
                 data,
             } => {
-                if matches!(
-                    terminal.get(txid),
-                    Some(TxTerminalState::Committed)
-                ) {
+                if matches!(terminal.get(txid), Some(TxTerminalState::Committed)) {
                     page_updates.insert(*page_id, data.clone());
                 }
             }
@@ -187,10 +194,7 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                 catalog_root,
                 page_count,
             } => {
-                if matches!(
-                    terminal.get(txid),
-                    Some(TxTerminalState::Committed)
-                ) {
+                if matches!(terminal.get(txid), Some(TxTerminalState::Committed)) {
                     latest_catalog_root = Some(*catalog_root);
                     latest_page_count = Some(*page_count);
                 }

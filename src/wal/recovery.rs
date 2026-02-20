@@ -59,6 +59,7 @@ pub fn recover_with_mode(
             committed_txids: Vec::new(),
             aborted_txids: Vec::new(),
             pages_replayed: 0,
+            skipped: Vec::new(),
         });
     }
 
@@ -70,6 +71,7 @@ pub fn recover_with_mode(
             committed_txids: Vec::new(),
             aborted_txids: Vec::new(),
             pages_replayed: 0,
+            skipped: Vec::new(),
         });
     }
 
@@ -78,13 +80,13 @@ pub fn recover_with_mode(
     //   Init -> Begin -> (PagePut | MetaUpdate)* -> (Commit | Abort)
     // No record is allowed after Commit/Abort for the same txid.
     let mut tx_states: HashMap<TxId, TxValidationState> = HashMap::new();
-    let mut invalid_txs = std::collections::HashSet::new();
+    let mut invalid_txs: HashMap<TxId, String> = HashMap::new();
 
     let mut invalidate_or_err = |txid: TxId, msg: String| -> Result<()> {
         match mode {
             RecoveryMode::Strict => Err(MuroError::Wal(msg)),
             RecoveryMode::Permissive => {
-                invalid_txs.insert(txid);
+                invalid_txs.entry(txid).or_insert(msg);
                 Ok(())
             }
         }
@@ -226,7 +228,7 @@ pub fn recover_with_mode(
     let terminal: HashMap<TxId, TxTerminalState> = tx_states
         .iter()
         .filter_map(|(txid, state)| {
-            if invalid_txs.contains(txid) {
+            if invalid_txs.contains_key(txid) {
                 None
             } else {
                 state.terminal.map(|t| (*txid, t))
@@ -344,6 +346,10 @@ pub fn recover_with_mode(
             })
             .collect(),
         pages_replayed,
+        skipped: invalid_txs
+            .into_iter()
+            .map(|(txid, reason)| RecoverySkippedTx { txid, reason })
+            .collect(),
     })
 }
 
@@ -361,6 +367,13 @@ pub struct RecoveryResult {
     pub committed_txids: Vec<TxId>,
     pub aborted_txids: Vec<TxId>,
     pub pages_replayed: usize,
+    pub skipped: Vec<RecoverySkippedTx>,
+}
+
+#[derive(Debug)]
+pub struct RecoverySkippedTx {
+    pub txid: TxId,
+    pub reason: String,
 }
 
 #[cfg(test)]
@@ -416,6 +429,7 @@ mod tests {
         let result = recover(&db_path, &wal_path, &test_key()).unwrap();
         assert_eq!(result.committed_txids.len(), 1);
         assert_eq!(result.pages_replayed, 1);
+        assert!(result.skipped.is_empty());
     }
 
     #[test]
@@ -447,6 +461,7 @@ mod tests {
         let result = recover(&db_path, &wal_path, &test_key()).unwrap();
         assert!(result.committed_txids.is_empty());
         assert_eq!(result.pages_replayed, 0);
+        assert!(result.skipped.is_empty());
     }
 
     #[test]
@@ -462,6 +477,7 @@ mod tests {
         let result = recover(&db_path, &wal_path, &test_key()).unwrap();
         assert!(result.committed_txids.is_empty());
         assert_eq!(result.pages_replayed, 0);
+        assert!(result.skipped.is_empty());
     }
 
     #[test]
@@ -714,6 +730,11 @@ mod tests {
         assert_eq!(result.pages_replayed, 0);
         assert!(result.committed_txids.is_empty());
         assert!(result.aborted_txids.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].txid, 1);
+        assert!(result.skipped[0]
+            .reason
+            .contains("Commit without MetaUpdate"));
     }
 
     #[test]
@@ -754,5 +775,6 @@ mod tests {
             recover_with_mode(&db_path, &wal_path, &test_key(), RecoveryMode::Permissive).unwrap();
         assert_eq!(result.pages_replayed, 0);
         assert_eq!(result.committed_txids, vec![1]);
+        assert!(result.skipped.is_empty());
     }
 }

@@ -75,11 +75,13 @@ Database::open(path, master_key)
 - `permissive`:
   - 不正なトランザクションを無視し、有効な committed トランザクションのみ復旧する
   - 破損環境からの救出用途（調査・緊急復旧）向け
+  - `RecoveryResult.skipped` で無視した txid と理由を取得できる
 
 API:
 
 - `Database::open(path, key)` は strict
 - `Database::open_with_recovery_mode(path, key, RecoveryMode::Permissive)` で permissive を選択可能
+- `Database::open_with_recovery_mode_and_report(...)` で recovery report を取得可能
 
 ## TLA+ と実装の対応
 

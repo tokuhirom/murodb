@@ -160,6 +160,7 @@ LIMIT 10;
 - Recovery mode:
   - strict (default): `Database::open(...)`
   - permissive: `Database::open_with_recovery_mode(..., RecoveryMode::Permissive)`
+  - report: `Database::open_with_recovery_mode_and_report(...)` returns skipped malformed tx details
 - All WAL records encrypted
 
 ### Formal Verification

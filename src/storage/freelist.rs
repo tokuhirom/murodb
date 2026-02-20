@@ -29,18 +29,21 @@ impl FreeList {
     }
 
     /// Return a page to the free list.
-    /// Panics in debug mode if the page is already free (double-free).
-    /// In release mode, silently ignores the duplicate to prevent data corruption.
-    pub fn free(&mut self, page_id: PageId) {
+    /// Returns `true` if the page was actually added, `false` if it was already
+    /// in the freelist (double-free). Callers that use speculative
+    /// free/undo patterns must check the return value to keep push/pop counts
+    /// in sync.
+    pub fn free(&mut self, page_id: PageId) -> bool {
         if self.free_pages.contains(&page_id) {
             debug_assert!(
                 false,
                 "double-free detected: page {} is already in freelist",
                 page_id
             );
-            return;
+            return false;
         }
         self.free_pages.push(page_id);
+        true
     }
 
     /// Undo the most recent `free()` call. Used to speculatively compute

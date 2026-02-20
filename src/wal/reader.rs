@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
 use crate::wal::record::{crc32, Lsn, WalRecord};
-use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC};
+use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 
 /// WAL reader: iterate through WAL records for recovery/snapshot.
 pub struct WalReader {
@@ -25,6 +25,14 @@ impl WalReader {
             let mut header = [0u8; WAL_HEADER_SIZE];
             file.read_exact(&mut header)?;
             if &header[0..8] == WAL_MAGIC {
+                // Check version — reject WAL files from a future format
+                let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+                if version > WAL_VERSION {
+                    return Err(MuroError::Wal(format!(
+                        "unsupported WAL format version {}",
+                        version
+                    )));
+                }
                 // Valid header - file position is now past the header
             } else {
                 // Legacy WAL without header - seek back to start

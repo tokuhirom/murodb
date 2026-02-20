@@ -107,8 +107,9 @@ impl Pager {
         // Load persisted freelist if present
         if pager.freelist_page_id != 0 {
             let fl_page = pager.read_page_from_disk(pager.freelist_page_id)?;
-            pager.freelist =
-                FreeList::deserialize(&fl_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..]);
+            pager.freelist = FreeList::deserialize(
+                &fl_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..],
+            );
         }
 
         Ok(pager)
@@ -521,10 +522,7 @@ mod tests {
         // Corrupt a byte in the header (e.g., catalog_root field at offset 28)
         {
             use std::io::{Seek, SeekFrom, Write};
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             file.seek(SeekFrom::Start(28)).unwrap();
             file.write_all(&[0xFF; 1]).unwrap();
         }

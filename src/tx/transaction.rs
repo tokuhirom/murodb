@@ -345,11 +345,9 @@ mod tests {
         tx2.write_page(page_b_dirty);
 
         let dev_full = std::path::Path::new("/dev/full");
-        if let (true, Ok(mut wal_full)) = (
-            dev_full.exists(),
-            WalWriter::open(dev_full, &test_key(), 0),
-        ) {
-
+        if let (true, Ok(mut wal_full)) =
+            (dev_full.exists(), WalWriter::open(dev_full, &test_key(), 0))
+        {
             // tx.commit should fail because /dev/full returns ENOSPC on write
             let result = tx2.commit(&mut pager, &mut wal_full, 0);
             assert!(result.is_err(), "commit must fail when WAL write fails");
@@ -408,7 +406,10 @@ mod tests {
         }
 
         let result = tx.commit(&mut pager, &mut wal, 0);
-        assert!(result.is_err(), "commit should fail when freelist is too large");
+        assert!(
+            result.is_err(),
+            "commit should fail when freelist is too large"
+        );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
             err_msg.contains("freelist too large"),

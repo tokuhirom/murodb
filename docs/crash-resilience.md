@@ -77,6 +77,7 @@ TLA+ モデルで使っている中心不変条件を、実装側で明示チェ
 | `Commit/Abort` は終端（終端後遷移禁止） | 同一 txid の重複終端/終端後レコードを拒否 | `test_recovery_rejects_duplicate_terminal_record_for_tx` |
 | Commit は整合した終端情報を持つ | `Commit.lsn == 実LSN` を検証し不一致は拒否 | `test_recovery_rejects_commit_lsn_mismatch` |
 | Commit にはメタデータ確定が必要 | `MetaUpdate` なし Commit を拒否 | `test_recovery_rejects_commit_without_meta_update` |
+| PagePut は対象ページIDと内容が一致する | `PagePut.page_id` とページヘッダ `page_id` の不一致を拒否 | `test_recovery_rejects_pageput_page_id_mismatch` |
 | tail 破損は許容、mid-log 破損は拒否 | `src/wal/reader.rs` で tail のみ許容、途中破損はエラー | `test_tail_truncation_tolerated`, `test_mid_log_corruption_is_error` |
 | 異常フレーム長で安全性を落とさない | WAL フレーム長上限チェックを導入 | `test_oversized_tail_frame_tolerated` |
 

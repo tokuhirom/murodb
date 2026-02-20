@@ -219,6 +219,13 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
         let mut page_data = [0u8; PAGE_SIZE];
         page_data.copy_from_slice(data);
         let page = Page::from_bytes(page_data);
+        let embedded_page_id = page.page_id();
+        if embedded_page_id != page_id {
+            return Err(MuroError::Wal(format!(
+                "Committed PagePut page_id mismatch: record={}, embedded={}",
+                page_id, embedded_page_id
+            )));
+        }
         pager.write_page(&page)?;
         pages_replayed += 1;
     }
@@ -557,6 +564,48 @@ mod tests {
         let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
         match err {
             MuroError::Wal(msg) => assert!(msg.contains("PagePut before Begin")),
+            other => panic!("Expected WAL error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovery_rejects_pageput_page_id_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+
+            let page = Page::new(999);
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 1,
+                    data: page.data.to_vec(),
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 0,
+                    page_count: 2,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 3 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
+        match err {
+            MuroError::Wal(msg) => assert!(msg.contains("page_id mismatch")),
             other => panic!("Expected WAL error, got: {:?}", other),
         }
     }

@@ -151,9 +151,17 @@ LIMIT 10;
 
 ### WAL & Recovery
 
-- Records: BEGIN, PAGE_PUT, COMMIT, ABORT
+- Records: BEGIN, PAGE_PUT, META_UPDATE, COMMIT, ABORT
 - Recovery: replay committed transactions, discard uncommitted
 - All WAL records encrypted
+
+### Formal Verification
+
+- TLA+ model for crash/recovery invariants: `specs/tla/CrashResilience.tla`
+- TLC config: `specs/tla/CrashResilience.cfg`
+- Runner script: `specs/tla/run_tlc.sh`
+- Make targets: `make tlc-tools`, `make tlc`, `make tlc-large`
+- Notes and scope: `specs/tla/README.md`
 
 ### Concurrency
 

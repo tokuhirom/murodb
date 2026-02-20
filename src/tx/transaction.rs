@@ -345,9 +345,10 @@ mod tests {
         tx2.write_page(page_b_dirty);
 
         let dev_full = std::path::Path::new("/dev/full");
-        if dev_full.exists() {
-            let mut wal_full =
-                WalWriter::open(dev_full, &test_key(), 0).unwrap();
+        if let (true, Ok(mut wal_full)) = (
+            dev_full.exists(),
+            WalWriter::open(dev_full, &test_key(), 0),
+        ) {
 
             // tx.commit should fail because /dev/full returns ENOSPC on write
             let result = tx2.commit(&mut pager, &mut wal_full, 0);

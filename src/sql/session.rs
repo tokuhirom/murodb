@@ -82,6 +82,7 @@ impl Session {
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
         tx.rollback(&mut self.wal)?;
+        self.post_rollback_checkpoint();
         // Reload catalog from disk since in-memory catalog may have been modified
         let catalog_root = self.pager.catalog_root();
         self.catalog = SystemCatalog::open(catalog_root);
@@ -151,6 +152,11 @@ impl Session {
     fn post_commit_checkpoint(&mut self) {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
+        let _ = self.wal.checkpoint_truncate();
+    }
+
+    fn post_rollback_checkpoint(&mut self) {
+        // Best-effort: rollback leaves no committed changes to preserve in WAL.
         let _ = self.wal.checkpoint_truncate();
     }
 }

@@ -5,7 +5,7 @@
 **MuroDB は WAL ベースのクラッシュ耐性を持つ。** すべての書き込みは WAL を経由し、クラッシュ後のリカバリが可能。
 
 主要機能:
-- WAL MetaUpdate にヘッダ CRC32 チェックサムを含む（破損検出）
+- データファイルヘッダ（format v2）に CRC32 チェックサムを含む（破損検出）
 - freelist_page_id を WAL MetaUpdate に含め、クラッシュ後も freelist を復元
 - データファイルヘッダの fsync 強化（WAL sync 後、データファイル flush_meta で fsync）
 

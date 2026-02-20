@@ -113,12 +113,12 @@ impl Pager {
                 // Multi-page chain: walk the chain
                 let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
                 pages_data_owned.push(data_area.to_vec());
-                // Read next pointer from first page
-                let mut next_page_id = u64::from_le_bytes(data_area[0..8].try_into().unwrap());
+                // Read next pointer from first page (offset 4, after 4-byte magic)
+                let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
                 while next_page_id != 0 {
                     let next_page = pager.read_page_from_disk(next_page_id)?;
                     let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
-                    next_page_id = u64::from_le_bytes(next_data[0..8].try_into().unwrap());
+                    next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
                     pages_data_owned.push(next_data.to_vec());
                 }
                 let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();

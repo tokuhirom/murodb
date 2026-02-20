@@ -126,21 +126,17 @@ impl Transaction {
             needed
         };
 
-        // Allocate freelist pages. Reuse existing freelist page as the first one.
+        // Compute freelist page IDs without mutating pager state.
+        // Reuse existing freelist page as the first one, then assign sequential
+        // page IDs starting from page_count for any additional pages needed.
         let mut fl_page_ids = Vec::with_capacity(pages_needed);
         let existing_fl_page_id = pager.freelist_page_id();
         if existing_fl_page_id != 0 {
             fl_page_ids.push(existing_fl_page_id);
         }
-        // Allocate additional pages as needed
         while fl_page_ids.len() < pages_needed {
-            let new_page = pager.allocate_page()?;
-            let pid = new_page.page_id();
-            fl_page_ids.push(pid);
-            let needed = pid + 1;
-            if needed > page_count {
-                page_count = needed;
-            }
+            fl_page_ids.push(page_count);
+            page_count += 1;
         }
 
         // Build speculative freelist and serialize to pages

@@ -28,10 +28,6 @@ enum CrashPoint {
     AfterCommitRecord,
     /// After WAL sync (committed, but before page flush)
     AfterWalSync,
-    /// After pages flushed to data file (but before meta flush)
-    AfterPageFlush,
-    /// After meta flush (fully committed)
-    AfterMetaFlush,
 }
 
 /// Whether the transaction has freed pages.
@@ -127,18 +123,19 @@ fn write_wal_up_to(
     let freelist_page_id = crash_freelist_page_id(base_page_count);
     let mut fl_page_data = [0u8; PAGE_SIZE];
     fl_page_data[0..8].copy_from_slice(&freelist_page_id.to_le_bytes());
-    // Write multi-page format: [next=0][count=N][entries...]
+    // Write multi-page format: [magic: 4][next=0: 8][count: 8][entries...]
     let fl_data_offset = PAGE_HEADER_SIZE;
-    fl_page_data[fl_data_offset..fl_data_offset + 8].copy_from_slice(&0u64.to_le_bytes()); // next = 0
+    fl_page_data[fl_data_offset..fl_data_offset + 4].copy_from_slice(b"FLMP"); // magic
+    fl_page_data[fl_data_offset + 4..fl_data_offset + 12].copy_from_slice(&0u64.to_le_bytes()); // next = 0
     match freed {
         FreedPages::None => {
-            fl_page_data[fl_data_offset + 8..fl_data_offset + 16]
+            fl_page_data[fl_data_offset + 12..fl_data_offset + 20]
                 .copy_from_slice(&0u64.to_le_bytes()); // count = 0
         }
         FreedPages::Some => {
-            fl_page_data[fl_data_offset + 8..fl_data_offset + 16]
+            fl_page_data[fl_data_offset + 12..fl_data_offset + 20]
                 .copy_from_slice(&1u64.to_le_bytes()); // count = 1
-            fl_page_data[fl_data_offset + 16..fl_data_offset + 24]
+            fl_page_data[fl_data_offset + 20..fl_data_offset + 28]
                 .copy_from_slice(&50u64.to_le_bytes()); // freed page 50
         }
     }
@@ -178,7 +175,7 @@ fn write_wal_up_to(
 
     // 6. WAL sync
     wal.sync().unwrap();
-    // AfterWalSync, AfterPageFlush, AfterMetaFlush are post-commit states
+    // AfterWalSync is a post-commit state
     // (WAL contains a complete committed transaction)
 }
 

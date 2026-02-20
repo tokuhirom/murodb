@@ -1,10 +1,15 @@
 use crate::storage::page::{PageId, PAGE_HEADER_SIZE, PAGE_SIZE};
 
+/// Magic bytes at the start of each multi-page freelist page data area.
+/// "FLMP" = FreeList Multi-Page. Used to reliably distinguish from the legacy
+/// single-page format where the first 8 bytes are a count field.
+pub const FREELIST_MULTI_PAGE_MAGIC: [u8; 4] = *b"FLMP";
+
 /// Maximum number of freelist entries per page.
 /// Data area = PAGE_SIZE - PAGE_HEADER_SIZE = 4082 bytes.
-/// Per-page header = 16 bytes (next_page_id: u64 + count: u64).
-/// Entries = (4082 - 16) / 8 = 508.
-pub const ENTRIES_PER_FREELIST_PAGE: usize = (PAGE_SIZE - PAGE_HEADER_SIZE - 16) / 8;
+/// Per-page header = 20 bytes (magic: 4 + next_page_id: u64 + count: u64).
+/// Entries = (4082 - 20) / 8 = 507.
+pub const ENTRIES_PER_FREELIST_PAGE: usize = (PAGE_SIZE - PAGE_HEADER_SIZE - 20) / 8;
 
 /// Simple freelist tracking free pages.
 /// Free page IDs are stored in-memory and serialized to special page(s) on checkpoint.
@@ -84,8 +89,9 @@ impl FreeList {
             } else {
                 0 // terminal
             };
-            // Build data area content
-            let mut data = Vec::with_capacity(16 + chunk.len() * 8);
+            // Build data area content: [magic: 4][next_page_id: 8][count: 8][entries...]
+            let mut data = Vec::with_capacity(20 + chunk.len() * 8);
+            data.extend_from_slice(&FREELIST_MULTI_PAGE_MAGIC);
             data.extend_from_slice(&next_page_id.to_le_bytes());
             data.extend_from_slice(&(chunk.len() as u64).to_le_bytes());
             for &pid in *chunk {
@@ -99,16 +105,17 @@ impl FreeList {
     /// Deserialize freelist from multiple page data buffers (multi-page chain format).
     ///
     /// Each `data` slice is the data area content (after PAGE_HEADER_SIZE) of a freelist page.
+    /// Format per page: [magic: 4][next_page_id: 8][count: 8][entries: 8*N]
     pub fn deserialize_pages(pages_data: &[&[u8]]) -> Self {
         let mut free_pages = Vec::new();
         for data in pages_data {
-            if data.len() < 16 {
+            if data.len() < 20 {
                 continue;
             }
-            // Skip next_page_id (8 bytes), read count
-            let count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+            // Skip magic (4 bytes) + next_page_id (8 bytes), read count
+            let count = u64::from_le_bytes(data[12..20].try_into().unwrap()) as usize;
             for i in 0..count {
-                let offset = 16 + i * 8;
+                let offset = 20 + i * 8;
                 if offset + 8 > data.len() {
                     break;
                 }
@@ -120,33 +127,11 @@ impl FreeList {
     }
 
     /// Detect whether a data area uses the multi-page chain format.
-    /// Multi-page format starts with [next_page_id: u64][count: u64],
-    /// while legacy format starts with [count: u64] directly.
-    /// We distinguish by checking if the layout is consistent with multi-page format.
+    /// Multi-page format starts with the 4-byte magic "FLMP", while legacy format
+    /// starts with a u64 count field directly. This is a reliable check regardless
+    /// of the data area size (which is always page-sized, zero-padded).
     pub fn is_multi_page_format(data: &[u8]) -> bool {
-        if data.len() < 16 {
-            return false;
-        }
-        // In multi-page format: first 8 bytes = next_page_id, next 8 = count.
-        // In legacy format: first 8 bytes = count.
-        // If legacy count * 8 + 8 == data.len() (or close), it's legacy.
-        // We use a heuristic: in legacy format the count field should match
-        // the number of entries that follow. In multi-page format, the count
-        // is at offset 8 and should match entries starting at offset 16.
-        let legacy_count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-        let legacy_expected_size = 8 + legacy_count * 8;
-        // If legacy interpretation matches data length exactly, it's legacy
-        if legacy_expected_size == data.len() {
-            return false;
-        }
-        // If legacy interpretation would expect more data than available, likely multi-page
-        if legacy_expected_size > data.len() {
-            return true;
-        }
-        // Check multi-page interpretation: count at offset 8
-        let mp_count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
-        let mp_expected_size = 16 + mp_count * 8;
-        mp_expected_size <= data.len()
+        data.len() >= 4 && data[0..4] == FREELIST_MULTI_PAGE_MAGIC
     }
 
     /// Deserialize freelist from bytes.
@@ -229,11 +214,14 @@ mod tests {
         let pages = fl.serialize_pages(&page_ids);
         assert_eq!(pages.len(), 2);
 
-        // First page should have next_page_id = 11
-        let next_ptr = u64::from_le_bytes(pages[0].1[0..8].try_into().unwrap());
+        // Both pages should start with magic
+        assert_eq!(&pages[0].1[0..4], &FREELIST_MULTI_PAGE_MAGIC);
+        assert_eq!(&pages[1].1[0..4], &FREELIST_MULTI_PAGE_MAGIC);
+        // First page should have next_page_id = 11 (after 4-byte magic)
+        let next_ptr = u64::from_le_bytes(pages[0].1[4..12].try_into().unwrap());
         assert_eq!(next_ptr, 11);
         // Last page should have next_page_id = 0
-        let last_next = u64::from_le_bytes(pages[1].1[0..8].try_into().unwrap());
+        let last_next = u64::from_le_bytes(pages[1].1[4..12].try_into().unwrap());
         assert_eq!(last_next, 0);
 
         // Roundtrip
@@ -251,8 +239,14 @@ mod tests {
         let legacy = fl.serialize();
         assert!(!FreeList::is_multi_page_format(&legacy));
 
-        // Multi-page format: [next=0][count=2][page1][page2]
+        // Multi-page format: [magic][next=0][count=2][page1][page2]
         let pages = fl.serialize_pages(&[42]);
         assert!(FreeList::is_multi_page_format(&pages[0].1));
+
+        // Zero-padded page-sized data with legacy format should NOT be detected as multi-page
+        let mut padded = vec![0u8; 4082]; // typical data area size
+        let legacy_data = fl.serialize();
+        padded[..legacy_data.len()].copy_from_slice(&legacy_data);
+        assert!(!FreeList::is_multi_page_format(&padded));
     }
 }

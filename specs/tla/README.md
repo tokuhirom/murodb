@@ -24,6 +24,8 @@ This folder contains a small TLA+ model for MuroDB crash resilience.
 - `TypeInv`: basic type safety of all state variables
 - `RecoveredSound`: after recovery, DB state equals replayed committed WAL state
 - `NoUncommittedInfluence`: uncommitted txs do not influence recovered state
+- `CommitRequiresMeta`: committed tx always has metadata update
+- `UniqueCommittedOrder`: each tx appears at most once in commit order
 
 ## Run TLC
 

@@ -148,6 +148,7 @@ SetMeta ==
 DurableCommit ==
   /\ mode = "Running"
   /\ activeTx \in TxIds
+  /\ bufMetaSet = TRUE
   /\ walTx' = [walTx EXCEPT
       ![activeTx] = [@ EXCEPT
         !.committed = TRUE,
@@ -248,6 +249,14 @@ NoUncommittedInfluence ==
       ~walTx[t].committed =>
         \A p \in walTx[t].touched:
           LastIndexTouching(p) = 0 \/ committedOrder[LastIndexTouching(p)] # t
+
+CommitRequiresMeta ==
+  \A t \in TxIds:
+    walTx[t].committed => walTx[t].metaSet
+
+UniqueCommittedOrder ==
+  \A i, j \in 1..Len(committedOrder):
+    i # j => committedOrder[i] # committedOrder[j]
 
 THEOREM Spec => []TypeInv
 ====

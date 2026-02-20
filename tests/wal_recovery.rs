@@ -396,3 +396,27 @@ fn test_wal_is_checkpointed_after_successful_commit() {
         "WAL should be truncated after successful commits"
     );
 }
+
+/// Issue #11: Explicit rollback should also checkpoint WAL so aborted tx records
+/// do not accumulate during long-running sessions.
+#[test]
+fn test_wal_is_checkpointed_after_explicit_rollback() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    db.execute("BEGIN").unwrap();
+    db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+    db.execute("ROLLBACK").unwrap();
+
+    let wal_size = std::fs::metadata(&wal_path).unwrap().len();
+    assert_eq!(wal_size, 0, "WAL should be truncated after rollback");
+
+    match db.execute("SELECT * FROM t").unwrap() {
+        ExecResult::Rows(rows) => assert_eq!(rows.len(), 0),
+        _ => panic!("Expected rows"),
+    }
+}

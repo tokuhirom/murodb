@@ -15,6 +15,12 @@ enum RecoveryModeArg {
     Permissive,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum OutputFormatArg {
+    Text,
+    Json,
+}
+
 impl From<RecoveryModeArg> for RecoveryMode {
     fn from(value: RecoveryModeArg) -> Self {
         match value {
@@ -49,6 +55,10 @@ struct Cli {
     /// Inspect WAL file consistency and exit (no DB replay)
     #[arg(long)]
     inspect_wal: Option<PathBuf>,
+
+    /// Output format for inspection/reporting
+    #[arg(long, value_enum, default_value = "text")]
+    format: OutputFormatArg,
 }
 
 fn get_password(cli_password: &Option<String>) -> String {
@@ -144,6 +154,22 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn execute_sql(db: &mut Database, sql: &str) {
     match db.execute(sql) {
         Ok(result) => println!("{}", format_rows(&result)),
@@ -233,13 +259,53 @@ fn main() {
             process::exit(1);
         });
 
-        println!("WAL inspection summary:");
-        println!("  committed txs: {}", report.committed_txids.len());
-        println!("  aborted txs: {}", report.aborted_txids.len());
-        println!("  replayable pages: {}", report.pages_replayed);
-        println!("  skipped malformed txs: {}", report.skipped.len());
-        for skipped in &report.skipped {
-            println!("  - txid {}: {}", skipped.txid, skipped.reason);
+        match cli.format {
+            OutputFormatArg::Text => {
+                println!("WAL inspection summary:");
+                println!("  committed txs: {}", report.committed_txids.len());
+                println!("  aborted txs: {}", report.aborted_txids.len());
+                println!("  replayable pages: {}", report.pages_replayed);
+                println!("  skipped malformed txs: {}", report.skipped.len());
+                for skipped in &report.skipped {
+                    println!("  - txid {}: {}", skipped.txid, skipped.reason);
+                }
+            }
+            OutputFormatArg::Json => {
+                let committed = report
+                    .committed_txids
+                    .iter()
+                    .map(|txid| txid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let aborted = report
+                    .aborted_txids
+                    .iter()
+                    .map(|txid| txid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let skipped = report
+                    .skipped
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{{\"txid\":{},\"reason\":\"{}\"}}",
+                            s.txid,
+                            json_escape(&s.reason)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let quarantine = report
+                    .wal_quarantine_path
+                    .as_ref()
+                    .map(|p| format!("\"{}\"", json_escape(p)))
+                    .unwrap_or_else(|| "null".to_string());
+
+                println!(
+                    "{{\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{}}}",
+                    committed, aborted, report.pages_replayed, skipped, quarantine
+                );
+            }
         }
         return;
     }

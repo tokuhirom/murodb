@@ -44,6 +44,9 @@ murodb mydb.db --recovery-mode permissive
 
 # Inspect WAL consistency only (no replay/apply)
 murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive
+
+# Inspect as JSON (for tooling/automation)
+murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
 ```
 
 Options:
@@ -52,6 +55,7 @@ Options:
 - `--password <PW>` — Password (prompts if omitted)
 - `--recovery-mode <strict|permissive>` — WAL recovery policy for open
 - `--inspect-wal <PATH>` — Analyze WAL consistency and exit
+- `--format <text|json>` — Output format (mainly for `--inspect-wal`)
 
 ## Components
 

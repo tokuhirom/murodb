@@ -9,6 +9,8 @@ use crate::tx::transaction::Transaction;
 use crate::wal::record::TxId;
 use crate::wal::writer::WalWriter;
 
+const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
+
 /// A session that manages explicit transaction state.
 ///
 /// - `BEGIN` starts a transaction (dirty-page buffering).
@@ -23,7 +25,7 @@ pub struct Session {
     active_tx: Option<Transaction>,
     next_txid: TxId,
     #[cfg(test)]
-    inject_checkpoint_failure_once: bool,
+    inject_checkpoint_failures_remaining: usize,
 }
 
 impl Session {
@@ -35,7 +37,7 @@ impl Session {
             active_tx: None,
             next_txid: 1,
             #[cfg(test)]
-            inject_checkpoint_failure_once: false,
+            inject_checkpoint_failures_remaining: 0,
         }
     }
 
@@ -156,7 +158,7 @@ impl Session {
     fn post_commit_checkpoint(&mut self) {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
-        if let Err(e) = self.try_checkpoint_truncate() {
+        if let Err(e) = self.try_checkpoint_truncate_with_retry() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
@@ -172,7 +174,7 @@ impl Session {
 
     fn post_rollback_checkpoint(&mut self) {
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
-        if let Err(e) = self.try_checkpoint_truncate() {
+        if let Err(e) = self.try_checkpoint_truncate_with_retry() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
@@ -186,10 +188,10 @@ impl Session {
         }
     }
 
-    fn try_checkpoint_truncate(&mut self) -> Result<()> {
+    fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
         #[cfg(test)]
-        if self.inject_checkpoint_failure_once {
-            self.inject_checkpoint_failure_once = false;
+        if self.inject_checkpoint_failures_remaining > 0 {
+            self.inject_checkpoint_failures_remaining -= 1;
             return Err(MuroError::Io(std::io::Error::other(
                 "injected checkpoint failure",
             )));
@@ -197,9 +199,29 @@ impl Session {
         self.wal.checkpoint_truncate()
     }
 
+    fn try_checkpoint_truncate_with_retry(&mut self) -> Result<()> {
+        let mut last_err = None;
+        for _ in 0..CHECKPOINT_MAX_ATTEMPTS {
+            match self.try_checkpoint_truncate_once() {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            MuroError::Io(std::io::Error::other(
+                "checkpoint truncate failed without error detail",
+            ))
+        }))
+    }
+
     #[cfg(test)]
     fn inject_checkpoint_failure_once_for_test(&mut self) {
-        self.inject_checkpoint_failure_once = true;
+        self.inject_checkpoint_failures_remaining = 1;
+    }
+
+    #[cfg(test)]
+    fn inject_checkpoint_failures_for_test(&mut self, count: usize) {
+        self.inject_checkpoint_failures_remaining = count;
     }
 }
 
@@ -226,7 +248,7 @@ mod tests {
         let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
         let mut session = Session::new(pager, catalog, wal);
 
-        session.inject_checkpoint_failure_once_for_test();
+        session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
         let result = session
             .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
             .unwrap();
@@ -266,7 +288,7 @@ mod tests {
             .execute("INSERT INTO t VALUES (1, 'alice')")
             .unwrap();
 
-        session.inject_checkpoint_failure_once_for_test();
+        session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
         let result = session.execute("ROLLBACK").unwrap();
         assert!(matches!(result, ExecResult::Ok));
 
@@ -275,5 +297,30 @@ mod tests {
             _ => panic!("Expected rows"),
         };
         assert_eq!(rows.len(), 0);
+    }
+
+    #[test]
+    fn test_commit_checkpoint_retries_transient_failure_and_clears_wal() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session.inject_checkpoint_failure_once_for_test();
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+
+        let wal_size = std::fs::metadata(&wal_path).unwrap().len();
+        assert_eq!(
+            wal_size, 0,
+            "transient checkpoint failure should be recovered by retry"
+        );
     }
 }

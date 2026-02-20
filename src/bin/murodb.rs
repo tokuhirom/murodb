@@ -1,10 +1,26 @@
 use std::path::PathBuf;
 use std::process;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use murodb::sql::executor::ExecResult;
 use murodb::types::Value;
+use murodb::wal::recovery::RecoveryMode;
 use murodb::Database;
+
+#[derive(Clone, Debug, ValueEnum)]
+enum RecoveryModeArg {
+    Strict,
+    Permissive,
+}
+
+impl From<RecoveryModeArg> for RecoveryMode {
+    fn from(value: RecoveryModeArg) -> Self {
+        match value {
+            RecoveryModeArg::Strict => RecoveryMode::Strict,
+            RecoveryModeArg::Permissive => RecoveryMode::Permissive,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "murodb", about = "MuroDB - Encrypted embedded SQL database")]
@@ -23,6 +39,10 @@ struct Cli {
     /// Password (if omitted, will prompt)
     #[arg(long)]
     password: Option<String>,
+
+    /// WAL recovery behavior when opening existing DB
+    #[arg(long, value_enum, default_value = "strict")]
+    recovery_mode: RecoveryModeArg,
 }
 
 fn get_password(cli_password: &Option<String>) -> String {
@@ -187,6 +207,7 @@ fn main() {
     let cli = Cli::parse();
 
     let password = get_password(&cli.password);
+    let recovery_mode: RecoveryMode = cli.recovery_mode.clone().into();
 
     let mut db = if cli.create {
         if cli.db_path.exists() {
@@ -203,10 +224,11 @@ fn main() {
             eprintln!("Use --create to create a new database");
             process::exit(1);
         }
-        Database::open_with_password(&cli.db_path, &password).unwrap_or_else(|e| {
-            eprintln!("ERROR: Failed to open database: {}", e);
-            process::exit(1);
-        })
+        Database::open_with_password_and_recovery_mode(&cli.db_path, &password, recovery_mode)
+            .unwrap_or_else(|e| {
+                eprintln!("ERROR: Failed to open database: {}", e);
+                process::exit(1);
+            })
     };
 
     if let Some(sql) = &cli.execute {

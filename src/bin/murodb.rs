@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +7,7 @@ use murodb::crypto::kdf;
 use murodb::sql::executor::ExecResult;
 use murodb::storage::pager::Pager;
 use murodb::types::Value;
-use murodb::wal::recovery::{inspect_wal, RecoveryMode};
+use murodb::wal::recovery::{inspect_wal, RecoveryMode, RecoveryResult};
 use murodb::Database;
 
 const EXIT_OK: i32 = 0;
@@ -175,6 +175,89 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+fn json_mode_str(mode: RecoveryMode) -> &'static str {
+    match mode {
+        RecoveryMode::Strict => "strict",
+        RecoveryMode::Permissive => "permissive",
+    }
+}
+
+fn emit_inspect_json_success(mode: RecoveryMode, wal_path: &Path, report: &RecoveryResult) {
+    let generated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let committed = report
+        .committed_txids
+        .iter()
+        .map(|txid| txid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let aborted = report
+        .aborted_txids
+        .iter()
+        .map(|txid| txid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let skipped = report
+        .skipped
+        .iter()
+        .map(|s| {
+            format!(
+                "{{\"txid\":{},\"code\":\"{}\",\"reason\":\"{}\"}}",
+                s.txid,
+                s.code.as_str(),
+                json_escape(&s.reason)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let quarantine = report
+        .wal_quarantine_path
+        .as_ref()
+        .map(|p| format!("\"{}\"", json_escape(p)))
+        .unwrap_or_else(|| "null".to_string());
+
+    println!(
+        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{},\"fatal_error\":null}}",
+        json_mode_str(mode),
+        json_escape(&wal_path.display().to_string()),
+        generated_at,
+        committed,
+        aborted,
+        report.pages_replayed,
+        skipped,
+        quarantine
+    );
+}
+
+fn emit_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, msg: &str) {
+    let generated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    println!(
+        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[],\"aborted_txids\":[],\"pages_replayed\":0,\"skipped\":[],\"wal_quarantine_path\":null,\"fatal_error\":\"{}\"}}",
+        json_mode_str(mode),
+        json_escape(&wal_path.display().to_string()),
+        generated_at,
+        json_escape(msg)
+    );
+}
+
+fn inspect_fatal_and_exit(
+    format: &OutputFormatArg,
+    mode: RecoveryMode,
+    wal_path: &Path,
+    msg: &str,
+) -> ! {
+    match format {
+        OutputFormatArg::Text => eprintln!("ERROR: {}", msg),
+        OutputFormatArg::Json => emit_inspect_json_fatal(mode, wal_path, msg),
+    }
+    process::exit(EXIT_FATAL_ERROR);
+}
+
 fn execute_sql(db: &mut Database, sql: &str) {
     match db.execute(sql) {
         Ok(result) => println!("{}", format_rows(&result)),
@@ -248,20 +331,36 @@ fn main() {
 
     if let Some(wal_path) = &cli.inspect_wal {
         let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
-            eprintln!("ERROR: db_path is required with --inspect-wal");
-            process::exit(EXIT_FATAL_ERROR);
+            inspect_fatal_and_exit(
+                &cli.format,
+                recovery_mode,
+                wal_path,
+                "db_path is required with --inspect-wal",
+            );
         });
         let salt = Pager::read_salt_from_file(db_path).unwrap_or_else(|e| {
-            eprintln!("ERROR: Failed to read DB salt: {}", e);
-            process::exit(EXIT_FATAL_ERROR);
+            inspect_fatal_and_exit(
+                &cli.format,
+                recovery_mode,
+                wal_path,
+                &format!("Failed to read DB salt: {}", e),
+            );
         });
         let key = kdf::derive_key(password.as_bytes(), &salt).unwrap_or_else(|e| {
-            eprintln!("ERROR: Failed to derive key: {}", e);
-            process::exit(EXIT_FATAL_ERROR);
+            inspect_fatal_and_exit(
+                &cli.format,
+                recovery_mode,
+                wal_path,
+                &format!("Failed to derive key: {}", e),
+            );
         });
         let report = inspect_wal(wal_path, &key, recovery_mode).unwrap_or_else(|e| {
-            eprintln!("ERROR: WAL inspection failed: {}", e);
-            process::exit(EXIT_FATAL_ERROR);
+            inspect_fatal_and_exit(
+                &cli.format,
+                recovery_mode,
+                wal_path,
+                &format!("WAL inspection failed: {}", e),
+            );
         });
 
         match cli.format {
@@ -281,55 +380,7 @@ fn main() {
                 }
             }
             OutputFormatArg::Json => {
-                let generated_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let committed = report
-                    .committed_txids
-                    .iter()
-                    .map(|txid| txid.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let aborted = report
-                    .aborted_txids
-                    .iter()
-                    .map(|txid| txid.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let skipped = report
-                    .skipped
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{{\"txid\":{},\"code\":\"{}\",\"reason\":\"{}\"}}",
-                            s.txid,
-                            s.code.as_str(),
-                            json_escape(&s.reason)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let quarantine = report
-                    .wal_quarantine_path
-                    .as_ref()
-                    .map(|p| format!("\"{}\"", json_escape(p)))
-                    .unwrap_or_else(|| "null".to_string());
-
-                println!(
-                    "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{}}}",
-                    match recovery_mode {
-                        RecoveryMode::Strict => "strict",
-                        RecoveryMode::Permissive => "permissive",
-                    },
-                    json_escape(&wal_path.display().to_string()),
-                    generated_at,
-                    committed,
-                    aborted,
-                    report.pages_replayed,
-                    skipped,
-                    quarantine
-                );
+                emit_inspect_json_success(recovery_mode, wal_path, &report);
             }
         }
         if report.skipped.is_empty() {

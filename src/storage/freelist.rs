@@ -11,6 +11,27 @@ pub const FREELIST_MULTI_PAGE_MAGIC: [u8; 4] = *b"FLMP";
 /// Entries = (4082 - 20) / 8 = 507.
 pub const ENTRIES_PER_FREELIST_PAGE: usize = (PAGE_SIZE - PAGE_HEADER_SIZE - 20) / 8;
 
+/// Report produced by `FreeList::sanitize()` describing removed entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SanitizeReport {
+    /// Page IDs that were removed because they were >= page_count.
+    pub out_of_range: Vec<PageId>,
+    /// Page IDs that appeared more than once (only the duplicate occurrences).
+    pub duplicates: Vec<PageId>,
+}
+
+impl SanitizeReport {
+    /// Returns `true` if no entries were removed.
+    pub fn is_clean(&self) -> bool {
+        self.out_of_range.is_empty() && self.duplicates.is_empty()
+    }
+
+    /// Total number of entries removed.
+    pub fn total_removed(&self) -> usize {
+        self.out_of_range.len() + self.duplicates.len()
+    }
+}
+
 /// Simple freelist tracking free pages.
 /// Free page IDs are stored in-memory and serialized to special page(s) on checkpoint.
 #[derive(Default)]
@@ -173,10 +194,22 @@ impl FreeList {
 
     /// Sanitize freelist by removing out-of-range and duplicate entries.
     /// After crash recovery, the freelist may contain stale entries.
-    pub fn sanitize(&mut self, page_count: u64) {
+    /// Returns a report describing what was removed.
+    pub fn sanitize(&mut self, page_count: u64) -> SanitizeReport {
+        let mut report = SanitizeReport::default();
         let mut seen = std::collections::HashSet::new();
-        self.free_pages
-            .retain(|&pid| pid < page_count && seen.insert(pid));
+        self.free_pages.retain(|&pid| {
+            if pid >= page_count {
+                report.out_of_range.push(pid);
+                return false;
+            }
+            if !seen.insert(pid) {
+                report.duplicates.push(pid);
+                return false;
+            }
+            true
+        });
+        report
     }
 
     /// Deserialize freelist from bytes.
@@ -293,5 +326,54 @@ mod tests {
         let legacy_data = fl.serialize();
         padded[..legacy_data.len()].copy_from_slice(&legacy_data);
         assert!(!FreeList::is_multi_page_format(&padded));
+    }
+
+    #[test]
+    fn test_sanitize_report_clean() {
+        let mut fl = FreeList::new();
+        fl.free(1);
+        fl.free(2);
+        fl.free(3);
+        let report = fl.sanitize(100);
+        assert!(report.is_clean());
+        assert_eq!(report.total_removed(), 0);
+        assert_eq!(fl.len(), 3);
+    }
+
+    #[test]
+    fn test_sanitize_report_out_of_range() {
+        let mut fl = FreeList::new();
+        fl.free(1);
+        fl.free(50);
+        fl.free(100);
+        let report = fl.sanitize(50);
+        assert!(!report.is_clean());
+        assert_eq!(report.out_of_range, vec![50, 100]);
+        assert!(report.duplicates.is_empty());
+        assert_eq!(fl.len(), 1);
+    }
+
+    #[test]
+    fn test_sanitize_report_duplicates() {
+        let mut fl = FreeList {
+            free_pages: vec![1, 2, 1, 3, 2],
+        };
+        let report = fl.sanitize(100);
+        assert!(!report.is_clean());
+        assert!(report.out_of_range.is_empty());
+        assert_eq!(report.duplicates, vec![1, 2]);
+        assert_eq!(fl.len(), 3);
+    }
+
+    #[test]
+    fn test_sanitize_report_mixed() {
+        let mut fl = FreeList {
+            free_pages: vec![1, 200, 1, 3],
+        };
+        let report = fl.sanitize(100);
+        assert_eq!(report.out_of_range, vec![200]);
+        assert_eq!(report.duplicates, vec![1]);
+        assert_eq!(report.total_removed(), 2);
+        assert_eq!(fl.len(), 2);
     }
 }

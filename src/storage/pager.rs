@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
-use crate::storage::freelist::FreeList;
+use crate::storage::freelist::{FreeList, SanitizeReport};
 use crate::storage::page::{Page, PageId, PAGE_SIZE};
 use crate::wal::record::crc32;
 
@@ -43,6 +43,8 @@ pub struct Pager {
     freelist_page_id: u64,
     next_txid: u64,
     cache: LruCache<PageId, Page>,
+    /// Diagnostics from freelist sanitization during open.
+    freelist_sanitize_report: Option<SanitizeReport>,
 }
 
 impl Pager {
@@ -68,6 +70,7 @@ impl Pager {
             freelist_page_id: 0,
             next_txid: 1,
             cache,
+            freelist_sanitize_report: None,
         };
 
         // Write the plaintext header
@@ -99,6 +102,7 @@ impl Pager {
             freelist_page_id: 0,
             next_txid: 1,
             cache,
+            freelist_sanitize_report: None,
         };
 
         pager.read_plaintext_header()?;
@@ -150,7 +154,10 @@ impl Pager {
             // Sanitize freelist: remove entries beyond page_count and duplicates.
             // After crash recovery, the freelist may contain stale entries that
             // reference pages beyond the current page_count.
-            pager.freelist.sanitize(pager.page_count);
+            let report = pager.freelist.sanitize(pager.page_count);
+            if !report.is_clean() {
+                pager.freelist_sanitize_report = Some(report);
+            }
         }
 
         Ok(pager)
@@ -377,6 +384,12 @@ impl Pager {
     /// Get mutable reference to the in-memory freelist.
     pub fn freelist_mut(&mut self) -> &mut FreeList {
         &mut self.freelist
+    }
+
+    /// Returns the freelist sanitization report if entries were removed during open.
+    /// `None` means no sanitization was needed (clean freelist).
+    pub fn freelist_sanitize_report(&self) -> Option<&SanitizeReport> {
+        self.freelist_sanitize_report.as_ref()
     }
 
     /// Get the next transaction ID.
@@ -784,6 +797,83 @@ mod tests {
             msg.contains("beyond page_count"),
             "expected beyond page_count error, got: {msg}"
         );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_sanitize_report_observable_on_open() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        // Create a DB with a freelist containing an out-of-range entry.
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            let p0 = pager.allocate_page().unwrap();
+            pager.write_page(&p0).unwrap();
+            let fl_page = pager.allocate_page().unwrap();
+            let fl_pid = fl_page.page_id();
+
+            let off = crate::storage::page::PAGE_HEADER_SIZE;
+            let mut fl = Page::new(fl_pid);
+            fl.data[off..off + 4].copy_from_slice(b"FLMP"); // magic
+            fl.data[off + 4..off + 12].copy_from_slice(&0u64.to_le_bytes()); // next = 0
+            fl.data[off + 12..off + 20].copy_from_slice(&2u64.to_le_bytes()); // count = 2
+            fl.data[off + 20..off + 28].copy_from_slice(&0u64.to_le_bytes()); // page 0 (valid)
+            fl.data[off + 28..off + 36].copy_from_slice(&9999u64.to_le_bytes()); // page 9999 (out-of-range)
+            pager.write_page(&fl).unwrap();
+            pager.set_freelist_page_id(fl_pid);
+            pager.flush_meta().unwrap();
+        }
+
+        // Re-open: sanitize should remove page 9999 and report it.
+        {
+            let pager = Pager::open(&path, &test_key()).unwrap();
+            let report = pager
+                .freelist_sanitize_report()
+                .expect("expected sanitize report");
+            assert_eq!(report.out_of_range, vec![9999]);
+            assert!(report.duplicates.is_empty());
+            assert_eq!(report.total_removed(), 1);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_sanitize_report_none_when_clean() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            let p0 = pager.allocate_page().unwrap();
+            pager.write_page(&p0).unwrap();
+            let fl_page = pager.allocate_page().unwrap();
+            let fl_pid = fl_page.page_id();
+
+            let off = crate::storage::page::PAGE_HEADER_SIZE;
+            let mut fl = Page::new(fl_pid);
+            fl.data[off..off + 4].copy_from_slice(b"FLMP"); // magic
+            fl.data[off + 4..off + 12].copy_from_slice(&0u64.to_le_bytes()); // next = 0
+            fl.data[off + 12..off + 20].copy_from_slice(&1u64.to_le_bytes()); // count = 1
+            fl.data[off + 20..off + 28].copy_from_slice(&0u64.to_le_bytes()); // page 0 (valid)
+            pager.write_page(&fl).unwrap();
+            pager.set_freelist_page_id(fl_pid);
+            pager.flush_meta().unwrap();
+        }
+
+        {
+            let pager = Pager::open(&path, &test_key()).unwrap();
+            assert!(
+                pager.freelist_sanitize_report().is_none(),
+                "expected no sanitize report for clean freelist"
+            );
+        }
 
         std::fs::remove_file(&path).ok();
     }

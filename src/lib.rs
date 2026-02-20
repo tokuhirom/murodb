@@ -45,6 +45,20 @@ fn wal_path(db_path: &Path) -> PathBuf {
     db_path.with_extension("wal")
 }
 
+fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
+    // Truncate and fsync WAL file so recovery effects become durable.
+    let wal_file = std::fs::File::create(wal_path)?;
+    wal_file.sync_all()?;
+
+    // Best-effort directory fsync to persist metadata updates (size/truncate).
+    if let Some(parent) = wal_path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     /// Create a new database at the given path.
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
@@ -73,7 +87,7 @@ impl Database {
         if wp.exists() {
             crate::wal::recovery::recover(path, &wp, master_key)?;
             // Truncate WAL after successful recovery
-            std::fs::File::create(&wp)?;
+            truncate_wal_durably(&wp)?;
         }
 
         let pager = Pager::open(path, master_key)?;

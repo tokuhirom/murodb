@@ -71,6 +71,22 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Truncate WAL to empty and reset LSN stream.
+    ///
+    /// Safe to call after a successful commit because data pages and metadata
+    /// have already been flushed to the main database file.
+    pub fn checkpoint_truncate(&mut self) -> Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_all()?;
+        self.current_lsn = 0;
+        Ok(())
+    }
+
+    /// Current WAL file size in bytes.
+    pub fn file_size_bytes(&self) -> Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     pub fn current_lsn(&self) -> Lsn {
         self.current_lsn
     }
@@ -107,5 +123,24 @@ mod tests {
         assert_eq!(lsn2, 2);
 
         writer.sync().unwrap();
+    }
+
+    #[test]
+    fn test_checkpoint_truncate_resets_wal_and_lsn() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let key = MasterKey::new([0x42u8; 32]);
+        let mut writer = WalWriter::create(&path, &key).unwrap();
+        writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+        writer.sync().unwrap();
+        assert!(writer.file_size_bytes().unwrap() > 0);
+
+        writer.checkpoint_truncate().unwrap();
+        assert_eq!(writer.file_size_bytes().unwrap(), 0);
+        assert_eq!(writer.current_lsn(), 0);
+
+        let lsn = writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
+        assert_eq!(lsn, 0);
     }
 }

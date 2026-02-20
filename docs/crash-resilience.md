@@ -87,7 +87,8 @@ API:
 - CLI: `murodb <db> --inspect-wal <wal> --recovery-mode permissive` で WAL 診断のみ実行可能
 - CLI: `--format json` で WAL 診断結果を機械可読形式で出力可能
   - JSON は `schema_version=1` を含み、`skipped[].code` で機械向け分類を提供
-  - 致命失敗時も JSON を返し、`fatal_error` にエラー内容を格納する
+  - `status` (`ok`/`warning`/`fatal`) と `exit_code` を含み、終了コード規約を JSON 内でも参照可能
+  - 致命失敗時も JSON を返し、`fatal_error` と `fatal_error_code` を格納する
 - `--inspect-wal` の終了コード規約:
   - `0`: 問題なし
   - `10`: malformed tx 検出（診断成功）

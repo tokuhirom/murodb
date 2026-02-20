@@ -182,6 +182,33 @@ fn json_mode_str(mode: RecoveryMode) -> &'static str {
     }
 }
 
+fn inspect_success_exit_code(report: &RecoveryResult) -> i32 {
+    if report.skipped.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_MALFORMED_DETECTED
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InspectFatalKind {
+    MissingDbPath,
+    ReadSalt,
+    DeriveKey,
+    InspectFailed,
+}
+
+impl InspectFatalKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            InspectFatalKind::MissingDbPath => "MISSING_DB_PATH",
+            InspectFatalKind::ReadSalt => "READ_SALT_FAILED",
+            InspectFatalKind::DeriveKey => "DERIVE_KEY_FAILED",
+            InspectFatalKind::InspectFailed => "INSPECT_FAILED",
+        }
+    }
+}
+
 fn emit_inspect_json_success(mode: RecoveryMode, wal_path: &Path, report: &RecoveryResult) {
     println!("{}", build_inspect_json_success(mode, wal_path, report));
 }
@@ -227,7 +254,7 @@ fn build_inspect_json_success(
         .unwrap_or_else(|| "null".to_string());
 
     format!(
-        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{},\"fatal_error\":null}}",
+        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[{}],\"aborted_txids\":[{}],\"pages_replayed\":{},\"skipped\":[{}],\"wal_quarantine_path\":{},\"status\":\"{}\",\"fatal_error\":null,\"fatal_error_code\":null,\"exit_code\":{}}}",
         json_mode_str(mode),
         json_escape(&wal_path.display().to_string()),
         generated_at,
@@ -235,25 +262,38 @@ fn build_inspect_json_success(
         aborted,
         report.pages_replayed,
         skipped,
-        quarantine
+        quarantine,
+        if report.skipped.is_empty() {
+            "ok"
+        } else {
+            "warning"
+        },
+        inspect_success_exit_code(report)
     )
 }
 
-fn emit_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, msg: &str) {
-    println!("{}", build_inspect_json_fatal(mode, wal_path, msg));
+fn emit_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, kind: InspectFatalKind, msg: &str) {
+    println!("{}", build_inspect_json_fatal(mode, wal_path, kind, msg));
 }
 
-fn build_inspect_json_fatal(mode: RecoveryMode, wal_path: &Path, msg: &str) -> String {
+fn build_inspect_json_fatal(
+    mode: RecoveryMode,
+    wal_path: &Path,
+    kind: InspectFatalKind,
+    msg: &str,
+) -> String {
     let generated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     format!(
-        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[],\"aborted_txids\":[],\"pages_replayed\":0,\"skipped\":[],\"wal_quarantine_path\":null,\"fatal_error\":\"{}\"}}",
+        "{{\"schema_version\":1,\"mode\":\"{}\",\"wal_path\":\"{}\",\"generated_at\":{},\"committed_txids\":[],\"aborted_txids\":[],\"pages_replayed\":0,\"skipped\":[],\"wal_quarantine_path\":null,\"status\":\"fatal\",\"fatal_error\":\"{}\",\"fatal_error_code\":\"{}\",\"exit_code\":{}}}",
         json_mode_str(mode),
         json_escape(&wal_path.display().to_string()),
         generated_at,
-        json_escape(msg)
+        json_escape(msg),
+        kind.as_str(),
+        EXIT_FATAL_ERROR
     )
 }
 
@@ -261,11 +301,12 @@ fn inspect_fatal_and_exit(
     format: &OutputFormatArg,
     mode: RecoveryMode,
     wal_path: &Path,
+    kind: InspectFatalKind,
     msg: &str,
 ) -> ! {
     match format {
         OutputFormatArg::Text => eprintln!("ERROR: {}", msg),
-        OutputFormatArg::Json => emit_inspect_json_fatal(mode, wal_path, msg),
+        OutputFormatArg::Json => emit_inspect_json_fatal(mode, wal_path, kind, msg),
     }
     process::exit(EXIT_FATAL_ERROR);
 }
@@ -293,19 +334,42 @@ mod tests {
         let json = build_inspect_json_success(RecoveryMode::Permissive, wal_path, &report);
         assert!(json.contains("\"schema_version\":1"));
         assert!(json.contains("\"mode\":\"permissive\""));
+        assert!(json.contains("\"status\":\"warning\""));
         assert!(json.contains("\"fatal_error\":null"));
+        assert!(json.contains("\"fatal_error_code\":null"));
         assert!(json.contains("\"code\":\"COMMIT_WITHOUT_META\""));
+        assert!(json.contains("\"exit_code\":10"));
     }
 
     #[test]
     fn inspect_json_fatal_includes_error_message() {
         let wal_path = Path::new("/tmp/test.wal");
-        let json = build_inspect_json_fatal(RecoveryMode::Strict, wal_path, "boom");
+        let json = build_inspect_json_fatal(
+            RecoveryMode::Strict,
+            wal_path,
+            InspectFatalKind::InspectFailed,
+            "boom",
+        );
         assert!(json.contains("\"schema_version\":1"));
         assert!(json.contains("\"mode\":\"strict\""));
+        assert!(json.contains("\"status\":\"fatal\""));
         assert!(json.contains("\"fatal_error\":\"boom\""));
+        assert!(json.contains("\"fatal_error_code\":\"INSPECT_FAILED\""));
+        assert!(json.contains("\"exit_code\":20"));
         assert!(json.contains("\"committed_txids\":[]"));
         assert!(json.contains("\"skipped\":[]"));
+    }
+
+    #[test]
+    fn inspect_success_exit_code_is_zero_when_no_skipped() {
+        let report = RecoveryResult {
+            committed_txids: vec![1],
+            aborted_txids: vec![],
+            pages_replayed: 1,
+            skipped: vec![],
+            wal_quarantine_path: None,
+        };
+        assert_eq!(inspect_success_exit_code(&report), 0);
     }
 }
 
@@ -386,6 +450,7 @@ fn main() {
                 &cli.format,
                 recovery_mode,
                 wal_path,
+                InspectFatalKind::MissingDbPath,
                 "db_path is required with --inspect-wal",
             );
         });
@@ -394,6 +459,7 @@ fn main() {
                 &cli.format,
                 recovery_mode,
                 wal_path,
+                InspectFatalKind::ReadSalt,
                 &format!("Failed to read DB salt: {}", e),
             );
         });
@@ -402,6 +468,7 @@ fn main() {
                 &cli.format,
                 recovery_mode,
                 wal_path,
+                InspectFatalKind::DeriveKey,
                 &format!("Failed to derive key: {}", e),
             );
         });
@@ -410,6 +477,7 @@ fn main() {
                 &cli.format,
                 recovery_mode,
                 wal_path,
+                InspectFatalKind::InspectFailed,
                 &format!("WAL inspection failed: {}", e),
             );
         });
@@ -434,11 +502,7 @@ fn main() {
                 emit_inspect_json_success(recovery_mode, wal_path, &report);
             }
         }
-        if report.skipped.is_empty() {
-            process::exit(EXIT_OK);
-        } else {
-            process::exit(EXIT_MALFORMED_DETECTED);
-        }
+        process::exit(inspect_success_exit_code(&report));
     }
 
     let mut db = if cli.create {

@@ -4,7 +4,12 @@ use std::path::Path;
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
+use crate::storage::page::PAGE_SIZE;
 use crate::wal::record::{crc32, Lsn, WalRecord};
+
+// Upper bound for one encrypted WAL frame payload size.
+// PagePut with one full page is the largest record currently emitted.
+const MAX_WAL_FRAME_LEN: usize = PAGE_SIZE + 1024;
 
 /// WAL reader: iterate through WAL records for recovery/snapshot.
 pub struct WalReader {
@@ -70,6 +75,26 @@ impl WalReader {
         }
 
         let frame_len = u32::from_le_bytes(len_buf) as usize;
+        let payload_pos = self.file.stream_position()?;
+        let remaining_payload_bytes = self.file_len.saturating_sub(payload_pos);
+
+        // Truncated tail frame: header is present but payload isn't fully written.
+        if frame_len as u64 > remaining_payload_bytes {
+            return Ok(None);
+        }
+        if frame_len == 0 {
+            return Err(MuroError::Wal("WAL frame length is zero".into()));
+        }
+        if frame_len > MAX_WAL_FRAME_LEN {
+            // If the oversized frame occupies the exact tail, tolerate it as a torn/corrupt tail.
+            if frame_len as u64 == remaining_payload_bytes {
+                return Ok(None);
+            }
+            return Err(MuroError::Wal(format!(
+                "WAL frame length {} exceeds max {} at LSN {}",
+                frame_len, MAX_WAL_FRAME_LEN, self.current_lsn
+            )));
+        }
 
         let mut encrypted = vec![0u8; frame_len];
         match self.file.read_exact(&mut encrypted) {
@@ -290,5 +315,33 @@ mod tests {
         let result = reader.read_all();
         // Should be a hard error because there's a valid frame after the corrupt one
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_oversized_tail_frame_tolerated() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let mut writer = WalWriter::create(&path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            let oversized_len = (MAX_WAL_FRAME_LEN as u32) + 1;
+            file.write_all(&oversized_len.to_le_bytes()).unwrap();
+            file.write_all(&vec![0xEE; oversized_len as usize]).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let mut reader = WalReader::open(&path, &test_key()).unwrap();
+        let records = reader.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(&records[0].1, WalRecord::Begin { txid: 1 }));
     }
 }

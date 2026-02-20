@@ -29,7 +29,14 @@ fn test_wal_write_and_read() {
             })
             .unwrap();
         writer
-            .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+            .append(&WalRecord::MetaUpdate {
+                txid: 1,
+                catalog_root: 0,
+                page_count: 6,
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 3 })
             .unwrap();
 
         writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
@@ -47,7 +54,7 @@ fn test_wal_write_and_read() {
     {
         let mut reader = WalReader::open(&wal_path, &test_key()).unwrap();
         let records = reader.read_all().unwrap();
-        assert_eq!(records.len(), 6);
+        assert_eq!(records.len(), 7);
     }
 }
 
@@ -78,7 +85,14 @@ fn test_recovery_replays_committed_only() {
             })
             .unwrap();
         writer
-            .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+            .append(&WalRecord::MetaUpdate {
+                txid: 1,
+                catalog_root: 0,
+                page_count: 2,
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 3 })
             .unwrap();
 
         // TX 2: uncommitted (simulating crash)

@@ -14,6 +14,23 @@ enum TxTerminalState {
     Aborted,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TxValidationState {
+    seen_begin: bool,
+    seen_meta_update: bool,
+    terminal: Option<TxTerminalState>,
+}
+
+impl TxValidationState {
+    fn new() -> Self {
+        Self {
+            seen_begin: false,
+            seen_meta_update: false,
+            terminal: None,
+        }
+    }
+}
+
 /// Recover the database from WAL.
 /// Replays committed transactions, discards uncommitted ones.
 /// Restores page data, catalog_root, and page_count metadata.
@@ -37,29 +54,114 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
         });
     }
 
-    // Phase 1: Validate terminal records and determine final tx outcome.
-    // If both Commit/Abort appear for one txid, the later record wins.
-    let mut terminal: HashMap<TxId, TxTerminalState> = HashMap::new();
+    // Phase 1: Validate WAL transaction lifecycle against TLA+ state machine.
+    // Allowed transitions:
+    //   Init -> Begin -> (PagePut | MetaUpdate)* -> (Commit | Abort)
+    // No record is allowed after Commit/Abort for the same txid.
+    let mut tx_states: HashMap<TxId, TxValidationState> = HashMap::new();
     for (lsn, record) in &records {
         match record {
+            WalRecord::Begin { txid } => {
+                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                if state.seen_begin {
+                    return Err(MuroError::Wal(format!(
+                        "Duplicate Begin for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if state.terminal.is_some() {
+                    return Err(MuroError::Wal(format!(
+                        "Begin after terminal record for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                state.seen_begin = true;
+            }
+            WalRecord::PagePut { txid, .. } => {
+                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                if !state.seen_begin {
+                    return Err(MuroError::Wal(format!(
+                        "PagePut before Begin for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if state.terminal.is_some() {
+                    return Err(MuroError::Wal(format!(
+                        "PagePut after terminal record for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+            }
+            WalRecord::MetaUpdate { txid, .. } => {
+                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                if !state.seen_begin {
+                    return Err(MuroError::Wal(format!(
+                        "MetaUpdate before Begin for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if state.terminal.is_some() {
+                    return Err(MuroError::Wal(format!(
+                        "MetaUpdate after terminal record for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                state.seen_meta_update = true;
+            }
             WalRecord::Commit {
                 txid,
                 lsn: commit_lsn,
             } => {
+                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                if !state.seen_begin {
+                    return Err(MuroError::Wal(format!(
+                        "Commit before Begin for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if state.terminal.is_some() {
+                    return Err(MuroError::Wal(format!(
+                        "Duplicate terminal record for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if !state.seen_meta_update {
+                    return Err(MuroError::Wal(format!(
+                        "Commit without MetaUpdate for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
                 if *commit_lsn != *lsn {
                     return Err(MuroError::Wal(format!(
                         "Commit LSN mismatch for txid {}: record lsn={}, declared lsn={}",
                         txid, lsn, commit_lsn
                     )));
                 }
-                terminal.insert(*txid, TxTerminalState::Committed);
+                state.terminal = Some(TxTerminalState::Committed);
             }
             WalRecord::Abort { txid } => {
-                terminal.insert(*txid, TxTerminalState::Aborted);
+                let state = tx_states.entry(*txid).or_insert_with(TxValidationState::new);
+                if !state.seen_begin {
+                    return Err(MuroError::Wal(format!(
+                        "Abort before Begin for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                if state.terminal.is_some() {
+                    return Err(MuroError::Wal(format!(
+                        "Duplicate terminal record for txid {} at LSN {}",
+                        txid, lsn
+                    )));
+                }
+                state.terminal = Some(TxTerminalState::Aborted);
             }
-            _ => {}
         }
     }
+
+    let terminal: HashMap<TxId, TxTerminalState> = tx_states
+        .iter()
+        .filter_map(|(txid, state)| state.terminal.map(|t| (*txid, t)))
+        .collect();
 
     // Phase 2: Collect the latest page data and metadata from committed transactions
     let mut page_updates: HashMap<PageId, Vec<u8>> = HashMap::new();
@@ -337,7 +439,14 @@ mod tests {
         {
             let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
             writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
-            // Actual LSN here is 1, but declared as 999.
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 0,
+                    page_count: 1,
+                })
+                .unwrap();
+            // Actual LSN here is 2, but declared as 999.
             writer
                 .append(&WalRecord::Commit { txid: 1, lsn: 999 })
                 .unwrap();
@@ -352,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_uses_last_terminal_record_for_tx_outcome() {
+    fn test_recovery_rejects_duplicate_terminal_record_for_tx() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let wal_path = dir.path().join("test.wal");
@@ -381,14 +490,70 @@ mod tests {
             writer
                 .append(&WalRecord::Commit { txid: 1, lsn: 3 })
                 .unwrap();
-            // Conflicting terminal record: later Abort should win.
+            // Conflicting terminal record should be rejected.
             writer.append(&WalRecord::Abort { txid: 1 }).unwrap();
             writer.sync().unwrap();
         }
 
-        let result = recover(&db_path, &wal_path, &test_key()).unwrap();
-        assert_eq!(result.pages_replayed, 0);
-        assert!(result.committed_txids.is_empty());
-        assert_eq!(result.aborted_txids, vec![1]);
+        let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
+        match err {
+            MuroError::Wal(msg) => assert!(msg.contains("Duplicate terminal record")),
+            other => panic!("Expected WAL error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovery_rejects_commit_without_meta_update() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 1 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
+        match err {
+            MuroError::Wal(msg) => assert!(msg.contains("Commit without MetaUpdate")),
+            other => panic!("Expected WAL error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovery_rejects_pageput_before_begin() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 0,
+                    data: Page::new(0).data.to_vec(),
+                })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let err = recover(&db_path, &wal_path, &test_key()).unwrap_err();
+        match err {
+            MuroError::Wal(msg) => assert!(msg.contains("PagePut before Begin")),
+            other => panic!("Expected WAL error, got: {:?}", other),
+        }
     }
 }

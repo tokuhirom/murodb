@@ -57,7 +57,8 @@ struct Cli {
     #[arg(long, value_enum, default_value = "strict")]
     recovery_mode: RecoveryModeArg,
 
-    /// Inspect WAL file consistency and exit (no DB replay)
+    /// Inspect WAL file consistency and exit (no DB replay).
+    /// Accepts a primary WAL path or a quarantine file path (*.wal.quarantine.*).
     #[arg(long)]
     inspect_wal: Option<PathBuf>,
 
@@ -378,6 +379,109 @@ mod tests {
         assert_eq!(InspectFatalKind::ReadSalt.as_str(), "READ_SALT_FAILED");
         assert_eq!(InspectFatalKind::DeriveKey.as_str(), "DERIVE_KEY_FAILED");
         assert_eq!(InspectFatalKind::InspectFailed.as_str(), "INSPECT_FAILED");
+    }
+
+    #[test]
+    fn recovery_skip_code_strings_are_stable() {
+        assert_eq!(RecoverySkipCode::DuplicateBegin.as_str(), "DUPLICATE_BEGIN");
+        assert_eq!(
+            RecoverySkipCode::BeginAfterTerminal.as_str(),
+            "BEGIN_AFTER_TERMINAL"
+        );
+        assert_eq!(
+            RecoverySkipCode::PagePutBeforeBegin.as_str(),
+            "PAGEPUT_BEFORE_BEGIN"
+        );
+        assert_eq!(
+            RecoverySkipCode::PagePutAfterTerminal.as_str(),
+            "PAGEPUT_AFTER_TERMINAL"
+        );
+        assert_eq!(
+            RecoverySkipCode::MetaUpdateBeforeBegin.as_str(),
+            "METAUPDATE_BEFORE_BEGIN"
+        );
+        assert_eq!(
+            RecoverySkipCode::MetaUpdateAfterTerminal.as_str(),
+            "METAUPDATE_AFTER_TERMINAL"
+        );
+        assert_eq!(
+            RecoverySkipCode::CommitBeforeBegin.as_str(),
+            "COMMIT_BEFORE_BEGIN"
+        );
+        assert_eq!(
+            RecoverySkipCode::DuplicateTerminal.as_str(),
+            "DUPLICATE_TERMINAL"
+        );
+        assert_eq!(
+            RecoverySkipCode::CommitWithoutMetaUpdate.as_str(),
+            "COMMIT_WITHOUT_META"
+        );
+        assert_eq!(
+            RecoverySkipCode::CommitLsnMismatch.as_str(),
+            "COMMIT_LSN_MISMATCH"
+        );
+        assert_eq!(
+            RecoverySkipCode::AbortBeforeBegin.as_str(),
+            "ABORT_BEFORE_BEGIN"
+        );
+    }
+
+    #[test]
+    fn inspect_json_fatal_all_variants_have_required_keys() {
+        let wal_path = Path::new("/tmp/test.wal");
+        let variants = [
+            (InspectFatalKind::MissingDbPath, "missing db_path"),
+            (InspectFatalKind::ReadSalt, "salt read failure"),
+            (InspectFatalKind::DeriveKey, "key derivation failure"),
+            (InspectFatalKind::InspectFailed, "inspection failure"),
+        ];
+
+        for (kind, msg) in &variants {
+            let json = build_inspect_json_fatal(RecoveryMode::Strict, wal_path, *kind, msg);
+            assert!(
+                json.contains("\"schema_version\":1"),
+                "missing schema_version for {:?}",
+                kind
+            );
+            assert!(
+                json.contains("\"status\":\"fatal\""),
+                "missing status for {:?}",
+                kind
+            );
+            assert!(
+                json.contains("\"fatal_error\":"),
+                "missing fatal_error for {:?}",
+                kind
+            );
+            assert!(
+                json.contains(&format!("\"fatal_error_code\":\"{}\"", kind.as_str())),
+                "missing fatal_error_code for {:?}",
+                kind
+            );
+            assert!(
+                json.contains("\"exit_code\":20"),
+                "missing exit_code for {:?}",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_json_success_ok_status_when_no_skipped() {
+        let wal_path = Path::new("/tmp/test.wal");
+        let report = RecoveryResult {
+            committed_txids: vec![1],
+            aborted_txids: vec![],
+            pages_replayed: 1,
+            skipped: vec![],
+            wal_quarantine_path: None,
+        };
+
+        let json = build_inspect_json_success(RecoveryMode::Strict, wal_path, &report);
+        assert!(json.contains("\"status\":\"ok\""));
+        assert!(json.contains("\"exit_code\":0"));
+        assert!(json.contains("\"fatal_error\":null"));
+        assert!(json.contains("\"fatal_error_code\":null"));
     }
 }
 

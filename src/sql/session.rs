@@ -159,35 +159,29 @@ impl Session {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
-            let wal_path = self.wal.wal_path().display();
-            let wal_size = self.wal.file_size_bytes().ok();
-            eprintln!(
-                "WARNING: post-commit WAL checkpoint failed after {} attempt(s): {} (wal_path={}, wal_size_bytes={})",
-                attempts,
-                e,
-                wal_path,
-                wal_size
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            );
+            self.emit_checkpoint_warning("post-commit", attempts, &e);
         }
     }
 
     fn post_rollback_checkpoint(&mut self) {
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
-            let wal_path = self.wal.wal_path().display();
-            let wal_size = self.wal.file_size_bytes().ok();
-            eprintln!(
-                "WARNING: post-rollback WAL checkpoint failed after {} attempt(s): {} (wal_path={}, wal_size_bytes={})",
-                attempts,
-                e,
-                wal_path,
-                wal_size
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            );
+            self.emit_checkpoint_warning("post-rollback", attempts, &e);
         }
+    }
+
+    fn emit_checkpoint_warning(&self, phase: &str, attempts: usize, error: &MuroError) {
+        let wal_path = self.wal.wal_path().display();
+        let wal_size = self
+            .wal
+            .file_size_bytes()
+            .ok()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        eprintln!(
+            "WARNING: checkpoint_failed phase={} attempts={} error=\"{}\" wal_path={} wal_size_bytes={}",
+            phase, attempts, error, wal_path, wal_size
+        );
     }
 
     fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
@@ -206,6 +200,9 @@ impl Session {
     ) -> std::result::Result<usize, (usize, MuroError)> {
         let mut last_err = None;
         for attempt in 1..=CHECKPOINT_MAX_ATTEMPTS {
+            if attempt > 1 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             match self.try_checkpoint_truncate_once() {
                 Ok(()) => return Ok(attempt),
                 Err(e) => last_err = Some(e),
@@ -346,5 +343,103 @@ mod tests {
         session.inject_checkpoint_failure_once_for_test();
         let attempts = session.try_checkpoint_truncate_with_retry().unwrap();
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn test_auto_commit_survives_all_checkpoint_failures() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        // Inject failures that exhaust all retry attempts
+        session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
+
+        // Auto-commit should still succeed even though checkpoint fails
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+
+        // Subsequent auto-commit should also succeed
+        session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
+        session
+            .execute("INSERT INTO t VALUES (1, 'alice')")
+            .unwrap();
+
+        // Data should be queryable
+        match session.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 1),
+            _ => panic!("Expected rows"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_commits_each_retry_independently() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+
+        // Each auto-commit gets its own independent retry cycle
+        for i in 0..5 {
+            session.inject_checkpoint_failure_once_for_test();
+            session
+                .execute(&format!("INSERT INTO t VALUES ({}, 'row_{}')", i, i))
+                .unwrap();
+        }
+
+        match session.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 5),
+            _ => panic!("Expected rows"),
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_backoff_does_not_block_commit() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+
+        // Even with backoff sleep, the commit completes successfully
+        session.inject_checkpoint_failure_once_for_test();
+        let start = std::time::Instant::now();
+        session.execute("INSERT INTO t VALUES (1)").unwrap();
+        let elapsed = start.elapsed();
+
+        // Backoff is 1ms, so the total should be well under 1 second
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "Backoff should not significantly delay commit: {:?}",
+            elapsed
+        );
+
+        match session.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 1),
+            _ => panic!("Expected rows"),
+        }
     }
 }

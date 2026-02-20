@@ -371,6 +371,14 @@ mod tests {
         };
         assert_eq!(inspect_success_exit_code(&report), 0);
     }
+
+    #[test]
+    fn inspect_fatal_kind_codes_are_stable() {
+        assert_eq!(InspectFatalKind::MissingDbPath.as_str(), "MISSING_DB_PATH");
+        assert_eq!(InspectFatalKind::ReadSalt.as_str(), "READ_SALT_FAILED");
+        assert_eq!(InspectFatalKind::DeriveKey.as_str(), "DERIVE_KEY_FAILED");
+        assert_eq!(InspectFatalKind::InspectFailed.as_str(), "INSPECT_FAILED");
+    }
 }
 
 fn execute_sql(db: &mut Database, sql: &str) {

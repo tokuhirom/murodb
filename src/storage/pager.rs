@@ -45,6 +45,10 @@ pub struct Pager {
     cache: LruCache<PageId, Page>,
     /// Diagnostics from freelist sanitization during open.
     freelist_sanitize_report: Option<SanitizeReport>,
+    #[cfg(any(test, feature = "test-utils"))]
+    inject_write_page_failure: Option<std::io::ErrorKind>,
+    #[cfg(any(test, feature = "test-utils"))]
+    inject_flush_meta_failure: Option<std::io::ErrorKind>,
 }
 
 impl Pager {
@@ -71,6 +75,10 @@ impl Pager {
             next_txid: 1,
             cache,
             freelist_sanitize_report: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_write_page_failure: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_flush_meta_failure: None,
         };
 
         // Write the plaintext header
@@ -103,6 +111,10 @@ impl Pager {
             next_txid: 1,
             cache,
             freelist_sanitize_report: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_write_page_failure: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_flush_meta_failure: None,
         };
 
         pager.read_plaintext_header()?;
@@ -299,6 +311,13 @@ impl Pager {
 
     /// Write a page (to cache and disk).
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(kind) = self.inject_write_page_failure {
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected write_page failure",
+            )));
+        }
         self.write_page_to_disk(page)?;
         self.cache.put(page.page_id(), page.clone());
         Ok(())
@@ -336,6 +355,13 @@ impl Pager {
 
     /// Flush the plaintext header with current state.
     pub fn flush_meta(&mut self) -> Result<()> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(kind) = self.inject_flush_meta_failure {
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected flush_meta failure",
+            )));
+        }
         self.write_plaintext_header()?;
         self.file.sync_all()?;
         Ok(())
@@ -390,6 +416,16 @@ impl Pager {
     /// `None` means no sanitization was needed (clean freelist).
     pub fn freelist_sanitize_report(&self) -> Option<&SanitizeReport> {
         self.freelist_sanitize_report.as_ref()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_inject_write_page_failure(&mut self, kind: Option<std::io::ErrorKind>) {
+        self.inject_write_page_failure = kind;
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_inject_flush_meta_failure(&mut self, kind: Option<std::io::ErrorKind>) {
+        self.inject_flush_meta_failure = kind;
     }
 
     /// Get the next transaction ID.

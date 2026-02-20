@@ -9,6 +9,12 @@ use crate::wal::reader::WalReader;
 use crate::wal::record::{TxId, WalRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryMode {
+    Strict,
+    Permissive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxTerminalState {
     Committed,
     Aborted,
@@ -35,6 +41,19 @@ impl TxValidationState {
 /// Replays committed transactions, discards uncommitted ones.
 /// Restores page data, catalog_root, and page_count metadata.
 pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Result<RecoveryResult> {
+    recover_with_mode(db_path, wal_path, master_key, RecoveryMode::Strict)
+}
+
+/// Recover the database from WAL in a chosen mode.
+///
+/// - `Strict`: reject any WAL protocol inconsistency.
+/// - `Permissive`: ignore malformed transactions and recover valid committed ones.
+pub fn recover_with_mode(
+    db_path: &Path,
+    wal_path: &Path,
+    master_key: &MasterKey,
+    mode: RecoveryMode,
+) -> Result<RecoveryResult> {
     if !wal_path.exists() {
         return Ok(RecoveryResult {
             committed_txids: Vec::new(),
@@ -59,6 +78,18 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
     //   Init -> Begin -> (PagePut | MetaUpdate)* -> (Commit | Abort)
     // No record is allowed after Commit/Abort for the same txid.
     let mut tx_states: HashMap<TxId, TxValidationState> = HashMap::new();
+    let mut invalid_txs = std::collections::HashSet::new();
+
+    let mut invalidate_or_err = |txid: TxId, msg: String| -> Result<()> {
+        match mode {
+            RecoveryMode::Strict => Err(MuroError::Wal(msg)),
+            RecoveryMode::Permissive => {
+                invalid_txs.insert(txid);
+                Ok(())
+            }
+        }
+    };
+
     for (lsn, record) in &records {
         match record {
             WalRecord::Begin { txid } => {
@@ -66,16 +97,21 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                     .entry(*txid)
                     .or_insert_with(TxValidationState::new);
                 if state.seen_begin {
-                    return Err(MuroError::Wal(format!(
-                        "Duplicate Begin for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Duplicate Begin for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if state.terminal.is_some() {
-                    return Err(MuroError::Wal(format!(
-                        "Begin after terminal record for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!(
+                            "Begin after terminal record for txid {} at LSN {}",
+                            txid, lsn
+                        ),
+                    )?;
+                    continue;
                 }
                 state.seen_begin = true;
             }
@@ -84,16 +120,21 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                     .entry(*txid)
                     .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
-                    return Err(MuroError::Wal(format!(
-                        "PagePut before Begin for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("PagePut before Begin for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if state.terminal.is_some() {
-                    return Err(MuroError::Wal(format!(
-                        "PagePut after terminal record for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!(
+                            "PagePut after terminal record for txid {} at LSN {}",
+                            txid, lsn
+                        ),
+                    )?;
+                    continue;
                 }
             }
             WalRecord::MetaUpdate { txid, .. } => {
@@ -101,16 +142,21 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                     .entry(*txid)
                     .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
-                    return Err(MuroError::Wal(format!(
-                        "MetaUpdate before Begin for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("MetaUpdate before Begin for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if state.terminal.is_some() {
-                    return Err(MuroError::Wal(format!(
-                        "MetaUpdate after terminal record for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!(
+                            "MetaUpdate after terminal record for txid {} at LSN {}",
+                            txid, lsn
+                        ),
+                    )?;
+                    continue;
                 }
                 state.seen_meta_update = true;
             }
@@ -122,28 +168,35 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                     .entry(*txid)
                     .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
-                    return Err(MuroError::Wal(format!(
-                        "Commit before Begin for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Commit before Begin for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if state.terminal.is_some() {
-                    return Err(MuroError::Wal(format!(
-                        "Duplicate terminal record for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Duplicate terminal record for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if !state.seen_meta_update {
-                    return Err(MuroError::Wal(format!(
-                        "Commit without MetaUpdate for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Commit without MetaUpdate for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if *commit_lsn != *lsn {
-                    return Err(MuroError::Wal(format!(
-                        "Commit LSN mismatch for txid {}: record lsn={}, declared lsn={}",
-                        txid, lsn, commit_lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!(
+                            "Commit LSN mismatch for txid {}: record lsn={}, declared lsn={}",
+                            txid, lsn, commit_lsn
+                        ),
+                    )?;
+                    continue;
                 }
                 state.terminal = Some(TxTerminalState::Committed);
             }
@@ -152,16 +205,18 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
                     .entry(*txid)
                     .or_insert_with(TxValidationState::new);
                 if !state.seen_begin {
-                    return Err(MuroError::Wal(format!(
-                        "Abort before Begin for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Abort before Begin for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 if state.terminal.is_some() {
-                    return Err(MuroError::Wal(format!(
-                        "Duplicate terminal record for txid {} at LSN {}",
-                        txid, lsn
-                    )));
+                    invalidate_or_err(
+                        *txid,
+                        format!("Duplicate terminal record for txid {} at LSN {}", txid, lsn),
+                    )?;
+                    continue;
                 }
                 state.terminal = Some(TxTerminalState::Aborted);
             }
@@ -170,7 +225,13 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
 
     let terminal: HashMap<TxId, TxTerminalState> = tx_states
         .iter()
-        .filter_map(|(txid, state)| state.terminal.map(|t| (*txid, t)))
+        .filter_map(|(txid, state)| {
+            if invalid_txs.contains(txid) {
+                None
+            } else {
+                state.terminal.map(|t| (*txid, t))
+            }
+        })
         .collect();
 
     // Phase 2: Collect the latest page data and metadata from committed transactions
@@ -209,22 +270,32 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
 
     for (&page_id, data) in &page_updates {
         if data.len() != PAGE_SIZE {
-            return Err(MuroError::Wal(format!(
-                "Committed PagePut has invalid size for page {}: got {}, expected {}",
-                page_id,
-                data.len(),
-                PAGE_SIZE
-            )));
+            match mode {
+                RecoveryMode::Strict => {
+                    return Err(MuroError::Wal(format!(
+                        "Committed PagePut has invalid size for page {}: got {}, expected {}",
+                        page_id,
+                        data.len(),
+                        PAGE_SIZE
+                    )));
+                }
+                RecoveryMode::Permissive => continue,
+            }
         }
         let mut page_data = [0u8; PAGE_SIZE];
         page_data.copy_from_slice(data);
         let page = Page::from_bytes(page_data);
         let embedded_page_id = page.page_id();
         if embedded_page_id != page_id {
-            return Err(MuroError::Wal(format!(
-                "Committed PagePut page_id mismatch: record={}, embedded={}",
-                page_id, embedded_page_id
-            )));
+            match mode {
+                RecoveryMode::Strict => {
+                    return Err(MuroError::Wal(format!(
+                        "Committed PagePut page_id mismatch: record={}, embedded={}",
+                        page_id, embedded_page_id
+                    )));
+                }
+                RecoveryMode::Permissive => continue,
+            }
         }
         pager.write_page(&page)?;
         pages_replayed += 1;
@@ -274,6 +345,15 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
             .collect(),
         pages_replayed,
     })
+}
+
+/// Recover the database from WAL in permissive mode.
+pub fn recover_permissive(
+    db_path: &Path,
+    wal_path: &Path,
+    master_key: &MasterKey,
+) -> Result<RecoveryResult> {
+    recover_with_mode(db_path, wal_path, master_key, RecoveryMode::Permissive)
 }
 
 #[derive(Debug)]
@@ -608,5 +688,71 @@ mod tests {
             MuroError::Wal(msg) => assert!(msg.contains("page_id mismatch")),
             other => panic!("Expected WAL error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_recovery_permissive_ignores_commit_without_meta() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 1 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let result =
+            recover_with_mode(&db_path, &wal_path, &test_key(), RecoveryMode::Permissive).unwrap();
+        assert_eq!(result.pages_replayed, 0);
+        assert!(result.committed_txids.is_empty());
+        assert!(result.aborted_txids.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_permissive_ignores_page_id_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            let bad_page = Page::new(999);
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 1,
+                    data: bad_page.data.to_vec(),
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 0,
+                    page_count: 2,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 3 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let result =
+            recover_with_mode(&db_path, &wal_path, &test_key(), RecoveryMode::Permissive).unwrap();
+        assert_eq!(result.pages_replayed, 0);
+        assert_eq!(result.committed_txids, vec![1]);
     }
 }

@@ -19,6 +19,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
       - run: cargo test --features test-utils
-      - run: cargo test --features test-utils --test post_wal_sync_failpoints
       - run: cargo clippy -- -D warnings
       - run: cargo fmt -- --check

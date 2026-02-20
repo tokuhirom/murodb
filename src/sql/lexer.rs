@@ -66,6 +66,8 @@ pub enum Token {
     Check,
     Describe,
     Is,
+    Checkpoint,
+    Stats,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
     TinyIntType,   // "TINYINT"
     SmallIntType,  // "SMALLINT"
@@ -284,6 +286,8 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "AUTO_INCREMENT" => Token::AutoIncrement,
         "CHECK" => Token::Check,
         "IS" => Token::Is,
+        "CHECKPOINT" => Token::Checkpoint,
+        "STATS" => Token::Stats,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"
             let rest = remaining.trim_start();

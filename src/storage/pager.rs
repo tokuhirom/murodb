@@ -104,12 +104,44 @@ impl Pager {
             let _page0 = pager.read_page_from_disk(0)?;
         }
 
-        // Load persisted freelist if present
+        // Load persisted freelist if present (supports multi-page chain)
         if pager.freelist_page_id != 0 {
-            let fl_page = pager.read_page_from_disk(pager.freelist_page_id)?;
-            pager.freelist = FreeList::deserialize(
-                &fl_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..],
-            );
+            let first_page = pager.read_page_from_disk(pager.freelist_page_id)?;
+            let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+
+            if FreeList::is_multi_page_format(data_area) {
+                // Multi-page chain: walk the chain with cycle detection
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(pager.freelist_page_id);
+                let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
+                pages_data_owned.push(data_area.to_vec());
+                // Read next pointer from first page (offset 4, after 4-byte magic)
+                let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
+                while next_page_id != 0 {
+                    if !visited.insert(next_page_id) {
+                        return Err(MuroError::Corruption(format!(
+                            "freelist chain cycle detected at page {}",
+                            next_page_id
+                        )));
+                    }
+                    if next_page_id >= pager.page_count {
+                        return Err(MuroError::Corruption(format!(
+                            "freelist chain references page {} beyond page_count {}",
+                            next_page_id, pager.page_count
+                        )));
+                    }
+                    let next_page = pager.read_page_from_disk(next_page_id)?;
+                    let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+                    next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
+                    pages_data_owned.push(next_data.to_vec());
+                }
+                let pages_refs: Vec<&[u8]> =
+                    pages_data_owned.iter().map(|v| v.as_slice()).collect();
+                pager.freelist = FreeList::deserialize_pages(&pages_refs);
+            } else {
+                // Legacy single-page format
+                pager.freelist = FreeList::deserialize(data_area);
+            }
         }
 
         Ok(pager)
@@ -161,6 +193,15 @@ impl Pager {
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+
+        // Reject future versions we don't understand
+        if version > FORMAT_VERSION {
+            return Err(MuroError::Wal(format!(
+                "unsupported database format version {}",
+                version
+            )));
+        }
+
         self.salt.copy_from_slice(&header[12..28]);
         self.catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
         self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
@@ -173,6 +214,12 @@ impl Pager {
             if stored_crc != computed_crc {
                 return Err(MuroError::Wal("header corrupted".into()));
             }
+        }
+
+        // Auto-upgrade v1 → v2: rewrite header with CRC and freelist_page_id
+        if version == 1 {
+            self.write_plaintext_header()?;
+            self.file.sync_all()?;
         }
 
         Ok(())
@@ -586,6 +633,113 @@ mod tests {
             let pager = Pager::open(&path, &test_key()).unwrap();
             assert_eq!(pager.freelist_page_id(), 1);
         }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Helper: create a DB with a freelist page whose next pointer is set to `next_page_id`.
+    /// The freelist page is written at page 1, with page 0 as a dummy data page.
+    fn create_db_with_corrupt_freelist_next(path: &std::path::Path, next_page_id: u64) {
+        let mut pager = Pager::create(path, &test_key()).unwrap();
+        // Allocate pages 0 and 1
+        let p0 = pager.allocate_page().unwrap();
+        pager.write_page(&p0).unwrap();
+        let fl_page = pager.allocate_page().unwrap();
+        let fl_pid = fl_page.page_id(); // should be 1
+
+        // Build a multi-page format freelist page with a corrupted next pointer
+        let mut fl = Page::new(fl_pid);
+        let off = crate::storage::page::PAGE_HEADER_SIZE;
+        fl.data[off..off + 4].copy_from_slice(b"FLMP"); // magic
+        fl.data[off + 4..off + 12].copy_from_slice(&next_page_id.to_le_bytes()); // next
+        fl.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes()); // count = 0
+        pager.write_page(&fl).unwrap();
+
+        pager.set_freelist_page_id(fl_pid);
+        pager.flush_meta().unwrap();
+    }
+
+    #[test]
+    fn test_freelist_chain_self_reference_detected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        // Freelist page 1 points to itself (next = 1)
+        create_db_with_corrupt_freelist_next(&path, 1);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_chain_two_node_cycle_detected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        let mut pager = Pager::create(&path, &test_key()).unwrap();
+        let p0 = pager.allocate_page().unwrap();
+        pager.write_page(&p0).unwrap();
+        let p1 = pager.allocate_page().unwrap();
+        let p2 = pager.allocate_page().unwrap();
+        let off = crate::storage::page::PAGE_HEADER_SIZE;
+
+        // Page 1: freelist page, next → page 2
+        let mut fl1 = Page::new(p1.page_id());
+        fl1.data[off..off + 4].copy_from_slice(b"FLMP");
+        fl1.data[off + 4..off + 12].copy_from_slice(&p2.page_id().to_le_bytes());
+        fl1.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes());
+        pager.write_page(&fl1).unwrap();
+
+        // Page 2: freelist page, next → page 1 (cycle back)
+        let mut fl2 = Page::new(p2.page_id());
+        fl2.data[off..off + 4].copy_from_slice(b"FLMP");
+        fl2.data[off + 4..off + 12].copy_from_slice(&p1.page_id().to_le_bytes());
+        fl2.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes());
+        pager.write_page(&fl2).unwrap();
+
+        pager.set_freelist_page_id(p1.page_id());
+        pager.flush_meta().unwrap();
+        drop(pager);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_chain_next_beyond_page_count_rejected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        // Freelist page 1 points to page 9999 which is beyond page_count (2)
+        create_db_with_corrupt_freelist_next(&path, 9999);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("beyond page_count"),
+            "expected beyond page_count error, got: {msg}"
+        );
 
         std::fs::remove_file(&path).ok();
     }

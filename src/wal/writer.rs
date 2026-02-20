@@ -18,6 +18,10 @@ pub struct WalWriter {
     path: PathBuf,
     crypto: PageCrypto,
     current_lsn: Lsn,
+    #[cfg(test)]
+    inject_write_failure: Option<std::io::ErrorKind>,
+    #[cfg(test)]
+    inject_sync_failure: Option<std::io::ErrorKind>,
 }
 
 impl WalWriter {
@@ -33,6 +37,10 @@ impl WalWriter {
             path: path.to_path_buf(),
             crypto: PageCrypto::new(master_key),
             current_lsn: 0,
+            #[cfg(test)]
+            inject_write_failure: None,
+            #[cfg(test)]
+            inject_sync_failure: None,
         })
     }
 
@@ -44,6 +52,10 @@ impl WalWriter {
             path: path.to_path_buf(),
             crypto: PageCrypto::new(master_key),
             current_lsn: start_lsn,
+            #[cfg(test)]
+            inject_write_failure: None,
+            #[cfg(test)]
+            inject_sync_failure: None,
         })
     }
 
@@ -67,6 +79,14 @@ impl WalWriter {
             )));
         }
 
+        #[cfg(test)]
+        if let Some(kind) = self.inject_write_failure {
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected write failure",
+            )));
+        }
+
         let frame_len = encrypted.len() as u32;
         self.file.write_all(&frame_len.to_le_bytes())?;
         self.file.write_all(&encrypted)?;
@@ -77,6 +97,13 @@ impl WalWriter {
 
     /// Sync the WAL file to disk (fsync).
     pub fn sync(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(kind) = self.inject_sync_failure {
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected sync failure",
+            )));
+        }
         self.file.sync_all()?;
         Ok(())
     }
@@ -109,6 +136,16 @@ impl WalWriter {
 
     pub fn current_lsn(&self) -> Lsn {
         self.current_lsn
+    }
+
+    #[cfg(test)]
+    pub fn set_inject_write_failure(&mut self, kind: Option<std::io::ErrorKind>) {
+        self.inject_write_failure = kind;
+    }
+
+    #[cfg(test)]
+    pub fn set_inject_sync_failure(&mut self, kind: Option<std::io::ErrorKind>) {
+        self.inject_sync_failure = kind;
     }
 }
 

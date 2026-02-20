@@ -17,6 +17,7 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    ShowCheckpointStats,
 }
 
 #[derive(Debug, Clone)]

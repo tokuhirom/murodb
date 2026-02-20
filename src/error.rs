@@ -50,6 +50,9 @@ pub enum MuroError {
     #[error("KDF error: {0}")]
     Kdf(String),
 
+    #[error("Data corruption: {0}")]
+    Corruption(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

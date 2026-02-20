@@ -396,7 +396,12 @@ impl Parser {
                 let table_name = self.expect_ident()?;
                 Ok(Statement::ShowCreateTable(table_name))
             }
-            _ => Err("Expected TABLES or CREATE TABLE after SHOW".into()),
+            Some(Token::Checkpoint) => {
+                self.advance(); // CHECKPOINT
+                self.expect(&Token::Stats)?;
+                Ok(Statement::ShowCheckpointStats)
+            }
+            _ => Err("Expected TABLES, CREATE TABLE, or CHECKPOINT STATS after SHOW".into()),
         }
     }
 

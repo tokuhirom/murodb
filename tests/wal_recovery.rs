@@ -901,6 +901,93 @@ fn test_recovery_catalog_page_count_data_consistency() {
     }
 }
 
+/// After recovery, WAL is durably truncated to header-only and a subsequent
+/// open sees no replay. This verifies the durability barrier in
+/// `truncate_wal_durably` (issue #13).
+#[test]
+fn test_recovery_truncates_wal_durably() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    // Create DB with some data
+    {
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let page = pager.allocate_page().unwrap();
+        pager.write_page(&page).unwrap();
+        pager.flush_meta().unwrap();
+    }
+
+    // Write a committed transaction into the WAL
+    {
+        let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+        writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+        let mut page = Page::new(0);
+        page.insert_cell(b"wal data").unwrap();
+        writer
+            .append(&WalRecord::PagePut {
+                txid: 1,
+                page_id: 0,
+                data: page.data.to_vec(),
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::MetaUpdate {
+                txid: 1,
+                catalog_root: 0,
+                freelist_page_id: 0,
+                page_count: 1,
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::Commit { txid: 1, lsn: 3 })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+
+    // WAL should be larger than header-only before recovery
+    let wal_size_before = std::fs::metadata(&wal_path).unwrap().len();
+    assert!(
+        wal_size_before > murodb::wal::WAL_HEADER_SIZE as u64,
+        "WAL should contain committed records before recovery"
+    );
+
+    // Open the database — triggers recovery and truncation
+    {
+        let _db = murodb::Database::open(&db_path, &test_key()).unwrap();
+    }
+
+    // WAL should now be header-only (truncated durably)
+    let wal_size_after = std::fs::metadata(&wal_path).unwrap().len();
+    assert_eq!(
+        wal_size_after,
+        murodb::wal::WAL_HEADER_SIZE as u64,
+        "WAL must be truncated to header-only after recovery"
+    );
+
+    // A second open should find nothing to replay
+    let (_, report) = murodb::Database::open_with_recovery_mode_and_report(
+        &db_path,
+        &test_key(),
+        RecoveryMode::Strict,
+    )
+    .unwrap();
+    // WAL was created fresh by the first open, so recovery should either
+    // find no committed txs or not run at all
+    if let Some(r) = report {
+        assert!(
+            r.committed_txids.is_empty(),
+            "no transactions should be replayed on second open"
+        );
+        assert_eq!(r.pages_replayed, 0);
+    }
+
+    // Verify the recovered data is intact
+    let mut pager = Pager::open(&db_path, &test_key()).unwrap();
+    let page = pager.read_page(0).unwrap();
+    assert_eq!(page.cell(0), Some(b"wal data".as_slice()));
+}
+
 /// MetaUpdate backward compatibility: old WAL records (25 bytes) without freelist_page_id
 #[test]
 fn test_meta_update_backward_compat() {

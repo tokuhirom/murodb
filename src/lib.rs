@@ -56,8 +56,26 @@ fn sync_dir(file_path: &Path) {
     }
 }
 
+/// Durably reset the WAL to an empty state (header only) after successful recovery.
+///
+/// ## Durability guarantees
+///
+/// 1. The WAL file is truncated and rewritten with a valid header.
+/// 2. `sync_all()` is called to flush both data and metadata to stable storage,
+///    ensuring the truncated WAL survives a subsequent crash.
+/// 3. A best-effort directory fsync is performed to persist the file metadata
+///    change (size/inode update) on filesystems that require it (e.g. ext4).
+///
+/// ## Crash during truncation
+///
+/// If the process crashes *during* this function:
+/// - Before `sync_all()`: The old WAL may still be intact on disk.
+///   Recovery will simply replay it again on next open — this is idempotent
+///   because WAL replay overwrites pages and metadata to the same values.
+/// - After `sync_all()` but before directory fsync: The WAL file contents are
+///   durable. On most filesystems the directory entry is already updated;
+///   the directory fsync is a belt-and-suspenders measure.
 fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
-    // Truncate WAL to just the header and fsync so recovery effects become durable.
     use crate::wal::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
     use std::io::Write;
 
@@ -66,7 +84,6 @@ fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
         .truncate(true)
         .create(true)
         .open(wal_path)?;
-    // Write WAL header
     let mut header = [0u8; WAL_HEADER_SIZE];
     header[0..8].copy_from_slice(WAL_MAGIC);
     header[8..12].copy_from_slice(&WAL_VERSION.to_le_bytes());

@@ -197,7 +197,14 @@ fn run_crash_test(crash_point: CrashPoint, freed: FreedPages, prior: PriorTx) {
     // Write WAL records up to crash point
     {
         let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
-        write_wal_up_to(&mut wal, crash_point, freed, 10, catalog_root, base_page_count);
+        write_wal_up_to(
+            &mut wal,
+            crash_point,
+            freed,
+            10,
+            catalog_root,
+            base_page_count,
+        );
     }
 
     // Recover
@@ -293,7 +300,11 @@ fn test_crash_after_page_put_no_freed_no_prior() {
 
 #[test]
 fn test_crash_after_freelist_put_no_freed_no_prior() {
-    run_crash_test(CrashPoint::AfterFreelistPut, FreedPages::None, PriorTx::None);
+    run_crash_test(
+        CrashPoint::AfterFreelistPut,
+        FreedPages::None,
+        PriorTx::None,
+    );
 }
 
 #[test]
@@ -303,7 +314,11 @@ fn test_crash_after_meta_update_no_freed_no_prior() {
 
 #[test]
 fn test_crash_after_commit_record_no_freed_no_prior() {
-    run_crash_test(CrashPoint::AfterCommitRecord, FreedPages::None, PriorTx::None);
+    run_crash_test(
+        CrashPoint::AfterCommitRecord,
+        FreedPages::None,
+        PriorTx::None,
+    );
 }
 
 #[test]
@@ -325,7 +340,11 @@ fn test_crash_after_page_put_freed_no_prior() {
 
 #[test]
 fn test_crash_after_freelist_put_freed_no_prior() {
-    run_crash_test(CrashPoint::AfterFreelistPut, FreedPages::Some, PriorTx::None);
+    run_crash_test(
+        CrashPoint::AfterFreelistPut,
+        FreedPages::Some,
+        PriorTx::None,
+    );
 }
 
 #[test]
@@ -335,7 +354,11 @@ fn test_crash_after_meta_update_freed_no_prior() {
 
 #[test]
 fn test_crash_after_commit_record_freed_no_prior() {
-    run_crash_test(CrashPoint::AfterCommitRecord, FreedPages::Some, PriorTx::None);
+    run_crash_test(
+        CrashPoint::AfterCommitRecord,
+        FreedPages::Some,
+        PriorTx::None,
+    );
 }
 
 #[test]
@@ -347,49 +370,85 @@ fn test_crash_after_wal_sync_freed_no_prior() {
 
 #[test]
 fn test_crash_after_begin_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterBegin, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterBegin,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_page_put_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterPagePut, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterPagePut,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_freelist_put_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterFreelistPut, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterFreelistPut,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_meta_update_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterMetaUpdate, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterMetaUpdate,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_commit_record_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterCommitRecord, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterCommitRecord,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_wal_sync_no_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterWalSync, FreedPages::None, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterWalSync,
+        FreedPages::None,
+        PriorTx::OneCommitted,
+    );
 }
 
 // ── Matrix: with prior committed tx, with freed pages ──
 
 #[test]
 fn test_crash_after_begin_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterBegin, FreedPages::Some, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterBegin,
+        FreedPages::Some,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_commit_record_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterCommitRecord, FreedPages::Some, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterCommitRecord,
+        FreedPages::Some,
+        PriorTx::OneCommitted,
+    );
 }
 
 #[test]
 fn test_crash_after_wal_sync_freed_with_prior() {
-    run_crash_test(CrashPoint::AfterWalSync, FreedPages::Some, PriorTx::OneCommitted);
+    run_crash_test(
+        CrashPoint::AfterWalSync,
+        FreedPages::Some,
+        PriorTx::OneCommitted,
+    );
 }
 
 // ── Freelist content consistency checks ──

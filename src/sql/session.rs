@@ -206,32 +206,55 @@ impl Session {
         let rows = vec![
             Row {
                 values: vec![
-                    ("stat".to_string(), Value::Varchar("total_checkpoints".to_string())),
-                    ("value".to_string(), Value::Varchar(stats.total_checkpoints.to_string())),
+                    (
+                        "stat".to_string(),
+                        Value::Varchar("total_checkpoints".to_string()),
+                    ),
+                    (
+                        "value".to_string(),
+                        Value::Varchar(stats.total_checkpoints.to_string()),
+                    ),
                 ],
             },
             Row {
                 values: vec![
-                    ("stat".to_string(), Value::Varchar("failed_checkpoints".to_string())),
-                    ("value".to_string(), Value::Varchar(stats.failed_checkpoints.to_string())),
+                    (
+                        "stat".to_string(),
+                        Value::Varchar("failed_checkpoints".to_string()),
+                    ),
+                    (
+                        "value".to_string(),
+                        Value::Varchar(stats.failed_checkpoints.to_string()),
+                    ),
                 ],
             },
             Row {
                 values: vec![
-                    ("stat".to_string(), Value::Varchar("last_failure_error".to_string())),
-                    ("value".to_string(), Value::Varchar(
-                        stats.last_failure_error.clone().unwrap_or_default(),
-                    )),
+                    (
+                        "stat".to_string(),
+                        Value::Varchar("last_failure_error".to_string()),
+                    ),
+                    (
+                        "value".to_string(),
+                        Value::Varchar(stats.last_failure_error.clone().unwrap_or_default()),
+                    ),
                 ],
             },
             Row {
                 values: vec![
-                    ("stat".to_string(), Value::Varchar("last_failure_timestamp_ms".to_string())),
-                    ("value".to_string(), Value::Varchar(
-                        stats.last_failure_timestamp_ms
-                            .map(|v| v.to_string())
-                            .unwrap_or_default(),
-                    )),
+                    (
+                        "stat".to_string(),
+                        Value::Varchar("last_failure_timestamp_ms".to_string()),
+                    ),
+                    (
+                        "value".to_string(),
+                        Value::Varchar(
+                            stats
+                                .last_failure_timestamp_ms
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        ),
+                    ),
                 ],
             },
         ];
@@ -544,7 +567,10 @@ mod tests {
         assert_eq!(session.checkpoint_stats().total_checkpoints, 2);
         assert_eq!(session.checkpoint_stats().failed_checkpoints, 1);
         assert!(session.checkpoint_stats().last_failure_error.is_some());
-        assert!(session.checkpoint_stats().last_failure_timestamp_ms.is_some());
+        assert!(session
+            .checkpoint_stats()
+            .last_failure_timestamp_ms
+            .is_some());
     }
 
     #[test]
@@ -571,7 +597,9 @@ mod tests {
                 // First row: total_checkpoints
                 assert_eq!(
                     rows[0].get("stat"),
-                    Some(&crate::types::Value::Varchar("total_checkpoints".to_string()))
+                    Some(&crate::types::Value::Varchar(
+                        "total_checkpoints".to_string()
+                    ))
                 );
                 assert_eq!(
                     rows[0].get("value"),

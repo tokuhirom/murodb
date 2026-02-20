@@ -80,7 +80,11 @@ impl FreeList {
         } else {
             self.free_pages.chunks(ENTRIES_PER_FREELIST_PAGE).collect()
         };
-        assert_eq!(chunks.len(), page_ids.len(), "must provide exactly enough page IDs");
+        assert_eq!(
+            chunks.len(),
+            page_ids.len(),
+            "must provide exactly enough page IDs"
+        );
 
         let mut result = Vec::with_capacity(chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {

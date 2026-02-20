@@ -9,7 +9,13 @@ fn test_key() -> MasterKey {
 }
 
 /// Helper: write a raw v1 header (no CRC, no freelist_page_id).
-fn write_v1_header(path: &std::path::Path, salt: [u8; 16], catalog_root: u64, page_count: u64, epoch: u64) {
+fn write_v1_header(
+    path: &std::path::Path,
+    salt: [u8; 16],
+    catalog_root: u64,
+    page_count: u64,
+    epoch: u64,
+) {
     let mut header = [0u8; 64];
     header[0..8].copy_from_slice(b"MURODB01");
     header[8..12].copy_from_slice(&1u32.to_le_bytes()); // version 1
@@ -59,7 +65,10 @@ fn test_v1_header_auto_upgrades_to_v2() {
     // Verify CRC is now present and valid
     let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
     let computed_crc = murodb::wal::record::crc32(&header[0..60]);
-    assert_eq!(stored_crc, computed_crc, "upgraded header should have valid CRC");
+    assert_eq!(
+        stored_crc, computed_crc,
+        "upgraded header should have valid CRC"
+    );
 
     // Reopen should succeed without issues
     {

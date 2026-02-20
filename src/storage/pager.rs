@@ -135,7 +135,8 @@ impl Pager {
                     next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
                     pages_data_owned.push(next_data.to_vec());
                 }
-                let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
+                let pages_refs: Vec<&[u8]> =
+                    pages_data_owned.iter().map(|v| v.as_slice()).collect();
                 pager.freelist = FreeList::deserialize_pages(&pages_refs);
             } else {
                 // Legacy single-page format
@@ -673,10 +674,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("cycle"),
-            "expected cycle error, got: {msg}"
-        );
+        assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
 
         std::fs::remove_file(&path).ok();
     }
@@ -718,10 +716,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("cycle"),
-            "expected cycle error, got: {msg}"
-        );
+        assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
 
         std::fs::remove_file(&path).ok();
     }

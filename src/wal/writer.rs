@@ -81,7 +81,10 @@ impl WalWriter {
 
         #[cfg(test)]
         if let Some(kind) = self.inject_write_failure {
-            return Err(MuroError::Io(std::io::Error::new(kind, "injected write failure")));
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected write failure",
+            )));
         }
 
         let frame_len = encrypted.len() as u32;
@@ -96,7 +99,10 @@ impl WalWriter {
     pub fn sync(&mut self) -> Result<()> {
         #[cfg(test)]
         if let Some(kind) = self.inject_sync_failure {
-            return Err(MuroError::Io(std::io::Error::new(kind, "injected sync failure")));
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected sync failure",
+            )));
         }
         self.file.sync_all()?;
         Ok(())

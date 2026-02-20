@@ -35,36 +35,36 @@ fn write_v1_header(
     file.sync_all().unwrap();
 }
 
-/// Helper: read the raw header from a file.
-fn read_raw_header(path: &std::path::Path) -> [u8; 64] {
+/// Helper: read the raw header from a file (v3 = 72 bytes).
+fn read_raw_header(path: &std::path::Path) -> Vec<u8> {
     let mut file = std::fs::File::open(path).unwrap();
-    let mut header = [0u8; 64];
+    let mut header = vec![0u8; 72];
     use std::io::Read;
     file.read_exact(&mut header).unwrap();
     header
 }
 
 #[test]
-fn test_v1_header_auto_upgrades_to_v2() {
+fn test_v1_header_auto_upgrades_to_v3() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
     // Write a v1 header with page_count=0 (no pages needed for key verification)
     write_v1_header(&db_path, [0u8; 16], 0, 0, 0);
 
-    // Open should succeed and auto-upgrade to v2
+    // Open should succeed and auto-upgrade to v3
     {
         let _pager = Pager::open(&db_path, &test_key()).unwrap();
     }
 
-    // Verify the header was upgraded to v2
+    // Verify the header was upgraded to v3
     let header = read_raw_header(&db_path);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 2, "v1 header should be auto-upgraded to v2");
+    assert_eq!(version, 3, "v1 header should be auto-upgraded to v3");
 
-    // Verify CRC is now present and valid
-    let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
-    let computed_crc = murodb::wal::record::crc32(&header[0..60]);
+    // Verify CRC is now present and valid (v3: CRC over 0..68 at offset 68..72)
+    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
+    let computed_crc = murodb::wal::record::crc32(&header[0..68]);
     assert_eq!(
         stored_crc, computed_crc,
         "upgraded header should have valid CRC"
@@ -82,7 +82,7 @@ fn test_future_version_rejected() {
     let db_path = dir.path().join("test.db");
 
     // Write a header with version=99
-    let mut header = [0u8; 64];
+    let mut header = [0u8; 72];
     header[0..8].copy_from_slice(b"MURODB01");
     header[8..12].copy_from_slice(&99u32.to_le_bytes());
 
@@ -111,11 +111,11 @@ fn test_future_version_rejected() {
 }
 
 #[test]
-fn test_v2_roundtrip() {
+fn test_v3_roundtrip() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    // Create a v2 database with some metadata
+    // Create a v3 database with some metadata
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
         pager.set_catalog_root(42);
@@ -129,13 +129,13 @@ fn test_v2_roundtrip() {
         assert_eq!(pager.page_count(), 0);
     }
 
-    // Verify header is v2
+    // Verify header is v3
     let header = read_raw_header(&db_path);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 
-    // Verify CRC is valid
-    let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
-    let computed_crc = murodb::wal::record::crc32(&header[0..60]);
+    // Verify CRC is valid (v3: CRC over 0..68 at offset 68..72)
+    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
+    let computed_crc = murodb::wal::record::crc32(&header[0..68]);
     assert_eq!(stored_crc, computed_crc);
 }

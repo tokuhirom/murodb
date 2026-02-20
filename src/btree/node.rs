@@ -25,17 +25,22 @@ pub enum NodeType {
 }
 
 /// Initialize a page as a B-tree leaf node.
+/// Panics only if the page has insufficient space for a 1-byte header,
+/// which cannot happen with the current PAGE_SIZE (4096).
 pub fn init_leaf(page: &mut Page) {
     let header = [NODE_TYPE_LEAF];
-    page.insert_cell(&header).expect("header fits");
+    page.insert_cell(&header)
+        .expect("BUG: page too small for leaf header");
 }
 
 /// Initialize a page as a B-tree internal node with a rightmost child.
+/// Panics only if the page has insufficient space for a 9-byte header.
 pub fn init_internal(page: &mut Page, right_child: PageId) {
     let mut header = [0u8; 9];
     header[0] = NODE_TYPE_INTERNAL;
     header[1..9].copy_from_slice(&right_child.to_le_bytes());
-    page.insert_cell(&header).expect("header fits");
+    page.insert_cell(&header)
+        .expect("BUG: page too small for internal header");
 }
 
 /// Get the node type from a page.

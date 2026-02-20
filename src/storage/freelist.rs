@@ -29,7 +29,17 @@ impl FreeList {
     }
 
     /// Return a page to the free list.
+    /// Panics in debug mode if the page is already free (double-free).
+    /// In release mode, silently ignores the duplicate to prevent data corruption.
     pub fn free(&mut self, page_id: PageId) {
+        if self.free_pages.contains(&page_id) {
+            debug_assert!(
+                false,
+                "double-free detected: page {} is already in freelist",
+                page_id
+            );
+            return;
+        }
         self.free_pages.push(page_id);
     }
 
@@ -136,6 +146,34 @@ impl FreeList {
     /// of the data area size (which is always page-sized, zero-padded).
     pub fn is_multi_page_format(data: &[u8]) -> bool {
         data.len() >= 4 && data[0..4] == FREELIST_MULTI_PAGE_MAGIC
+    }
+
+    /// Validate that all freelist entries are within the given page_count.
+    pub fn validate(&self, page_count: u64) -> std::result::Result<(), String> {
+        for &pid in &self.free_pages {
+            if pid >= page_count {
+                return Err(format!(
+                    "freelist entry {} is beyond page_count {}",
+                    pid, page_count
+                ));
+            }
+        }
+        // Check for duplicates
+        let mut seen = std::collections::HashSet::new();
+        for &pid in &self.free_pages {
+            if !seen.insert(pid) {
+                return Err(format!("duplicate freelist entry: page {}", pid));
+            }
+        }
+        Ok(())
+    }
+
+    /// Sanitize freelist by removing out-of-range and duplicate entries.
+    /// After crash recovery, the freelist may contain stale entries.
+    pub fn sanitize(&mut self, page_count: u64) {
+        let mut seen = std::collections::HashSet::new();
+        self.free_pages
+            .retain(|&pid| pid < page_count && seen.insert(pid));
     }
 
     /// Deserialize freelist from bytes.

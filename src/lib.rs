@@ -57,8 +57,20 @@ fn sync_dir(file_path: &Path) {
 }
 
 fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
-    // Truncate and fsync WAL file so recovery effects become durable.
-    let wal_file = std::fs::File::create(wal_path)?;
+    // Truncate WAL to just the header and fsync so recovery effects become durable.
+    use crate::wal::{WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
+    use std::io::Write;
+
+    let mut wal_file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(wal_path)?;
+    // Write WAL header
+    let mut header = [0u8; WAL_HEADER_SIZE];
+    header[0..8].copy_from_slice(WAL_MAGIC);
+    header[8..12].copy_from_slice(&WAL_VERSION.to_le_bytes());
+    wal_file.write_all(&header)?;
     wal_file.sync_all()?;
 
     // Best-effort directory fsync to persist metadata updates (size/truncate).
@@ -228,8 +240,9 @@ impl Database {
     }
 
     /// Execute a SQL query and return rows.
+    /// Uses a write lock because auto-commit SELECTs may write to WAL.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.read_lock()?;
+        let _guard = self.lock_manager.write_lock()?;
         match self.session.execute(sql)? {
             ExecResult::Rows(rows) => Ok(rows),
             _ => Ok(Vec::new()),

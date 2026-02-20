@@ -1,11 +1,11 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
 use crate::wal::record::{crc32, Lsn, WalRecord};
-use crate::wal::MAX_WAL_FRAME_LEN;
+use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 /// WAL writer: append-only log with encryption.
 ///
 /// Framing on disk:
@@ -26,11 +26,15 @@ pub struct WalWriter {
 
 impl WalWriter {
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(true)
             .open(path)?;
+
+        // Write WAL header
+        Self::write_wal_header(&mut file)?;
 
         Ok(WalWriter {
             file,
@@ -45,7 +49,23 @@ impl WalWriter {
     }
 
     pub fn open(path: &Path, master_key: &MasterKey, start_lsn: Lsn) -> Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+
+        let file_len = file.metadata()?.len();
+        if file_len == 0 {
+            // Empty file: write header
+            Self::write_wal_header(&mut file)?;
+        } else if file_len >= WAL_HEADER_SIZE as u64 {
+            // Validate existing header
+            Self::validate_wal_header(&mut file)?;
+            file.seek(SeekFrom::End(0))?;
+        }
+        // If file is non-empty but shorter than header, it's likely corrupt — we'll append anyway
 
         Ok(WalWriter {
             file,
@@ -57,6 +77,33 @@ impl WalWriter {
             #[cfg(test)]
             inject_sync_failure: None,
         })
+    }
+
+    fn write_wal_header(file: &mut File) -> Result<()> {
+        let mut header = [0u8; WAL_HEADER_SIZE];
+        header[0..8].copy_from_slice(WAL_MAGIC);
+        header[8..12].copy_from_slice(&WAL_VERSION.to_le_bytes());
+        file.write_all(&header)?;
+        Ok(())
+    }
+
+    fn validate_wal_header(file: &mut File) -> Result<()> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut header = [0u8; WAL_HEADER_SIZE];
+        file.read_exact(&mut header)?;
+        if &header[0..8] != WAL_MAGIC {
+            return Err(MuroError::Wal(
+                "WAL file magic mismatch: not a valid MuroDB WAL file".into(),
+            ));
+        }
+        let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        if version > WAL_VERSION {
+            return Err(MuroError::Wal(format!(
+                "unsupported WAL format version {}",
+                version
+            )));
+        }
+        Ok(())
     }
 
     /// Append a WAL record. Returns the LSN assigned.
@@ -108,12 +155,13 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Truncate WAL to empty and reset LSN stream.
+    /// Truncate WAL to just the header and reset LSN stream.
     ///
     /// Safe to call after a successful commit because data pages and metadata
     /// have already been flushed to the main database file.
     pub fn checkpoint_truncate(&mut self) -> Result<()> {
-        self.file.set_len(0)?;
+        self.file.set_len(WAL_HEADER_SIZE as u64)?;
+        self.file.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
         self.file.sync_all()?;
         // Best-effort parent directory fsync to harden metadata persistence.
         if let Some(parent) = self.path.parent() {
@@ -196,7 +244,7 @@ mod tests {
         assert!(writer.file_size_bytes().unwrap() > 0);
 
         writer.checkpoint_truncate().unwrap();
-        assert_eq!(writer.file_size_bytes().unwrap(), 0);
+        assert_eq!(writer.file_size_bytes().unwrap(), WAL_HEADER_SIZE as u64);
         assert_eq!(writer.current_lsn(), 0);
 
         let lsn = writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
@@ -218,6 +266,6 @@ mod tests {
 
         assert!(matches!(res, Err(MuroError::Wal(_))));
         assert_eq!(writer.current_lsn(), 0);
-        assert_eq!(writer.file_size_bytes().unwrap(), 0);
+        assert_eq!(writer.file_size_bytes().unwrap(), WAL_HEADER_SIZE as u64);
     }
 }

@@ -204,7 +204,10 @@ fn test_permissive_open_quarantines_malformed_wal() {
 
     let quarantine_path = std::path::PathBuf::from(report.wal_quarantine_path.unwrap());
     assert!(quarantine_path.exists(), "quarantine WAL should exist");
-    assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), 0);
+    assert_eq!(
+        std::fs::metadata(&wal_path).unwrap().len(),
+        murodb::wal::WAL_HEADER_SIZE as u64
+    );
 }
 
 /// Issue #8: Truncated WAL tail should not prevent recovery of prior committed records.
@@ -396,7 +399,8 @@ fn test_wal_is_checkpointed_after_successful_commit() {
 
     let wal_size = std::fs::metadata(&wal_path).unwrap().len();
     assert_eq!(
-        wal_size, 0,
+        wal_size,
+        murodb::wal::WAL_HEADER_SIZE as u64,
         "WAL should be truncated after successful commits"
     );
 }
@@ -417,7 +421,11 @@ fn test_wal_is_checkpointed_after_explicit_rollback() {
     db.execute("ROLLBACK").unwrap();
 
     let wal_size = std::fs::metadata(&wal_path).unwrap().len();
-    assert_eq!(wal_size, 0, "WAL should be truncated after rollback");
+    assert_eq!(
+        wal_size,
+        murodb::wal::WAL_HEADER_SIZE as u64,
+        "WAL should be truncated after rollback"
+    );
 
     match db.execute("SELECT * FROM t").unwrap() {
         ExecResult::Rows(rows) => assert_eq!(rows.len(), 0),
@@ -506,7 +514,11 @@ fn test_freelist_wal_recovery() {
 
     // Verify the WAL was checkpointed (size 0)
     let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(wal_size, 0, "WAL should be checkpointed after normal close");
+    assert_eq!(
+        wal_size,
+        murodb::wal::WAL_HEADER_SIZE as u64,
+        "WAL should be checkpointed after normal close"
+    );
 
     // Reopen and verify the freelist persists
     {

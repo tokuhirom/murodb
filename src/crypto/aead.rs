@@ -1,12 +1,14 @@
 use aes_gcm_siv::aead::{Aead, KeyInit, Payload};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce};
 use rand::RngCore;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{MuroError, Result};
 use crate::storage::page::PageId;
 
 /// 256-bit master key for AES-256-GCM-SIV.
-#[derive(Clone)]
+/// Key material is zeroed on drop to prevent leaking secrets in memory.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
     key: [u8; 32],
 }

@@ -47,17 +47,22 @@ fn wal_path(db_path: &Path) -> PathBuf {
     db_path.with_extension("wal")
 }
 
+/// Best-effort directory fsync to persist metadata (new file, rename, truncate).
+fn sync_dir(file_path: &Path) {
+    if let Some(parent) = file_path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
 fn truncate_wal_durably(wal_path: &Path) -> Result<()> {
     // Truncate and fsync WAL file so recovery effects become durable.
     let wal_file = std::fs::File::create(wal_path)?;
     wal_file.sync_all()?;
 
     // Best-effort directory fsync to persist metadata updates (size/truncate).
-    if let Some(parent) = wal_path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
+    sync_dir(wal_path);
     Ok(())
 }
 
@@ -82,11 +87,7 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     }
 
     std::fs::rename(wal_path, &dest)?;
-    if let Some(parent) = wal_path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
+    sync_dir(wal_path);
 
     Ok(dest)
 }
@@ -98,6 +99,9 @@ impl Database {
         let catalog = SystemCatalog::create(&mut pager)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
+
+        // Directory fsync to persist the newly created DB file metadata
+        sync_dir(path);
 
         let wal = WalWriter::create(&wal_path(path), master_key)?;
         let lock_manager = LockManager::new(path)?;
@@ -174,6 +178,9 @@ impl Database {
         let catalog = SystemCatalog::create(&mut pager)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
+
+        // Directory fsync to persist the newly created DB file metadata
+        sync_dir(path);
 
         let wal = WalWriter::create(&wal_path(path), &master_key)?;
         let lock_manager = LockManager::new(path)?;

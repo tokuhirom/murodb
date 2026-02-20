@@ -9,6 +9,7 @@ use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
 use crate::storage::freelist::FreeList;
 use crate::storage::page::{Page, PageId, PAGE_SIZE};
+use crate::wal::record::crc32;
 
 /// On-disk encrypted page size = nonce(12) + ciphertext(4096) + tag(16) = 4124
 const ENCRYPTED_PAGE_SIZE: usize = PAGE_SIZE + PageCrypto::overhead();
@@ -16,14 +17,16 @@ const ENCRYPTED_PAGE_SIZE: usize = PAGE_SIZE + PageCrypto::overhead();
 /// Plaintext file header size (written before any encrypted pages).
 /// Layout:
 ///   0..8    Magic "MURODB01"
-///   8..12   Format version (u32 LE)
+///   8..12   Format version (u32 LE) — currently 2
 ///   12..28  Salt (16 bytes, for Argon2 KDF)
 ///   28..36  Catalog root page ID (u64 LE)
 ///   36..44  Page count (u64 LE)
 ///   44..52  Epoch (u64 LE)
-///   52..64  Reserved (zero-filled)
+///   52..60  Freelist page ID (u64 LE, 0 = no freelist page)
+///   60..64  Header CRC32 (u32 LE, over bytes 0..60)
 const PLAINTEXT_HEADER_SIZE: u64 = 64;
 const MAGIC: &[u8; 8] = b"MURODB01";
+const FORMAT_VERSION: u32 = 2;
 
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
@@ -36,6 +39,7 @@ pub struct Pager {
     catalog_root: u64,
     salt: [u8; 16],
     freelist: FreeList,
+    freelist_page_id: u64,
     cache: LruCache<PageId, Page>,
 }
 
@@ -59,6 +63,7 @@ impl Pager {
             catalog_root: 0,
             salt,
             freelist: FreeList::new(),
+            freelist_page_id: 0,
             cache,
         };
 
@@ -88,6 +93,7 @@ impl Pager {
             catalog_root: 0,
             salt: [0u8; 16],
             freelist: FreeList::new(),
+            freelist_page_id: 0,
             cache,
         };
 
@@ -96,6 +102,13 @@ impl Pager {
         // Verify that decryption works by reading page 0 if there are pages
         if pager.page_count > 0 {
             let _page0 = pager.read_page_from_disk(0)?;
+        }
+
+        // Load persisted freelist if present
+        if pager.freelist_page_id != 0 {
+            let fl_page = pager.read_page_from_disk(pager.freelist_page_id)?;
+            pager.freelist =
+                FreeList::deserialize(&fl_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..]);
         }
 
         Ok(pager)
@@ -121,12 +134,15 @@ impl Pager {
     fn write_plaintext_header(&mut self) -> Result<()> {
         let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
         header[0..8].copy_from_slice(MAGIC);
-        header[8..12].copy_from_slice(&1u32.to_le_bytes()); // version
+        header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         header[12..28].copy_from_slice(&self.salt);
         header[28..36].copy_from_slice(&self.catalog_root.to_le_bytes());
         header[36..44].copy_from_slice(&self.page_count.to_le_bytes());
         header[44..52].copy_from_slice(&self.epoch.to_le_bytes());
-        // 52..64 reserved (already zero)
+        header[52..60].copy_from_slice(&self.freelist_page_id.to_le_bytes());
+        // CRC32 over bytes 0..60
+        let checksum = crc32(&header[0..60]);
+        header[60..64].copy_from_slice(&checksum.to_le_bytes());
 
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header)?;
@@ -143,11 +159,20 @@ impl Pager {
             return Err(MuroError::InvalidPage);
         }
 
-        let _version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
         self.salt.copy_from_slice(&header[12..28]);
         self.catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
         self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
         self.epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
+
+        if version >= 2 {
+            self.freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
+            let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
+            let computed_crc = crc32(&header[0..60]);
+            if stored_crc != computed_crc {
+                return Err(MuroError::Wal("header corrupted".into()));
+            }
+        }
 
         Ok(())
     }
@@ -255,6 +280,21 @@ impl Pager {
     /// Get salt.
     pub fn salt(&self) -> &[u8; 16] {
         &self.salt
+    }
+
+    /// Get freelist page ID (0 = no persisted freelist).
+    pub fn freelist_page_id(&self) -> u64 {
+        self.freelist_page_id
+    }
+
+    /// Set freelist page ID.
+    pub fn set_freelist_page_id(&mut self, page_id: u64) {
+        self.freelist_page_id = page_id;
+    }
+
+    /// Get mutable reference to the in-memory freelist.
+    pub fn freelist_mut(&mut self) -> &mut FreeList {
+        &mut self.freelist
     }
 
     /// Sync file to disk.
@@ -461,6 +501,92 @@ mod tests {
         {
             let read_salt = Pager::read_salt_from_file(&path).unwrap();
             assert_eq!(read_salt, salt);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_header_crc32_detects_corruption() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            pager.flush_meta().unwrap();
+        }
+
+        // Corrupt a byte in the header (e.g., catalog_root field at offset 28)
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.seek(SeekFrom::Start(28)).unwrap();
+            file.write_all(&[0xFF; 1]).unwrap();
+        }
+
+        let result = Pager::open(&path, &test_key());
+        match result {
+            Err(MuroError::Wal(msg)) => assert!(msg.contains("header corrupted")),
+            Err(other) => panic!("Expected Wal error, got: {:?}", other),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_header_crc32_valid_on_normal_open() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            pager.set_catalog_root(99);
+            pager.flush_meta().unwrap();
+        }
+
+        {
+            let pager = Pager::open(&path, &test_key()).unwrap();
+            assert_eq!(pager.catalog_root(), 99);
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_page_id_persistence() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            // Allocate pages 0 and 1, use page 1 as freelist page
+            let _p0 = pager.allocate_page().unwrap();
+            pager.write_page(&_p0).unwrap();
+            let fl_page = pager.allocate_page().unwrap();
+            // Write freelist data into the page (after header)
+            let mut fl = Page::new(fl_page.page_id());
+            let freelist_data = pager.freelist_mut().serialize();
+            fl.data[crate::storage::page::PAGE_HEADER_SIZE
+                ..crate::storage::page::PAGE_HEADER_SIZE + freelist_data.len()]
+                .copy_from_slice(&freelist_data);
+            pager.write_page(&fl).unwrap();
+            pager.set_freelist_page_id(fl_page.page_id());
+            pager.flush_meta().unwrap();
+        }
+
+        {
+            let pager = Pager::open(&path, &test_key()).unwrap();
+            assert_eq!(pager.freelist_page_id(), 1);
         }
 
         std::fs::remove_file(&path).ok();

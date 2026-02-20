@@ -21,6 +21,7 @@ pub struct Transaction {
     state: TxState,
     snapshot_lsn: Lsn,
     dirty_pages: HashMap<PageId, Page>,
+    freed_pages: Vec<PageId>,
 }
 
 impl Transaction {
@@ -30,6 +31,7 @@ impl Transaction {
             state: TxState::Active,
             snapshot_lsn,
             dirty_pages: HashMap::new(),
+            freed_pages: Vec::new(),
         }
     }
 
@@ -56,6 +58,12 @@ impl Transaction {
     /// Write a page into the dirty buffer.
     pub fn write_page(&mut self, page: Page) {
         self.dirty_pages.insert(page.page_id(), page);
+    }
+
+    /// Record a page as freed within this transaction.
+    /// The page will be added to the pager freelist on commit, or discarded on rollback.
+    pub fn free_page(&mut self, page_id: PageId) {
+        self.freed_pages.push(page_id);
     }
 
     /// Allocate a new page through the pager.
@@ -101,11 +109,40 @@ impl Transaction {
             }
         }
 
-        // Write MetaUpdate so recovery can restore catalog_root and page_count
+        // Apply freed pages to the in-memory freelist
+        for &page_id in &self.freed_pages {
+            pager.freelist_mut().free(page_id);
+        }
+
+        // Persist freelist: serialize and write to a dedicated page
+        let freelist_data = pager.freelist_mut().serialize();
+        let mut freelist_page_id = pager.freelist_page_id();
+        if freelist_page_id == 0 {
+            // Allocate a new page for freelist storage
+            let fl_page = pager.allocate_page()?;
+            freelist_page_id = fl_page.page_id();
+            let needed = freelist_page_id + 1;
+            if needed > page_count {
+                page_count = needed;
+            }
+        }
+        let mut fl_page = Page::new(freelist_page_id);
+        // Write freelist data after page header to preserve page_id
+        use crate::storage::page::PAGE_HEADER_SIZE;
+        fl_page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + freelist_data.len()]
+            .copy_from_slice(&freelist_data);
+        wal.append(&WalRecord::PagePut {
+            txid: self.txid,
+            page_id: freelist_page_id,
+            data: fl_page.data.to_vec(),
+        })?;
+
+        // Write MetaUpdate so recovery can restore catalog_root, page_count, and freelist_page_id
         wal.append(&WalRecord::MetaUpdate {
             txid: self.txid,
             catalog_root,
             page_count,
+            freelist_page_id,
         })?;
 
         // Write Commit record
@@ -122,14 +159,18 @@ impl Transaction {
         for page in self.dirty_pages.values() {
             pager.write_page(page)?;
         }
+        // Write the freelist page to the data file
+        pager.write_page(&fl_page)?;
 
         // Update pager metadata atomically before single flush_meta
         pager.set_catalog_root(catalog_root);
         pager.set_page_count(page_count);
+        pager.set_freelist_page_id(freelist_page_id);
         pager.flush_meta()?;
 
         self.state = TxState::Committed;
         self.dirty_pages.clear();
+        self.freed_pages.clear();
 
         Ok(commit_lsn)
     }
@@ -144,6 +185,7 @@ impl Transaction {
 
         wal.append(&WalRecord::Abort { txid: self.txid })?;
         self.dirty_pages.clear();
+        self.freed_pages.clear();
         self.state = TxState::Aborted;
         Ok(())
     }
@@ -159,7 +201,7 @@ impl Transaction {
     }
 
     /// Commit without WAL: flush dirty pages directly to pager.
-    pub fn commit_no_wal(&mut self, pager: &mut Pager) -> Result<()> {
+    pub(crate) fn commit_no_wal(&mut self, pager: &mut Pager) -> Result<()> {
         if self.state != TxState::Active {
             return Err(MuroError::Transaction(
                 "Cannot commit non-active transaction".into(),
@@ -169,16 +211,24 @@ impl Transaction {
         for page in self.dirty_pages.values() {
             pager.write_page(page)?;
         }
+
+        // Apply freed pages to freelist
+        for &page_id in &self.freed_pages {
+            pager.freelist_mut().free(page_id);
+        }
+
         pager.flush_meta()?;
 
         self.state = TxState::Committed;
         self.dirty_pages.clear();
+        self.freed_pages.clear();
         Ok(())
     }
 
     /// Rollback without WAL: just discard dirty pages.
-    pub fn rollback_no_wal(&mut self) {
+    pub(crate) fn rollback_no_wal(&mut self) {
         self.dirty_pages.clear();
+        self.freed_pages.clear();
         self.state = TxState::Aborted;
     }
 }

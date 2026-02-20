@@ -39,6 +39,6 @@ impl PageStore for TxPageStore<'_> {
     }
 
     fn free_page(&mut self, page_id: PageId) {
-        self.pager.free_page(page_id);
+        self.tx.free_page(page_id);
     }
 }

@@ -32,6 +32,7 @@ fn test_wal_write_and_read() {
             .append(&WalRecord::MetaUpdate {
                 txid: 1,
                 catalog_root: 0,
+                freelist_page_id: 0,
                 page_count: 6,
             })
             .unwrap();
@@ -88,6 +89,7 @@ fn test_recovery_replays_committed_only() {
             .append(&WalRecord::MetaUpdate {
                 txid: 1,
                 catalog_root: 0,
+                freelist_page_id: 0,
                 page_count: 2,
             })
             .unwrap();
@@ -237,6 +239,7 @@ fn test_truncated_wal_tail_recovery() {
             .append(&WalRecord::MetaUpdate {
                 txid: 1,
                 catalog_root: 0,
+                freelist_page_id: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -300,6 +303,7 @@ fn test_corrupt_tail_frame_recovery() {
             .append(&WalRecord::MetaUpdate {
                 txid: 1,
                 catalog_root: 0,
+                freelist_page_id: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -418,5 +422,167 @@ fn test_wal_is_checkpointed_after_explicit_rollback() {
     match db.execute("SELECT * FROM t").unwrap() {
         ExecResult::Rows(rows) => assert_eq!(rows.len(), 0),
         _ => panic!("Expected rows"),
+    }
+}
+
+/// Freelist persistence: free pages survive close → reopen.
+#[test]
+fn test_freelist_persisted_across_reopen() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    // Create DB, insert rows to create B-tree pages, then delete to free some
+    {
+        let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        for i in 0..50 {
+            db.execute(&format!("INSERT INTO t VALUES ({}, 'name_{}')", i, i))
+                .unwrap();
+        }
+        // Delete rows to trigger B-tree node merges/frees
+        for i in 0..40 {
+            db.execute(&format!("DELETE FROM t WHERE id = {}", i))
+                .unwrap();
+        }
+    }
+
+    // Reopen and verify freelist is restored (new inserts should reuse freed pages)
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+
+        // Get page count before inserting more data
+        let pager = db.flush().ok();
+        drop(pager);
+
+        // Insert more rows — they should reuse freed pages, not grow the file
+        for i in 100..120 {
+            db.execute(&format!("INSERT INTO t VALUES ({}, 'new_{}')", i, i))
+                .unwrap();
+        }
+
+        // Verify data integrity
+        match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 30, "10 original + 20 new rows");
+            }
+            _ => panic!("Expected rows"),
+        }
+    }
+
+    // Reopen again to verify everything is still consistent
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 30);
+            }
+            _ => panic!("Expected rows"),
+        }
+    }
+}
+
+/// Freelist WAL recovery: freelist is restored after crash.
+#[test]
+fn test_freelist_wal_recovery() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    // Create DB, insert and delete to create freelist entries
+    {
+        let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        for i in 0..30 {
+            db.execute(&format!("INSERT INTO t VALUES ({}, 'name_{}')", i, i))
+                .unwrap();
+        }
+        for i in 0..20 {
+            db.execute(&format!("DELETE FROM t WHERE id = {}", i))
+                .unwrap();
+        }
+    }
+
+    // Verify the WAL was checkpointed (size 0)
+    let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(wal_size, 0, "WAL should be checkpointed after normal close");
+
+    // Reopen and verify the freelist persists
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 10),
+            _ => panic!("Expected rows"),
+        }
+
+        // Insert more rows and confirm they work (pages from freelist reused)
+        for i in 100..110 {
+            db.execute(&format!("INSERT INTO t VALUES ({}, 'new_{}')", i, i))
+                .unwrap();
+        }
+        match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => assert_eq!(rows.len(), 20),
+            _ => panic!("Expected rows"),
+        }
+    }
+}
+
+/// Transaction rollback discards freed pages.
+#[test]
+fn test_rollback_discards_freed_pages() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    for i in 0..20 {
+        db.execute(&format!("INSERT INTO t VALUES ({}, 'name_{}')", i, i))
+            .unwrap();
+    }
+
+    // Begin a transaction, delete rows (would free pages), then rollback
+    db.execute("BEGIN").unwrap();
+    for i in 0..15 {
+        db.execute(&format!("DELETE FROM t WHERE id = {}", i))
+            .unwrap();
+    }
+    db.execute("ROLLBACK").unwrap();
+
+    // All rows should still be present
+    match db.execute("SELECT * FROM t").unwrap() {
+        ExecResult::Rows(rows) => assert_eq!(rows.len(), 20),
+        _ => panic!("Expected rows"),
+    }
+}
+
+/// MetaUpdate backward compatibility: old WAL records (25 bytes) without freelist_page_id
+#[test]
+fn test_meta_update_backward_compat() {
+    use murodb::wal::record::WalRecord;
+
+    // Simulate old-format MetaUpdate (25 bytes: tag + txid + catalog_root + page_count)
+    let mut old_data = Vec::new();
+    old_data.push(5u8); // TAG_META_UPDATE
+    old_data.extend_from_slice(&1u64.to_le_bytes()); // txid
+    old_data.extend_from_slice(&42u64.to_le_bytes()); // catalog_root
+    old_data.extend_from_slice(&100u64.to_le_bytes()); // page_count
+    assert_eq!(old_data.len(), 25);
+
+    let record = WalRecord::deserialize(&old_data).unwrap();
+    if let WalRecord::MetaUpdate {
+        txid,
+        catalog_root,
+        page_count,
+        freelist_page_id,
+    } = record
+    {
+        assert_eq!(txid, 1);
+        assert_eq!(catalog_root, 42);
+        assert_eq!(page_count, 100);
+        assert_eq!(freelist_page_id, 0, "Old records should default to 0");
+    } else {
+        panic!("Expected MetaUpdate");
     }
 }

@@ -10,6 +10,10 @@ use murodb::types::Value;
 use murodb::wal::recovery::{inspect_wal, RecoveryMode};
 use murodb::Database;
 
+const EXIT_OK: i32 = 0;
+const EXIT_MALFORMED_DETECTED: i32 = 10;
+const EXIT_FATAL_ERROR: i32 = 20;
+
 #[derive(Clone, Debug, ValueEnum)]
 enum RecoveryModeArg {
     Strict,
@@ -245,19 +249,19 @@ fn main() {
     if let Some(wal_path) = &cli.inspect_wal {
         let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
             eprintln!("ERROR: db_path is required with --inspect-wal");
-            process::exit(1);
+            process::exit(EXIT_FATAL_ERROR);
         });
         let salt = Pager::read_salt_from_file(db_path).unwrap_or_else(|e| {
             eprintln!("ERROR: Failed to read DB salt: {}", e);
-            process::exit(1);
+            process::exit(EXIT_FATAL_ERROR);
         });
         let key = kdf::derive_key(password.as_bytes(), &salt).unwrap_or_else(|e| {
             eprintln!("ERROR: Failed to derive key: {}", e);
-            process::exit(1);
+            process::exit(EXIT_FATAL_ERROR);
         });
         let report = inspect_wal(wal_path, &key, recovery_mode).unwrap_or_else(|e| {
             eprintln!("ERROR: WAL inspection failed: {}", e);
-            process::exit(1);
+            process::exit(EXIT_FATAL_ERROR);
         });
 
         match cli.format {
@@ -328,7 +332,11 @@ fn main() {
                 );
             }
         }
-        return;
+        if report.skipped.is_empty() {
+            process::exit(EXIT_OK);
+        } else {
+            process::exit(EXIT_MALFORMED_DETECTED);
+        }
     }
 
     let mut db = if cli.create {

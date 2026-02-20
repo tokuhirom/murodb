@@ -10,6 +10,7 @@ use crate::wal::record::{TxId, WalRecord};
 
 /// Recover the database from WAL.
 /// Replays committed transactions, discards uncommitted ones.
+/// Restores page data, catalog_root, and page_count metadata.
 pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Result<RecoveryResult> {
     if !wal_path.exists() {
         return Ok(RecoveryResult {
@@ -46,19 +47,33 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
         }
     }
 
-    // Phase 2: Collect the latest page data from committed transactions
+    // Phase 2: Collect the latest page data and metadata from committed transactions
     let mut page_updates: HashMap<PageId, Vec<u8>> = HashMap::new();
+    let mut latest_catalog_root: Option<u64> = None;
+    let mut latest_page_count: Option<u64> = None;
 
     for (_, record) in &records {
-        if let WalRecord::PagePut {
-            txid,
-            page_id,
-            data,
-        } = record
-        {
-            if committed.contains(txid) {
-                page_updates.insert(*page_id, data.clone());
+        match record {
+            WalRecord::PagePut {
+                txid,
+                page_id,
+                data,
+            } => {
+                if committed.contains(txid) {
+                    page_updates.insert(*page_id, data.clone());
+                }
             }
+            WalRecord::MetaUpdate {
+                txid,
+                catalog_root,
+                page_count,
+            } => {
+                if committed.contains(txid) {
+                    latest_catalog_root = Some(*catalog_root);
+                    latest_page_count = Some(*page_count);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -73,6 +88,25 @@ pub fn recover(db_path: &Path, wal_path: &Path, master_key: &MasterKey) -> Resul
             let page = Page::from_bytes(page_data);
             pager.write_page(&page)?;
             pages_replayed += 1;
+        }
+    }
+
+    // Phase 4: Restore metadata from WAL MetaUpdate records
+    if let Some(catalog_root) = latest_catalog_root {
+        pager.set_catalog_root(catalog_root);
+    }
+    if let Some(page_count) = latest_page_count {
+        // Only increase page_count, never decrease it
+        if page_count > pager.page_count() {
+            pager.set_page_count(page_count);
+        }
+    }
+
+    // Also ensure page_count covers all replayed pages (fallback safety)
+    for &page_id in page_updates.keys() {
+        let needed = page_id + 1;
+        if needed > pager.page_count() {
+            pager.set_page_count(needed);
         }
     }
 
@@ -129,7 +163,14 @@ mod tests {
                 })
                 .unwrap();
             writer
-                .append(&WalRecord::Commit { txid: 1, lsn: 2 })
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 0,
+                    page_count: 2,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 3 })
                 .unwrap();
             writer.sync().unwrap();
         }
@@ -184,5 +225,58 @@ mod tests {
         let result = recover(&db_path, &wal_path, &test_key()).unwrap();
         assert!(result.committed_txids.is_empty());
         assert_eq!(result.pages_replayed, 0);
+    }
+
+    #[test]
+    fn test_recovery_restores_page_count() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        // Create initial database, allocate a page so page_count=1
+        let page_data;
+        {
+            let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+            let mut page = pager.allocate_page().unwrap();
+            page.insert_cell(b"initial").unwrap();
+            pager.write_page(&page).unwrap();
+            pager.flush_meta().unwrap();
+
+            // Create another page image for WAL (simulating a tx that wrote page 1)
+            let mut p = Page::new(1);
+            p.insert_cell(b"from wal").unwrap();
+            page_data = p.data.to_vec();
+        }
+
+        // Write WAL with committed tx that updates page 1 and sets catalog_root=42
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer
+                .append(&WalRecord::PagePut {
+                    txid: 1,
+                    page_id: 1,
+                    data: page_data,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 1,
+                    catalog_root: 42,
+                    page_count: 2,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 1, lsn: 3 })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        recover(&db_path, &wal_path, &test_key()).unwrap();
+
+        // Verify metadata was restored
+        let pager = Pager::open(&db_path, &test_key()).unwrap();
+        assert!(pager.page_count() >= 2);
+        assert_eq!(pager.catalog_root(), 42);
     }
 }

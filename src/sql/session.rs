@@ -70,10 +70,8 @@ impl Session {
             .active_tx
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
-        tx.commit(&mut self.pager, &mut self.wal)?;
-        // Update catalog root in pager header
-        self.pager.set_catalog_root(self.catalog.root_page_id());
-        self.pager.flush_meta()?;
+        let catalog_root = self.catalog.root_page_id();
+        tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
         Ok(ExecResult::Ok)
     }
 
@@ -105,10 +103,9 @@ impl Session {
 
         match result {
             Ok(exec_result) => {
-                // Commit via WAL
-                tx.commit(&mut self.pager, &mut self.wal)?;
-                self.pager.set_catalog_root(self.catalog.root_page_id());
-                self.pager.flush_meta()?;
+                // Commit via WAL (catalog_root included in WAL MetaUpdate)
+                let catalog_root = self.catalog.root_page_id();
+                tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
                 Ok(exec_result)
             }
             Err(e) => {

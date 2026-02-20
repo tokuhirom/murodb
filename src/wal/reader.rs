@@ -37,13 +37,24 @@ impl WalReader {
         let frame_len = u32::from_le_bytes(len_buf) as usize;
 
         let mut encrypted = vec![0u8; frame_len];
-        self.file.read_exact(&mut encrypted)?;
+        match self.file.read_exact(&mut encrypted) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Trailing partial frame: payload was truncated (crash during write).
+                // Treat as end-of-log.
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         let lsn = self.current_lsn;
-        let payload = self
-            .crypto
-            .decrypt(lsn, 0, &encrypted)
-            .map_err(|_| MuroError::Wal(format!("Failed to decrypt WAL record at LSN {}", lsn)))?;
+        let payload = match self.crypto.decrypt(lsn, 0, &encrypted) {
+            Ok(p) => p,
+            Err(_) => {
+                // Trailing frame with corrupt/incomplete encryption: treat as end-of-log.
+                return Ok(None);
+            }
+        };
 
         if payload.len() < 4 {
             return Err(MuroError::Wal("WAL record too short".into()));
@@ -53,11 +64,18 @@ impl WalReader {
         let stored_crc = u32::from_le_bytes(payload[payload.len() - 4..].try_into().unwrap());
 
         if crc32(record_bytes) != stored_crc {
-            return Err(MuroError::Wal(format!("CRC mismatch at LSN {}", lsn)));
+            // CRC mismatch at tail: frame was partially written before crash.
+            // Treat as end-of-log (safe to stop here).
+            return Ok(None);
         }
 
-        let record = WalRecord::deserialize(record_bytes)
-            .ok_or_else(|| MuroError::Wal(format!("Invalid record at LSN {}", lsn)))?;
+        let record = match WalRecord::deserialize(record_bytes) {
+            Some(r) => r,
+            None => {
+                // Invalid record at tail: treat as end-of-log.
+                return Ok(None);
+            }
+        };
 
         self.current_lsn += 1;
         Ok(Some((lsn, record)))

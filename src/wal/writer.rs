@@ -64,8 +64,13 @@ impl WalWriter {
             // Validate existing header
             Self::validate_wal_header(&mut file)?;
             file.seek(SeekFrom::End(0))?;
+        } else {
+            // Non-empty but shorter than the WAL header — the file is corrupt.
+            return Err(MuroError::Wal(format!(
+                "WAL file is corrupt: size {} is smaller than the required header size {}",
+                file_len, WAL_HEADER_SIZE
+            )));
         }
-        // If file is non-empty but shorter than header, it's likely corrupt — we'll append anyway
 
         Ok(WalWriter {
             file,
@@ -267,5 +272,18 @@ mod tests {
         assert!(matches!(res, Err(MuroError::Wal(_))));
         assert_eq!(writer.current_lsn(), 0);
         assert_eq!(writer.file_size_bytes().unwrap(), WAL_HEADER_SIZE as u64);
+    }
+
+    #[test]
+    fn test_open_rejects_truncated_header() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        // Write a few bytes — less than WAL_HEADER_SIZE (12 bytes)
+        std::fs::write(&path, &[0xAA; 5]).unwrap();
+
+        let key = MasterKey::new([0x42u8; 32]);
+        let res = WalWriter::open(&path, &key, 0);
+        assert!(matches!(res, Err(MuroError::Wal(ref msg)) if msg.contains("corrupt")));
     }
 }

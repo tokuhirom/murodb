@@ -635,4 +635,117 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
     }
+
+    /// Helper: create a DB with a freelist page whose next pointer is set to `next_page_id`.
+    /// The freelist page is written at page 1, with page 0 as a dummy data page.
+    fn create_db_with_corrupt_freelist_next(path: &std::path::Path, next_page_id: u64) {
+        let mut pager = Pager::create(path, &test_key()).unwrap();
+        // Allocate pages 0 and 1
+        let p0 = pager.allocate_page().unwrap();
+        pager.write_page(&p0).unwrap();
+        let fl_page = pager.allocate_page().unwrap();
+        let fl_pid = fl_page.page_id(); // should be 1
+
+        // Build a multi-page format freelist page with a corrupted next pointer
+        let mut fl = Page::new(fl_pid);
+        let off = crate::storage::page::PAGE_HEADER_SIZE;
+        fl.data[off..off + 4].copy_from_slice(b"FLMP"); // magic
+        fl.data[off + 4..off + 12].copy_from_slice(&next_page_id.to_le_bytes()); // next
+        fl.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes()); // count = 0
+        pager.write_page(&fl).unwrap();
+
+        pager.set_freelist_page_id(fl_pid);
+        pager.flush_meta().unwrap();
+    }
+
+    #[test]
+    fn test_freelist_chain_self_reference_detected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        // Freelist page 1 points to itself (next = 1)
+        create_db_with_corrupt_freelist_next(&path, 1);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cycle"),
+            "expected cycle error, got: {msg}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_chain_two_node_cycle_detected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        let mut pager = Pager::create(&path, &test_key()).unwrap();
+        let p0 = pager.allocate_page().unwrap();
+        pager.write_page(&p0).unwrap();
+        let p1 = pager.allocate_page().unwrap();
+        let p2 = pager.allocate_page().unwrap();
+        let off = crate::storage::page::PAGE_HEADER_SIZE;
+
+        // Page 1: freelist page, next → page 2
+        let mut fl1 = Page::new(p1.page_id());
+        fl1.data[off..off + 4].copy_from_slice(b"FLMP");
+        fl1.data[off + 4..off + 12].copy_from_slice(&p2.page_id().to_le_bytes());
+        fl1.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes());
+        pager.write_page(&fl1).unwrap();
+
+        // Page 2: freelist page, next → page 1 (cycle back)
+        let mut fl2 = Page::new(p2.page_id());
+        fl2.data[off..off + 4].copy_from_slice(b"FLMP");
+        fl2.data[off + 4..off + 12].copy_from_slice(&p1.page_id().to_le_bytes());
+        fl2.data[off + 12..off + 20].copy_from_slice(&0u64.to_le_bytes());
+        pager.write_page(&fl2).unwrap();
+
+        pager.set_freelist_page_id(p1.page_id());
+        pager.flush_meta().unwrap();
+        drop(pager);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cycle"),
+            "expected cycle error, got: {msg}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_freelist_chain_next_beyond_page_count_rejected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        // Freelist page 1 points to page 9999 which is beyond page_count (2)
+        create_db_with_corrupt_freelist_next(&path, 9999);
+
+        let err = match Pager::open(&path, &test_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("beyond page_count"),
+            "expected beyond page_count error, got: {msg}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
 }

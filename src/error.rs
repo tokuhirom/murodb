@@ -53,6 +53,9 @@ pub enum MuroError {
     #[error("Data corruption: {0}")]
     Corruption(String),
 
+    #[error("Commit in doubt: WAL durable but data flush failed: {0}")]
+    CommitInDoubt(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::crypto::aead::{MasterKey, PageCrypto};
 use crate::error::{MuroError, Result};
 use crate::wal::record::{crc32, Lsn, WalRecord};
-use crate::wal::MAX_WAL_FRAME_LEN;
+use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 
 /// WAL reader: iterate through WAL records for recovery/snapshot.
 pub struct WalReader {
@@ -17,8 +17,30 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
-        let file = File::open(path)?;
+        let mut file = File::open(path)?;
         let file_len = file.metadata()?.len();
+
+        // Validate and skip WAL header if present
+        if file_len >= WAL_HEADER_SIZE as u64 {
+            let mut header = [0u8; WAL_HEADER_SIZE];
+            file.read_exact(&mut header)?;
+            if &header[0..8] == WAL_MAGIC {
+                // Check version — reject WAL files from a future format
+                let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+                if version > WAL_VERSION {
+                    return Err(MuroError::Wal(format!(
+                        "unsupported WAL format version {}",
+                        version
+                    )));
+                }
+                // Valid header - file position is now past the header
+            } else {
+                // Legacy WAL without header - seek back to start
+                file.seek(SeekFrom::Start(0))?;
+            }
+        }
+        // If file is smaller than header size, it's either empty or legacy
+
         Ok(WalReader {
             file,
             crypto: PageCrypto::new(master_key),
@@ -48,7 +70,9 @@ impl WalReader {
             return true;
         }
         // Seek back so we don't consume the header.
-        let _ = self.file.seek(SeekFrom::Start(pos));
+        if self.file.seek(SeekFrom::Start(pos)).is_err() {
+            return true; // Seek failed - treat as tail to avoid reading from wrong position
+        }
 
         let next_frame_len = u32::from_le_bytes(len_buf) as u64;
         // If the claimed payload doesn't fit in the remaining space, we're at tail.
@@ -159,8 +183,19 @@ impl WalReader {
 
     /// Read all records into a vector.
     pub fn read_all(&mut self) -> Result<Vec<(Lsn, WalRecord)>> {
+        // Seek to start and skip header if present
         self.file.seek(SeekFrom::Start(0))?;
         self.current_lsn = 0;
+
+        if self.file_len >= WAL_HEADER_SIZE as u64 {
+            let mut header = [0u8; WAL_HEADER_SIZE];
+            if self.file.read_exact(&mut header).is_ok() && &header[0..8] == WAL_MAGIC {
+                // Valid header - continue reading from after header
+            } else {
+                // Legacy format or read failure - seek back to start
+                self.file.seek(SeekFrom::Start(0))?;
+            }
+        }
 
         let mut records = Vec::new();
         while let Some(record) = self.next()? {
@@ -301,10 +336,12 @@ mod tests {
 
         // Read file to find first frame boundary, then corrupt the first frame's payload
         let file_bytes = std::fs::read(&path).unwrap();
-        let first_frame_len = u32::from_le_bytes(file_bytes[0..4].try_into().unwrap()) as usize;
-        // Corrupt a byte in the first frame's encrypted payload (after the 4-byte length header)
+        let hdr = WAL_HEADER_SIZE; // skip WAL header
+        let first_frame_len =
+            u32::from_le_bytes(file_bytes[hdr..hdr + 4].try_into().unwrap()) as usize;
+        // Corrupt a byte in the first frame's encrypted payload (after the header + 4-byte length)
         let mut corrupted = file_bytes.clone();
-        corrupted[4 + first_frame_len / 2] ^= 0xFF;
+        corrupted[hdr + 4 + first_frame_len / 2] ^= 0xFF;
         std::fs::write(&path, &corrupted).unwrap();
 
         let mut reader = WalReader::open(&path, &test_key()).unwrap();

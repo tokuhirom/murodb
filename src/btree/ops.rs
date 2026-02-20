@@ -11,6 +11,11 @@ use crate::storage::page_store::PageStore;
 /// Minimum number of entries before considering merge/rebalance.
 const MIN_ENTRIES: u16 = 2;
 
+/// Maximum B-tree depth to prevent stack overflow on corrupted trees.
+/// A 4096-byte page B-tree with 2 entries per internal node reaches depth 64
+/// at 2^64 pages, which is far beyond practical limits.
+const MAX_BTREE_DEPTH: usize = 64;
+
 /// B-tree handle. Tracks the root page.
 pub struct BTree {
     root_page_id: PageId,
@@ -39,7 +44,7 @@ impl BTree {
 
     /// Search for a key. Returns the value if found.
     pub fn search(&self, pager: &mut impl PageStore, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.search_in_page(pager, self.root_page_id, key)
+        self.search_in_page(pager, self.root_page_id, key, 0)
     }
 
     fn search_in_page(
@@ -47,7 +52,13 @@ impl BTree {
         pager: &mut impl PageStore,
         page_id: PageId,
         key: &[u8],
+        depth: usize,
     ) -> Result<Option<Vec<u8>>> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
         let page = pager.read_page(page_id)?;
         match node_type(&page) {
             Some(NodeType::Leaf) => {
@@ -65,7 +76,7 @@ impl BTree {
             }
             Some(NodeType::Internal) => {
                 let child_id = find_child(&page, key).ok_or(MuroError::InvalidPage)?;
-                self.search_in_page(pager, child_id, key)
+                self.search_in_page(pager, child_id, key, depth + 1)
             }
             None => Err(MuroError::InvalidPage),
         }
@@ -73,7 +84,7 @@ impl BTree {
 
     /// Insert a key-value pair. If key exists, update the value.
     pub fn insert(&mut self, pager: &mut impl PageStore, key: &[u8], value: &[u8]) -> Result<()> {
-        let result = self.insert_into_page(pager, self.root_page_id, key, value)?;
+        let result = self.insert_into_page(pager, self.root_page_id, key, value, 0)?;
 
         if let Some(split) = result {
             // Root was split; create a new root
@@ -99,12 +110,18 @@ impl BTree {
         page_id: PageId,
         key: &[u8],
         value: &[u8],
+        depth: usize,
     ) -> Result<Option<SplitResult>> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
         let page = pager.read_page(page_id)?;
 
         match node_type(&page) {
             Some(NodeType::Leaf) => self.insert_into_leaf(pager, page, key, value),
-            Some(NodeType::Internal) => self.insert_into_internal(pager, page, key, value),
+            Some(NodeType::Internal) => self.insert_into_internal(pager, page, key, value, depth),
             None => Err(MuroError::InvalidPage),
         }
     }
@@ -248,6 +265,7 @@ impl BTree {
         page: Page,
         key: &[u8],
         value: &[u8],
+        depth: usize,
     ) -> Result<Option<SplitResult>> {
         let page_id = page.page_id();
 
@@ -266,7 +284,7 @@ impl BTree {
             }
         }
 
-        let split = self.insert_into_page(pager, child_page_id, key, value)?;
+        let split = self.insert_into_page(pager, child_page_id, key, value, depth + 1)?;
 
         if let Some(split) = split {
             // Child was split. Insert median key + right child into this internal node.
@@ -399,7 +417,7 @@ impl BTree {
 
     /// Delete a key. Returns true if the key was found and deleted.
     pub fn delete(&mut self, pager: &mut impl PageStore, key: &[u8]) -> Result<bool> {
-        let (deleted, _) = self.delete_from_page(pager, self.root_page_id, key)?;
+        let (deleted, _) = self.delete_from_page(pager, self.root_page_id, key, 0)?;
 
         if deleted {
             // Check if root is an internal node with 0 entries
@@ -423,7 +441,13 @@ impl BTree {
         pager: &mut impl PageStore,
         page_id: PageId,
         key: &[u8],
+        depth: usize,
     ) -> Result<(bool, bool)> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
         let page = pager.read_page(page_id)?;
 
         match node_type(&page) {
@@ -462,6 +486,7 @@ impl BTree {
             Some(NodeType::Internal) => {
                 // Find which child to recurse into
                 let n = num_entries(&page);
+                let mut child_idx: Option<u16> = None;
                 let mut child_page_id = right_child(&page).ok_or(MuroError::InvalidPage)?;
 
                 for i in 0..n {
@@ -469,18 +494,24 @@ impl BTree {
                         if compare_keys(key, k) == std::cmp::Ordering::Less {
                             child_page_id =
                                 internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
+                            child_idx = Some(i);
                             break;
                         }
                     }
                 }
 
-                let (deleted, _underfull) = self.delete_from_page(pager, child_page_id, key)?;
+                let (deleted, underfull) =
+                    self.delete_from_page(pager, child_page_id, key, depth + 1)?;
 
-                // For MVP, skip rebalancing/merging of internal nodes.
-                // The tree stays valid, just possibly slightly unbalanced.
-                // Full merge support would be added for production quality.
+                if deleted && underfull {
+                    // Try to rebalance: merge or redistribute with a sibling
+                    self.try_rebalance(pager, page_id, child_idx)?;
+                }
 
-                Ok((deleted, false))
+                // Check if this internal node itself is underfull
+                let page = pager.read_page(page_id)?;
+                let underfull = num_entries(&page) < MIN_ENTRIES;
+                Ok((deleted, underfull))
             }
             None => Err(MuroError::InvalidPage),
         }
@@ -492,7 +523,7 @@ impl BTree {
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>, // return false to stop
     {
-        self.scan_page(pager, self.root_page_id, &mut callback)
+        self.scan_page(pager, self.root_page_id, &mut callback, 0)
     }
 
     fn scan_page<F>(
@@ -500,10 +531,16 @@ impl BTree {
         pager: &mut impl PageStore,
         page_id: PageId,
         callback: &mut F,
+        depth: usize,
     ) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
         let page = pager.read_page(page_id)?;
 
         match node_type(&page) {
@@ -522,10 +559,10 @@ impl BTree {
                 let n = num_entries(&page);
                 for i in 0..n {
                     let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
-                    self.scan_page(pager, left, callback)?;
+                    self.scan_page(pager, left, callback, depth + 1)?;
                 }
                 let right = right_child(&page).ok_or(MuroError::InvalidPage)?;
-                self.scan_page(pager, right, callback)?;
+                self.scan_page(pager, right, callback, depth + 1)?;
                 Ok(())
             }
             None => Err(MuroError::InvalidPage),
@@ -542,7 +579,7 @@ impl BTree {
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
-        self.scan_from_page(pager, self.root_page_id, start_key, &mut callback)
+        self.scan_from_page(pager, self.root_page_id, start_key, &mut callback, 0)
     }
 
     fn scan_from_page<F>(
@@ -551,10 +588,16 @@ impl BTree {
         page_id: PageId,
         start_key: &[u8],
         callback: &mut F,
+        depth: usize,
     ) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
         let page = pager.read_page(page_id)?;
 
         match node_type(&page) {
@@ -578,11 +621,11 @@ impl BTree {
                     let entry_key = internal_key(&page, i).ok_or(MuroError::InvalidPage)?;
                     if !started && compare_keys(start_key, entry_key) == std::cmp::Ordering::Less {
                         let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
-                        self.scan_from_page(pager, left, start_key, callback)?;
+                        self.scan_from_page(pager, left, start_key, callback, depth + 1)?;
                         started = true;
                     } else if started {
                         let left = internal_left_child(&page, i).ok_or(MuroError::InvalidPage)?;
-                        self.scan_page(pager, left, callback)?;
+                        self.scan_page(pager, left, callback, depth + 1)?;
                     }
                 }
                 if !started {
@@ -590,9 +633,188 @@ impl BTree {
                 }
                 let right = right_child(&page).ok_or(MuroError::InvalidPage)?;
                 if started {
-                    self.scan_page(pager, right, callback)?;
+                    self.scan_page(pager, right, callback, depth + 1)?;
                 } else {
-                    self.scan_from_page(pager, right, start_key, callback)?;
+                    self.scan_from_page(pager, right, start_key, callback, depth + 1)?;
+                }
+                Ok(())
+            }
+            None => Err(MuroError::InvalidPage),
+        }
+    }
+
+    /// Try to rebalance an underfull child by merging with a sibling.
+    /// `child_idx` is Some(i) if the child was found via entry i's left_child,
+    /// or None if the child is the rightmost child.
+    fn try_rebalance(
+        &mut self,
+        pager: &mut impl PageStore,
+        parent_page_id: PageId,
+        child_idx: Option<u16>,
+    ) -> Result<()> {
+        let parent = pager.read_page(parent_page_id)?;
+        let n = num_entries(&parent);
+        if n == 0 {
+            return Ok(()); // Single child, nothing to merge with
+        }
+
+        // Determine the child and its sibling for merging
+        // We'll try to merge the child with its left sibling if possible, or right sibling.
+        let (left_child_id, right_child_id, separator_idx) = match child_idx {
+            Some(0) => {
+                // Child is leftmost; merge with right sibling
+                let left = internal_left_child(&parent, 0).ok_or(MuroError::InvalidPage)?;
+                let right = if n > 1 {
+                    internal_left_child(&parent, 1).ok_or(MuroError::InvalidPage)?
+                } else {
+                    right_child(&parent).ok_or(MuroError::InvalidPage)?
+                };
+                (left, right, 0u16)
+            }
+            Some(i) => {
+                // Merge with left sibling
+                let left = if i == 1 {
+                    internal_left_child(&parent, 0).ok_or(MuroError::InvalidPage)?
+                } else {
+                    internal_left_child(&parent, i - 1).ok_or(MuroError::InvalidPage)?
+                };
+                let right = internal_left_child(&parent, i).ok_or(MuroError::InvalidPage)?;
+                (left, right, i - 1)
+            }
+            None => {
+                // Child is rightmost; merge with its left sibling
+                let left = internal_left_child(&parent, n - 1).ok_or(MuroError::InvalidPage)?;
+                let right = right_child(&parent).ok_or(MuroError::InvalidPage)?;
+                (left, right, n - 1)
+            }
+        };
+
+        let left_page = pager.read_page(left_child_id)?;
+        let right_page = pager.read_page(right_child_id)?;
+
+        let left_type = node_type(&left_page);
+        let right_type = node_type(&right_page);
+
+        // Only merge leaf nodes for now (simpler and most common case)
+        if left_type != Some(NodeType::Leaf) || right_type != Some(NodeType::Leaf) {
+            return Ok(());
+        }
+
+        let left_entries = num_entries(&left_page);
+        let right_entries = num_entries(&right_page);
+
+        // Collect all entries from both leaves
+        let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> =
+            Vec::with_capacity((left_entries + right_entries) as usize);
+        for i in 0..left_entries {
+            if let Some((k, v)) = leaf_entry(&left_page, i) {
+                all_entries.push((k.to_vec(), v.to_vec()));
+            }
+        }
+        for i in 0..right_entries {
+            if let Some((k, v)) = leaf_entry(&right_page, i) {
+                all_entries.push((k.to_vec(), v.to_vec()));
+            }
+        }
+
+        // Try to fit all entries into a single page
+        let mut merged = Page::new(left_child_id);
+        init_leaf(&mut merged);
+        let mut fits = true;
+        for (k, v) in &all_entries {
+            let cell = encode_leaf_cell(k, v);
+            if merged.insert_cell(&cell).is_err() {
+                fits = false;
+                break;
+            }
+        }
+
+        if fits {
+            // All entries fit in one page - merge successful
+            pager.write_page(&merged)?;
+            pager.free_page(right_child_id);
+
+            // Remove the separator entry from the parent and update pointers
+            let parent = pager.read_page(parent_page_id)?;
+            let old_right = right_child(&parent).ok_or(MuroError::InvalidPage)?;
+            let mut new_parent = Page::new(parent_page_id);
+
+            // Determine new right child: if we removed the last separator,
+            // the merged node becomes the right child
+            let new_right = if separator_idx == n - 1 && child_idx.is_none() {
+                left_child_id
+            } else {
+                old_right
+            };
+
+            init_internal(&mut new_parent, new_right);
+            for i in 0..n {
+                if i == separator_idx {
+                    // Skip the separator entry
+                    // But if the entry after the separator pointed to right_child_id,
+                    // update its left_child to left_child_id
+                    continue;
+                }
+                if let Some(cell_data) = parent.cell(i + 1) {
+                    if i == separator_idx + 1 {
+                        // Update this entry's left_child to point to the merged node
+                        let (_, entry_key) = decode_internal_cell(cell_data);
+                        let new_cell = encode_internal_cell(left_child_id, entry_key);
+                        new_parent
+                            .insert_cell(&new_cell)
+                            .map_err(|_| MuroError::PageOverflow)?;
+                    } else {
+                        new_parent
+                            .insert_cell(cell_data)
+                            .map_err(|_| MuroError::PageOverflow)?;
+                    }
+                }
+            }
+
+            // Handle the case where the right child was the merged right node
+            if child_idx.is_none() {
+                // The rightmost child was merged into the left - update right_child
+                set_right_child(&mut new_parent, left_child_id);
+            }
+
+            pager.write_page(&new_parent)?;
+        }
+
+        Ok(())
+    }
+
+    /// Collect all page IDs in this B-tree (for freeing).
+    pub fn collect_all_pages(&self, pager: &mut impl PageStore) -> Result<Vec<PageId>> {
+        let mut pages = Vec::new();
+        self.collect_pages_recursive(pager, self.root_page_id, &mut pages, 0)?;
+        Ok(pages)
+    }
+
+    fn collect_pages_recursive(
+        &self,
+        pager: &mut impl PageStore,
+        page_id: PageId,
+        pages: &mut Vec<PageId>,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(MuroError::Corruption(
+                "B-tree depth exceeds maximum (possible cycle)".into(),
+            ));
+        }
+        pages.push(page_id);
+        let page = pager.read_page(page_id)?;
+        match node_type(&page) {
+            Some(NodeType::Leaf) => Ok(()),
+            Some(NodeType::Internal) => {
+                let n = num_entries(&page);
+                for i in 0..n {
+                    if let Some(child) = internal_left_child(&page, i) {
+                        self.collect_pages_recursive(pager, child, pages, depth + 1)?;
+                    }
+                }
+                if let Some(right) = right_child(&page) {
+                    self.collect_pages_recursive(pager, right, pages, depth + 1)?;
                 }
                 Ok(())
             }

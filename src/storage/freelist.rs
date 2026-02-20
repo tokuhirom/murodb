@@ -29,8 +29,21 @@ impl FreeList {
     }
 
     /// Return a page to the free list.
-    pub fn free(&mut self, page_id: PageId) {
+    /// Returns `true` if the page was actually added, `false` if it was already
+    /// in the freelist (double-free). Callers that use speculative
+    /// free/undo patterns must check the return value to keep push/pop counts
+    /// in sync.
+    pub fn free(&mut self, page_id: PageId) -> bool {
+        if self.free_pages.contains(&page_id) {
+            debug_assert!(
+                false,
+                "double-free detected: page {} is already in freelist",
+                page_id
+            );
+            return false;
+        }
         self.free_pages.push(page_id);
+        true
     }
 
     /// Undo the most recent `free()` call. Used to speculatively compute
@@ -136,6 +149,34 @@ impl FreeList {
     /// of the data area size (which is always page-sized, zero-padded).
     pub fn is_multi_page_format(data: &[u8]) -> bool {
         data.len() >= 4 && data[0..4] == FREELIST_MULTI_PAGE_MAGIC
+    }
+
+    /// Validate that all freelist entries are within the given page_count.
+    pub fn validate(&self, page_count: u64) -> std::result::Result<(), String> {
+        for &pid in &self.free_pages {
+            if pid >= page_count {
+                return Err(format!(
+                    "freelist entry {} is beyond page_count {}",
+                    pid, page_count
+                ));
+            }
+        }
+        // Check for duplicates
+        let mut seen = std::collections::HashSet::new();
+        for &pid in &self.free_pages {
+            if !seen.insert(pid) {
+                return Err(format!("duplicate freelist entry: page {}", pid));
+            }
+        }
+        Ok(())
+    }
+
+    /// Sanitize freelist by removing out-of-range and duplicate entries.
+    /// After crash recovery, the freelist may contain stale entries.
+    pub fn sanitize(&mut self, page_count: u64) {
+        let mut seen = std::collections::HashSet::new();
+        self.free_pages
+            .retain(|&pid| pid < page_count && seen.insert(pid));
     }
 
     /// Deserialize freelist from bytes.

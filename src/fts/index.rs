@@ -98,7 +98,12 @@ impl FtsIndex {
     pub fn get_postings(&self, pager: &mut impl PageStore, term: &str) -> Result<PostingList> {
         let tid = self.term_id(term);
         match self.btree.search(pager, &tid)? {
-            Some(data) => Ok(PostingList::deserialize(&data).unwrap_or_default()),
+            Some(data) => match PostingList::deserialize(&data) {
+                Some(pl) => Ok(pl),
+                None => Err(crate::error::MuroError::Corruption(
+                    "failed to deserialize posting list".into(),
+                )),
+            },
             None => Ok(PostingList::new()),
         }
     }
@@ -139,7 +144,11 @@ impl FtsIndex {
                     for (term, positions) in &term_positions {
                         let tid = self.term_id(term);
                         let mut pl = match self.btree.search(pager, &tid)? {
-                            Some(data) => PostingList::deserialize(&data).unwrap_or_default(),
+                            Some(data) => PostingList::deserialize(&data).ok_or_else(|| {
+                                crate::error::MuroError::Corruption(
+                                    "failed to deserialize posting list".into(),
+                                )
+                            })?,
                             None => PostingList::new(),
                         };
                         pl.add(*doc_id, positions.clone());
@@ -159,7 +168,11 @@ impl FtsIndex {
                         if seen_terms.insert(token.text.clone()) {
                             let tid = self.term_id(&token.text);
                             if let Some(data) = self.btree.search(pager, &tid)? {
-                                let mut pl = PostingList::deserialize(&data).unwrap_or_default();
+                                let mut pl = PostingList::deserialize(&data).ok_or_else(|| {
+                                    crate::error::MuroError::Corruption(
+                                        "failed to deserialize posting list".into(),
+                                    )
+                                })?;
                                 pl.remove(*doc_id);
                                 if pl.df() == 0 {
                                     self.btree.delete(pager, &tid)?;

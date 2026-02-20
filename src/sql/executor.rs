@@ -51,8 +51,11 @@ pub fn execute_statement(
         Statement::CreateTable(ct) => exec_create_table(ct, pager, catalog),
         Statement::CreateIndex(ci) => exec_create_index(ci, pager, catalog),
         Statement::CreateFulltextIndex(_fi) => {
-            // FTS index creation is handled in step 9
-            Ok(ExecResult::Ok)
+            // TODO: FTS index integration with catalog is not yet complete.
+            // FTS operations (create/update/delete) need catalog metadata support.
+            Err(MuroError::Execution(
+                "CREATE FULLTEXT INDEX is not yet fully integrated with the SQL engine".into(),
+            ))
         }
         Statement::DropTable(dt) => exec_drop_table(dt, pager, catalog),
         Statement::DropIndex(di) => exec_drop_index(di, pager, catalog),
@@ -205,7 +208,12 @@ fn exec_create_index(
 
     let idx_btree = BTree::create(pager)?;
 
-    let col_idx = table_def.column_index(&ci.column_name).unwrap();
+    let col_idx = table_def.column_index(&ci.column_name).ok_or_else(|| {
+        MuroError::Schema(format!(
+            "Column '{}' not found in table '{}'",
+            ci.column_name, ci.table_name
+        ))
+    })?;
     let col_data_type = table_def.columns[col_idx].data_type;
 
     // If unique, scan existing data for duplicates
@@ -272,14 +280,34 @@ fn exec_drop_table(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    if catalog.get_table(pager, &dt.table_name)?.is_none() {
-        if dt.if_exists {
-            return Ok(ExecResult::Ok);
+    let table_def = match catalog.get_table(pager, &dt.table_name)? {
+        Some(td) => td,
+        None => {
+            if dt.if_exists {
+                return Ok(ExecResult::Ok);
+            }
+            return Err(MuroError::Schema(format!(
+                "Table '{}' does not exist",
+                dt.table_name
+            )));
         }
-        return Err(MuroError::Schema(format!(
-            "Table '{}' does not exist",
-            dt.table_name
-        )));
+    };
+
+    // Free the data B-tree pages
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let pages_to_free = data_btree.collect_all_pages(pager)?;
+    for page_id in pages_to_free {
+        pager.free_page(page_id);
+    }
+
+    // Free index B-tree pages
+    let indexes = catalog.get_indexes_for_table(pager, &dt.table_name)?;
+    for idx in &indexes {
+        let idx_btree = BTree::open(idx.btree_root);
+        let idx_pages = idx_btree.collect_all_pages(pager)?;
+        for page_id in idx_pages {
+            pager.free_page(page_id);
+        }
     }
 
     // Delete all indexes for this table first
@@ -295,14 +323,24 @@ fn exec_drop_index(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    if catalog.get_index(pager, &di.index_name)?.is_none() {
-        if di.if_exists {
-            return Ok(ExecResult::Ok);
+    let idx_def = match catalog.get_index(pager, &di.index_name)? {
+        Some(idx) => idx,
+        None => {
+            if di.if_exists {
+                return Ok(ExecResult::Ok);
+            }
+            return Err(MuroError::Schema(format!(
+                "Index '{}' does not exist",
+                di.index_name
+            )));
         }
-        return Err(MuroError::Schema(format!(
-            "Index '{}' does not exist",
-            di.index_name
-        )));
+    };
+
+    // Free the index B-tree pages
+    let idx_btree = BTree::open(idx_def.btree_root);
+    let pages_to_free = idx_btree.collect_all_pages(pager)?;
+    for page_id in pages_to_free {
+        pager.free_page(page_id);
     }
 
     catalog.delete_index(pager, &di.index_name)?;
@@ -436,7 +474,12 @@ fn exec_insert(
         // Update secondary indexes
         for idx in &indexes {
             if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
                 let val = &values[col_idx];
                 if !val.is_null() {
                     let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
@@ -488,7 +531,9 @@ fn exec_select(
     match plan {
         Plan::PkSeek { key_expr, .. } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
-            let pk_idx = table_def.pk_column_index().unwrap();
+            let pk_idx = table_def
+                .pk_column_index()
+                .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
             let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
             let data_btree = BTree::open(table_def.data_btree_root);
             if let Some(data) = data_btree.search(pager, &pk_key)? {
@@ -506,8 +551,16 @@ fn exec_select(
             ..
         } => {
             let key_val = eval_expr(&key_expr, &|_| None)?;
-            let idx = indexes.iter().find(|i| i.name == index_name).unwrap();
-            let idx_col_idx = table_def.column_index(&idx.column_name).unwrap();
+            let idx = indexes
+                .iter()
+                .find(|i| i.name == index_name)
+                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
+            let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                MuroError::Schema(format!(
+                    "Index column '{}' not found in table",
+                    idx.column_name
+                ))
+            })?;
             let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
             let idx_btree = BTree::open(idx.btree_root);
             if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
@@ -753,10 +806,22 @@ fn exec_select_join(
 
     // 3. Apply WHERE filter
     if let Some(where_expr) = &sel.where_clause {
+        let mut filter_error: Option<MuroError> = None;
         joined_rows.retain(|row| {
-            let val = eval_join_expr(where_expr, row).unwrap_or(Value::Null);
-            is_truthy(&val)
+            if filter_error.is_some() {
+                return false;
+            }
+            match eval_join_expr(where_expr, row) {
+                Ok(val) => is_truthy(&val),
+                Err(e) => {
+                    filter_error = Some(e);
+                    false
+                }
+            }
         });
+        if let Some(e) = filter_error {
+            return Err(e);
+        }
     }
 
     // 4. ORDER BY (before projection, so all columns are accessible)
@@ -919,7 +984,12 @@ fn exec_update(
         // Check unique constraints on updated indexed columns
         for idx in &indexes {
             if idx.is_unique && idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
                 let old_val = &old_values[col_idx];
                 let new_val = &new_values[col_idx];
                 if old_val != new_val && !new_val.is_null() {
@@ -938,7 +1008,12 @@ fn exec_update(
         // Update secondary indexes: remove old entries, insert new entries
         for idx in &indexes {
             if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
                 let old_val = &old_values[col_idx];
                 let new_val = &new_values[col_idx];
                 if old_val != new_val {
@@ -998,7 +1073,12 @@ fn exec_delete(
         // Delete from secondary indexes
         for idx in &indexes {
             if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).unwrap();
+                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
                 let val = &values[col_idx];
                 if !val.is_null() {
                     let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);

@@ -17,16 +17,17 @@ const ENCRYPTED_PAGE_SIZE: usize = PAGE_SIZE + PageCrypto::overhead();
 /// Plaintext file header size (written before any encrypted pages).
 /// Layout:
 ///   0..8    Magic "MURODB01"
-///   8..12   Format version (u32 LE) — currently 2
+///   8..12   Format version (u32 LE) — currently 3
 ///   12..28  Salt (16 bytes, for Argon2 KDF)
 ///   28..36  Catalog root page ID (u64 LE)
 ///   36..44  Page count (u64 LE)
 ///   44..52  Epoch (u64 LE)
 ///   52..60  Freelist page ID (u64 LE, 0 = no freelist page)
-///   60..64  Header CRC32 (u32 LE, over bytes 0..60)
-const PLAINTEXT_HEADER_SIZE: u64 = 64;
+///   60..68  Next TxId (u64 LE)
+///   68..72  Header CRC32 (u32 LE, over bytes 0..68)
+const PLAINTEXT_HEADER_SIZE: u64 = 72;
 const MAGIC: &[u8; 8] = b"MURODB01";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
@@ -40,6 +41,7 @@ pub struct Pager {
     salt: [u8; 16],
     freelist: FreeList,
     freelist_page_id: u64,
+    next_txid: u64,
     cache: LruCache<PageId, Page>,
 }
 
@@ -64,6 +66,7 @@ impl Pager {
             salt,
             freelist: FreeList::new(),
             freelist_page_id: 0,
+            next_txid: 1,
             cache,
         };
 
@@ -94,6 +97,7 @@ impl Pager {
             salt: [0u8; 16],
             freelist: FreeList::new(),
             freelist_page_id: 0,
+            next_txid: 1,
             cache,
         };
 
@@ -142,6 +146,11 @@ impl Pager {
                 // Legacy single-page format
                 pager.freelist = FreeList::deserialize(data_area);
             }
+
+            // Sanitize freelist: remove entries beyond page_count and duplicates.
+            // After crash recovery, the freelist may contain stale entries that
+            // reference pages beyond the current page_count.
+            pager.freelist.sanitize(pager.page_count);
         }
 
         Ok(pager)
@@ -173,9 +182,10 @@ impl Pager {
         header[36..44].copy_from_slice(&self.page_count.to_le_bytes());
         header[44..52].copy_from_slice(&self.epoch.to_le_bytes());
         header[52..60].copy_from_slice(&self.freelist_page_id.to_le_bytes());
-        // CRC32 over bytes 0..60
-        let checksum = crc32(&header[0..60]);
-        header[60..64].copy_from_slice(&checksum.to_le_bytes());
+        header[60..68].copy_from_slice(&self.next_txid.to_le_bytes());
+        // CRC32 over bytes 0..68
+        let checksum = crc32(&header[0..68]);
+        header[68..72].copy_from_slice(&checksum.to_le_bytes());
 
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header)?;
@@ -184,9 +194,25 @@ impl Pager {
 
     /// Read the plaintext file header.
     fn read_plaintext_header(&mut self) -> Result<()> {
+        // Read max possible header size; older versions have smaller headers.
         let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.read_exact(&mut header)?;
+        // Read at least old header size (64 bytes), tolerating shorter files for v1
+        let bytes_read = {
+            let mut total = 0;
+            loop {
+                match self.file.read(&mut header[total..]) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            total
+        };
+        if bytes_read < 64 {
+            return Err(MuroError::InvalidPage);
+        }
 
         if &header[0..8] != MAGIC {
             return Err(MuroError::InvalidPage);
@@ -207,17 +233,25 @@ impl Pager {
         self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
         self.epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
 
-        if version >= 2 {
+        if version == 2 {
             self.freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
             let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
             let computed_crc = crc32(&header[0..60]);
             if stored_crc != computed_crc {
                 return Err(MuroError::Wal("header corrupted".into()));
             }
+        } else if version >= 3 {
+            self.freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
+            self.next_txid = u64::from_le_bytes(header[60..68].try_into().unwrap());
+            let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
+            let computed_crc = crc32(&header[0..68]);
+            if stored_crc != computed_crc {
+                return Err(MuroError::Wal("header corrupted".into()));
+            }
         }
 
-        // Auto-upgrade v1 → v2: rewrite header with CRC and freelist_page_id
-        if version == 1 {
+        // Auto-upgrade v1/v2 → v3: rewrite header with new format
+        if version < FORMAT_VERSION {
             self.write_plaintext_header()?;
             self.file.sync_all()?;
         }
@@ -343,6 +377,16 @@ impl Pager {
     /// Get mutable reference to the in-memory freelist.
     pub fn freelist_mut(&mut self) -> &mut FreeList {
         &mut self.freelist
+    }
+
+    /// Get the next transaction ID.
+    pub fn next_txid(&self) -> u64 {
+        self.next_txid
+    }
+
+    /// Set the next transaction ID.
+    pub fn set_next_txid(&mut self, txid: u64) {
+        self.next_txid = txid;
     }
 
     /// Sync file to disk.

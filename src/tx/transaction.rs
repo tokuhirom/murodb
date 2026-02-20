@@ -111,16 +111,19 @@ impl Transaction {
 
         // Build a speculative freelist snapshot without mutating the pager's freelist.
         // This avoids leaking freed pages into the pager if WAL commit fails below.
+        // We track how many pages were actually added (free() returns false for
+        // duplicates) so we undo exactly the right number of pushes.
         use crate::storage::page::PAGE_HEADER_SIZE;
         let pages_needed = {
             let fl = pager.freelist_mut();
-            // Temporarily apply freed pages to compute needed pages
+            let mut actually_freed = 0usize;
             for &page_id in &self.freed_pages {
-                fl.free(page_id);
+                if fl.free(page_id) {
+                    actually_freed += 1;
+                }
             }
             let needed = fl.page_count_needed();
-            // Roll back
-            for _ in &self.freed_pages {
+            for _ in 0..actually_freed {
                 fl.undo_last_free();
             }
             needed
@@ -142,11 +145,14 @@ impl Transaction {
         // Build speculative freelist and serialize to pages
         let fl_pages_data = {
             let fl = pager.freelist_mut();
+            let mut actually_freed = 0usize;
             for &page_id in &self.freed_pages {
-                fl.free(page_id);
+                if fl.free(page_id) {
+                    actually_freed += 1;
+                }
             }
             let data = fl.serialize_pages(&fl_page_ids);
-            for _ in &self.freed_pages {
+            for _ in 0..actually_freed {
                 fl.undo_last_free();
             }
             data

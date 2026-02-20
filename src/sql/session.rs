@@ -41,12 +41,13 @@ pub struct Session {
 
 impl Session {
     pub fn new(pager: Pager, catalog: SystemCatalog, wal: WalWriter) -> Self {
+        let next_txid = pager.next_txid();
         Session {
             pager,
             catalog,
             wal,
             active_tx: None,
-            next_txid: 1,
+            next_txid,
             checkpoint_stats: CheckpointStats::default(),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
@@ -90,6 +91,7 @@ impl Session {
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
         let catalog_root = self.catalog.root_page_id();
+        self.pager.set_next_txid(self.next_txid);
         tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
         self.post_commit_checkpoint();
         Ok(ExecResult::Ok)
@@ -126,6 +128,7 @@ impl Session {
             Ok(exec_result) => {
                 // Commit via WAL (catalog_root included in WAL MetaUpdate)
                 let catalog_root = self.catalog.root_page_id();
+                self.pager.set_next_txid(self.next_txid);
                 tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
                 self.post_commit_checkpoint();
                 Ok(exec_result)
@@ -141,6 +144,9 @@ impl Session {
 
     /// Execute a statement within an active transaction.
     fn execute_in_tx(&mut self, stmt: &Statement) -> Result<ExecResult> {
+        // Save catalog state so we can restore on error
+        let catalog_root_before = self.catalog.root_page_id();
+
         // Take the transaction out temporarily
         let tx = self.active_tx.take().unwrap();
         let mut store = TxPageStore::new(tx, &mut self.pager);
@@ -149,6 +155,11 @@ impl Session {
 
         // Put the transaction back
         self.active_tx = Some(store.into_tx());
+
+        if result.is_err() {
+            // Restore catalog to pre-statement state on error
+            self.catalog = SystemCatalog::open(catalog_root_before);
+        }
 
         result
     }
@@ -418,7 +429,8 @@ mod tests {
 
         let wal_size = std::fs::metadata(&wal_path).unwrap().len();
         assert_eq!(
-            wal_size, 0,
+            wal_size,
+            crate::wal::WAL_HEADER_SIZE as u64,
             "transient checkpoint failure should be recovered by retry"
         );
     }

@@ -247,6 +247,11 @@ impl Pager {
         self.catalog_root = root;
     }
 
+    /// Set page count (used by WAL recovery to restore metadata).
+    pub fn set_page_count(&mut self, count: u64) {
+        self.page_count = count;
+    }
+
     /// Get salt.
     pub fn salt(&self) -> &[u8; 16] {
         &self.salt

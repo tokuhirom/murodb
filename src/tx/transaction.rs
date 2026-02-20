@@ -65,7 +65,15 @@ impl Transaction {
     }
 
     /// Commit: write dirty pages to WAL, then flush to pager.
-    pub fn commit(&mut self, pager: &mut Pager, wal: &mut WalWriter) -> Result<Lsn> {
+    ///
+    /// `catalog_root` is included in the WAL MetaUpdate record so that recovery
+    /// can restore it atomically with the committed pages.
+    pub fn commit(
+        &mut self,
+        pager: &mut Pager,
+        wal: &mut WalWriter,
+        catalog_root: u64,
+    ) -> Result<Lsn> {
         if self.state != TxState::Active {
             return Err(MuroError::Transaction(
                 "Cannot commit non-active transaction".into(),
@@ -84,6 +92,22 @@ impl Transaction {
             })?;
         }
 
+        // Compute page_count: max of current pager page_count and any dirty page ids + 1
+        let mut page_count = pager.page_count();
+        for &page_id in self.dirty_pages.keys() {
+            let needed = page_id + 1;
+            if needed > page_count {
+                page_count = needed;
+            }
+        }
+
+        // Write MetaUpdate so recovery can restore catalog_root and page_count
+        wal.append(&WalRecord::MetaUpdate {
+            txid: self.txid,
+            catalog_root,
+            page_count,
+        })?;
+
         // Write Commit record
         let commit_lsn = wal.current_lsn();
         wal.append(&WalRecord::Commit {
@@ -98,6 +122,10 @@ impl Transaction {
         for page in self.dirty_pages.values() {
             pager.write_page(page)?;
         }
+
+        // Update pager metadata atomically before single flush_meta
+        pager.set_catalog_root(catalog_root);
+        pager.set_page_count(page_count);
         pager.flush_meta()?;
 
         self.state = TxState::Committed;
@@ -184,7 +212,7 @@ mod tests {
         assert_eq!(tx.dirty_page_count(), 1);
 
         // Commit
-        let lsn = tx.commit(&mut pager, &mut wal).unwrap();
+        let lsn = tx.commit(&mut pager, &mut wal, 0).unwrap();
         assert_eq!(tx.state(), TxState::Committed);
         assert!(lsn > 0);
 

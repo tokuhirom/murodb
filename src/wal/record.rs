@@ -6,6 +6,7 @@
 /// Record types:
 ///   Begin(txid)
 ///   PagePut(txid, page_id, page_data)
+///   MetaUpdate(txid, catalog_root, page_count)
 ///   Commit(txid, lsn)
 ///   Abort(txid)
 use crate::storage::page::PageId;
@@ -23,6 +24,11 @@ pub enum WalRecord {
         page_id: PageId,
         data: Vec<u8>,
     },
+    MetaUpdate {
+        txid: TxId,
+        catalog_root: u64,
+        page_count: u64,
+    },
     Commit {
         txid: TxId,
         lsn: Lsn,
@@ -36,12 +42,14 @@ const TAG_BEGIN: u8 = 1;
 const TAG_PAGE_PUT: u8 = 2;
 const TAG_COMMIT: u8 = 3;
 const TAG_ABORT: u8 = 4;
+const TAG_META_UPDATE: u8 = 5;
 
 impl WalRecord {
     pub fn txid(&self) -> TxId {
         match self {
             WalRecord::Begin { txid } => *txid,
             WalRecord::PagePut { txid, .. } => *txid,
+            WalRecord::MetaUpdate { txid, .. } => *txid,
             WalRecord::Commit { txid, .. } => *txid,
             WalRecord::Abort { txid } => *txid,
         }
@@ -67,6 +75,18 @@ impl WalRecord {
                 buf.extend_from_slice(&page_id.to_le_bytes());
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 buf.extend_from_slice(data);
+                buf
+            }
+            WalRecord::MetaUpdate {
+                txid,
+                catalog_root,
+                page_count,
+            } => {
+                let mut buf = Vec::with_capacity(1 + 8 + 8 + 8);
+                buf.push(TAG_META_UPDATE);
+                buf.extend_from_slice(&txid.to_le_bytes());
+                buf.extend_from_slice(&catalog_root.to_le_bytes());
+                buf.extend_from_slice(&page_count.to_le_bytes());
                 buf
             }
             WalRecord::Commit { txid, lsn } => {
@@ -114,6 +134,19 @@ impl WalRecord {
                     txid,
                     page_id,
                     data: page_data,
+                })
+            }
+            TAG_META_UPDATE => {
+                if data.len() < 25 {
+                    return None;
+                }
+                let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
+                let catalog_root = u64::from_le_bytes(data[9..17].try_into().unwrap());
+                let page_count = u64::from_le_bytes(data[17..25].try_into().unwrap());
+                Some(WalRecord::MetaUpdate {
+                    txid,
+                    catalog_root,
+                    page_count,
                 })
             }
             TAG_COMMIT => {
@@ -165,6 +198,11 @@ mod tests {
                 page_id: 42,
                 data: vec![0xAB; 100],
             },
+            WalRecord::MetaUpdate {
+                txid: 1,
+                catalog_root: 10,
+                page_count: 50,
+            },
             WalRecord::Commit { txid: 1, lsn: 5 },
             WalRecord::Abort { txid: 2 },
         ];
@@ -173,6 +211,29 @@ mod tests {
             let serialized = record.serialize();
             let deserialized = WalRecord::deserialize(&serialized).unwrap();
             assert_eq!(record.txid(), deserialized.txid());
+        }
+    }
+
+    #[test]
+    fn test_meta_update_roundtrip() {
+        let record = WalRecord::MetaUpdate {
+            txid: 3,
+            catalog_root: 42,
+            page_count: 100,
+        };
+        let serialized = record.serialize();
+        let deserialized = WalRecord::deserialize(&serialized).unwrap();
+        if let WalRecord::MetaUpdate {
+            txid,
+            catalog_root,
+            page_count,
+        } = deserialized
+        {
+            assert_eq!(txid, 3);
+            assert_eq!(catalog_root, 42);
+            assert_eq!(page_count, 100);
+        } else {
+            panic!("Expected MetaUpdate");
         }
     }
 

@@ -158,11 +158,12 @@ impl Session {
     fn post_commit_checkpoint(&mut self) {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
-        if let Err(e) = self.try_checkpoint_truncate_with_retry() {
+        if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
-                "WARNING: post-commit WAL checkpoint failed: {} (wal_path={}, wal_size_bytes={})",
+                "WARNING: post-commit WAL checkpoint failed after {} attempt(s): {} (wal_path={}, wal_size_bytes={})",
+                attempts,
                 e,
                 wal_path,
                 wal_size
@@ -174,11 +175,12 @@ impl Session {
 
     fn post_rollback_checkpoint(&mut self) {
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
-        if let Err(e) = self.try_checkpoint_truncate_with_retry() {
+        if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
-                "WARNING: post-rollback WAL checkpoint failed: {} (wal_path={}, wal_size_bytes={})",
+                "WARNING: post-rollback WAL checkpoint failed after {} attempt(s): {} (wal_path={}, wal_size_bytes={})",
+                attempts,
                 e,
                 wal_path,
                 wal_size
@@ -199,19 +201,24 @@ impl Session {
         self.wal.checkpoint_truncate()
     }
 
-    fn try_checkpoint_truncate_with_retry(&mut self) -> Result<()> {
+    fn try_checkpoint_truncate_with_retry(
+        &mut self,
+    ) -> std::result::Result<usize, (usize, MuroError)> {
         let mut last_err = None;
-        for _ in 0..CHECKPOINT_MAX_ATTEMPTS {
+        for attempt in 1..=CHECKPOINT_MAX_ATTEMPTS {
             match self.try_checkpoint_truncate_once() {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(attempt),
                 Err(e) => last_err = Some(e),
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            MuroError::Io(std::io::Error::other(
-                "checkpoint truncate failed without error detail",
-            ))
-        }))
+        Err((
+            CHECKPOINT_MAX_ATTEMPTS,
+            last_err.unwrap_or_else(|| {
+                MuroError::Io(std::io::Error::other(
+                    "checkpoint truncate failed without error detail",
+                ))
+            }),
+        ))
     }
 
     #[cfg(test)]
@@ -322,5 +329,22 @@ mod tests {
             wal_size, 0,
             "transient checkpoint failure should be recovered by retry"
         );
+    }
+
+    #[test]
+    fn test_retry_attempt_count_is_reported_on_transient_success() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session.inject_checkpoint_failure_once_for_test();
+        let attempts = session.try_checkpoint_truncate_with_retry().unwrap();
+        assert_eq!(attempts, 2);
     }
 }

@@ -22,6 +22,8 @@ pub struct Session {
     wal: WalWriter,
     active_tx: Option<Transaction>,
     next_txid: TxId,
+    #[cfg(test)]
+    inject_checkpoint_failure_once: bool,
 }
 
 impl Session {
@@ -32,6 +34,8 @@ impl Session {
             wal,
             active_tx: None,
             next_txid: 1,
+            #[cfg(test)]
+            inject_checkpoint_failure_once: false,
         }
     }
 
@@ -152,7 +156,7 @@ impl Session {
     fn post_commit_checkpoint(&mut self) {
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
-        if let Err(e) = self.wal.checkpoint_truncate() {
+        if let Err(e) = self.try_checkpoint_truncate() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
@@ -168,7 +172,7 @@ impl Session {
 
     fn post_rollback_checkpoint(&mut self) {
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
-        if let Err(e) = self.wal.checkpoint_truncate() {
+        if let Err(e) = self.try_checkpoint_truncate() {
             let wal_path = self.wal.wal_path().display();
             let wal_size = self.wal.file_size_bytes().ok();
             eprintln!(
@@ -180,5 +184,65 @@ impl Session {
                     .unwrap_or_else(|| "unknown".to_string())
             );
         }
+    }
+
+    fn try_checkpoint_truncate(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if self.inject_checkpoint_failure_once {
+            self.inject_checkpoint_failure_once = false;
+            return Err(MuroError::Io(std::io::Error::other(
+                "injected checkpoint failure",
+            )));
+        }
+        self.wal.checkpoint_truncate()
+    }
+
+    #[cfg(test)]
+    fn inject_checkpoint_failure_once_for_test(&mut self) {
+        self.inject_checkpoint_failure_once = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::aead::MasterKey;
+    use tempfile::TempDir;
+
+    fn test_key() -> MasterKey {
+        MasterKey::new([0x42u8; 32])
+    }
+
+    #[test]
+    fn test_commit_survives_checkpoint_failure_and_leaves_wal_for_recovery() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session.inject_checkpoint_failure_once_for_test();
+        let result = session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        assert!(matches!(result, ExecResult::Ok));
+
+        let wal_size = std::fs::metadata(&wal_path).unwrap().len();
+        assert!(
+            wal_size > 0,
+            "WAL should remain when checkpoint is injected to fail"
+        );
+
+        let mut db = crate::Database::open(&db_path, &test_key()).unwrap();
+        let rows = match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => rows,
+            _ => panic!("Expected rows"),
+        };
+        assert_eq!(rows.len(), 0);
     }
 }

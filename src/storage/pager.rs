@@ -110,12 +110,26 @@ impl Pager {
             let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
 
             if FreeList::is_multi_page_format(data_area) {
-                // Multi-page chain: walk the chain
+                // Multi-page chain: walk the chain with cycle detection
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(pager.freelist_page_id);
                 let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
                 pages_data_owned.push(data_area.to_vec());
                 // Read next pointer from first page (offset 4, after 4-byte magic)
                 let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
                 while next_page_id != 0 {
+                    if !visited.insert(next_page_id) {
+                        return Err(MuroError::Corruption(format!(
+                            "freelist chain cycle detected at page {}",
+                            next_page_id
+                        )));
+                    }
+                    if next_page_id >= pager.page_count {
+                        return Err(MuroError::Corruption(format!(
+                            "freelist chain references page {} beyond page_count {}",
+                            next_page_id, pager.page_count
+                        )));
+                    }
                     let next_page = pager.read_page_from_disk(next_page_id)?;
                     let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
                     next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());

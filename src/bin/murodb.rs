@@ -224,11 +224,29 @@ fn main() {
             eprintln!("Use --create to create a new database");
             process::exit(1);
         }
-        Database::open_with_password_and_recovery_mode(&cli.db_path, &password, recovery_mode)
-            .unwrap_or_else(|e| {
-                eprintln!("ERROR: Failed to open database: {}", e);
-                process::exit(1);
-            })
+        let (db, report) = Database::open_with_password_and_recovery_mode_and_report(
+            &cli.db_path,
+            &password,
+            recovery_mode,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to open database: {}", e);
+            process::exit(1);
+        });
+        if recovery_mode == RecoveryMode::Permissive {
+            if let Some(report) = &report {
+                if !report.skipped.is_empty() {
+                    eprintln!(
+                        "WARNING: permissive recovery skipped {} malformed transaction(s)",
+                        report.skipped.len()
+                    );
+                    for skipped in &report.skipped {
+                        eprintln!("  - txid {}: {}", skipped.txid, skipped.reason);
+                    }
+                }
+            }
+        }
+        db
     };
 
     if let Some(sql) = &cli.execute {

@@ -29,7 +29,7 @@ use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
 use crate::storage::pager::Pager;
-use crate::wal::recovery::RecoveryMode;
+use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
 /// Main database handle.
@@ -82,7 +82,7 @@ impl Database {
 
     /// Open an existing database.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
-        Self::open_with_recovery_mode(path, master_key, RecoveryMode::Strict)
+        Ok(Self::open_with_recovery_mode_and_report(path, master_key, RecoveryMode::Strict)?.0)
     }
 
     /// Open an existing database with configurable WAL recovery behavior.
@@ -91,11 +91,26 @@ impl Database {
         master_key: &MasterKey,
         recovery_mode: RecoveryMode,
     ) -> Result<Self> {
+        Ok(Self::open_with_recovery_mode_and_report(path, master_key, recovery_mode)?.0)
+    }
+
+    /// Open an existing database with configurable WAL recovery behavior and return recovery report.
+    pub fn open_with_recovery_mode_and_report(
+        path: &Path,
+        master_key: &MasterKey,
+        recovery_mode: RecoveryMode,
+    ) -> Result<(Self, Option<RecoveryResult>)> {
         let wp = wal_path(path);
+        let mut recovery_report = None;
 
         // Run WAL recovery before opening
         if wp.exists() {
-            crate::wal::recovery::recover_with_mode(path, &wp, master_key, recovery_mode)?;
+            recovery_report = Some(crate::wal::recovery::recover_with_mode(
+                path,
+                &wp,
+                master_key,
+                recovery_mode,
+            )?);
             // Truncate WAL after successful recovery
             truncate_wal_durably(&wp)?;
         }
@@ -107,12 +122,15 @@ impl Database {
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
 
-        Ok(Database {
-            session,
-            lock_manager,
-            master_key: master_key.clone(),
-            db_path: path.to_path_buf(),
-        })
+        Ok((
+            Database {
+                session,
+                lock_manager,
+                master_key: master_key.clone(),
+                db_path: path.to_path_buf(),
+            },
+            recovery_report,
+        ))
     }
 
     /// Create a new database with a password.
@@ -149,9 +167,18 @@ impl Database {
         password: &str,
         recovery_mode: RecoveryMode,
     ) -> Result<Self> {
+        Ok(Self::open_with_password_and_recovery_mode_and_report(path, password, recovery_mode)?.0)
+    }
+
+    /// Open an existing database with a password, configurable recovery mode, and return recovery report.
+    pub fn open_with_password_and_recovery_mode_and_report(
+        path: &Path,
+        password: &str,
+        recovery_mode: RecoveryMode,
+    ) -> Result<(Self, Option<RecoveryResult>)> {
         let salt = Pager::read_salt_from_file(path)?;
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
-        Self::open_with_recovery_mode(path, &master_key, recovery_mode)
+        Self::open_with_recovery_mode_and_report(path, &master_key, recovery_mode)
     }
 
     /// Execute a SQL statement. Returns the result.

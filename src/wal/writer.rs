@@ -13,7 +13,6 @@ use crate::wal::MAX_WAL_FRAME_LEN;
 ///
 /// Encrypted payload contains:
 ///   [record bytes] [crc32: u4]
-
 pub struct WalWriter {
     file: File,
     path: PathBuf,

@@ -552,3 +552,274 @@ fn test_composite_pk_with_varchar() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].1, Value::Varchar("eu-data".to_string()));
 }
+
+// --- Bug fix: CREATE TABLE atomicity (constraint validation before catalog write) ---
+
+#[test]
+fn test_create_table_with_invalid_pk_column_does_not_leave_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    // PK references a non-existent column
+    let err = exec_err(
+        "CREATE TABLE t (a INT, b INT, PRIMARY KEY (a, nonexistent))",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(err.contains("not found"), "Got: {}", err);
+
+    // Table should NOT exist in catalog
+    let rows = get_rows(exec("SHOW TABLES", &mut pager, &mut catalog));
+    assert!(rows.is_empty(), "Table should not have been created");
+}
+
+#[test]
+fn test_create_table_conflicting_pk_does_not_leave_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    let err = exec_err(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, PRIMARY KEY (id, a))",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(
+        err.contains("both column-level and table-level PRIMARY KEY"),
+        "Got: {}",
+        err
+    );
+
+    let rows = get_rows(exec("SHOW TABLES", &mut pager, &mut catalog));
+    assert!(rows.is_empty(), "Table should not have been created");
+}
+
+// --- Bug fix: UNIQUE constraint column existence validation ---
+
+#[test]
+fn test_unique_constraint_with_invalid_column_errors() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    let err = exec_err(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, UNIQUE (a, nonexistent))",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(err.contains("not found"), "Got: {}", err);
+}
+
+// --- Bug fix: Non-unique composite index with duplicate values ---
+
+#[test]
+fn test_non_unique_index_duplicate_values() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    exec("CREATE INDEX idx_ab ON t (a, b)", &mut pager, &mut catalog);
+
+    // Insert multiple rows with same (a, b) values
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 10, 20, 'first')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (2, 10, 20, 'second')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (3, 10, 20, 'third')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (4, 10, 30, 'other')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // IndexSeek should return ALL 3 rows with (a=10, b=20)
+    let rows = get_rows(exec(
+        "SELECT c FROM t WHERE a = 10 AND b = 20",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 3, "Should find all 3 duplicate-key rows");
+
+    // Full scan should return all 4 rows
+    let all_rows = get_rows(exec("SELECT * FROM t", &mut pager, &mut catalog));
+    assert_eq!(all_rows.len(), 4);
+}
+
+#[test]
+fn test_non_unique_single_column_index_duplicates() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, category INT, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    exec(
+        "CREATE INDEX idx_cat ON t (category)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    exec(
+        "INSERT INTO t (id, category, name) VALUES (1, 1, 'Alice')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, category, name) VALUES (2, 1, 'Bob')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, category, name) VALUES (3, 2, 'Charlie')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, category, name) VALUES (4, 1, 'Diana')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // Should find all 3 rows with category=1
+    let rows = get_rows(exec(
+        "SELECT name FROM t WHERE category = 1",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 3, "Should find all 3 rows with category=1");
+}
+
+#[test]
+fn test_non_unique_index_delete_preserves_others() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (1, 10, 'first')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (2, 10, 'second')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (3, 10, 'third')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // Delete one row
+    exec("DELETE FROM t WHERE id = 2", &mut pager, &mut catalog);
+
+    // Should still find the other 2 via index
+    let rows = get_rows(exec(
+        "SELECT c FROM t WHERE a = 10",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 2, "Should find 2 remaining rows with a=10");
+}
+
+#[test]
+fn test_non_unique_index_update_preserves_others() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (1, 10, 'first')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (2, 10, 'second')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // Update one row to change its indexed value
+    exec("UPDATE t SET a = 20 WHERE id = 1", &mut pager, &mut catalog);
+
+    // Should find only 1 row with a=10 now
+    let rows = get_rows(exec(
+        "SELECT c FROM t WHERE a = 10",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1, "Should find 1 row with a=10");
+    assert_eq!(rows[0][0].1, Value::Varchar("second".to_string()));
+
+    // Should find 1 row with a=20
+    let rows = get_rows(exec(
+        "SELECT c FROM t WHERE a = 20",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1, "Should find 1 row with a=20");
+    assert_eq!(rows[0][0].1, Value::Varchar("first".to_string()));
+}
+
+#[test]
+fn test_create_index_on_existing_data_with_duplicates() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // Insert data BEFORE creating the index
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (1, 10, 'first')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (2, 10, 'second')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, c) VALUES (3, 20, 'third')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // Create index on existing data with duplicate values
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+
+    // Index should find both rows with a=10
+    let rows = get_rows(exec(
+        "SELECT c FROM t WHERE a = 10",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 2, "Should find both rows with a=10 via index");
+}

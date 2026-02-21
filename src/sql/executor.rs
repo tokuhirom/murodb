@@ -2,7 +2,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::btree::key_encoding::{encode_i16, encode_i32, encode_i64, encode_i8};
+use crate::btree::key_encoding::{
+    encode_composite_key, encode_i16, encode_i32, encode_i64, encode_i8,
+};
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::schema::catalog::{SystemCatalog, TableDef};
@@ -120,6 +122,57 @@ fn exec_create_table(
 
     let _table_def = catalog.create_table(pager, &ct.table_name, columns)?;
 
+    // Process table-level constraints
+    for constraint in &ct.constraints {
+        match constraint {
+            TableConstraint::PrimaryKey(cols) => {
+                // Check for conflict with column-level PK
+                let has_col_pk = ct.columns.iter().any(|c| c.is_primary_key);
+                if has_col_pk {
+                    return Err(MuroError::Schema(
+                        "Cannot have both column-level and table-level PRIMARY KEY".into(),
+                    ));
+                }
+                let mut table_def = catalog.get_table(pager, &ct.table_name)?.unwrap();
+                let mut pk_columns = Vec::new();
+                for col_name in cols {
+                    let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+                        MuroError::Schema(format!(
+                            "Column '{}' not found for PRIMARY KEY constraint",
+                            col_name
+                        ))
+                    })?;
+                    table_def.columns[col_idx].is_primary_key = true;
+                    table_def.columns[col_idx].is_nullable = false;
+                    pk_columns.push(col_name.clone());
+                }
+                // Remove the auto-generated _rowid column if it exists
+                if let Some(rowid_idx) = table_def.column_index("_rowid") {
+                    if table_def.columns[rowid_idx].is_hidden {
+                        table_def.columns.remove(rowid_idx);
+                    }
+                }
+                table_def.pk_columns = pk_columns;
+                catalog.update_table(pager, &table_def)?;
+            }
+            TableConstraint::Unique(name, cols) => {
+                let idx_name = name
+                    .clone()
+                    .unwrap_or_else(|| format!("auto_unique_{}_{}", ct.table_name, cols.join("_")));
+                let idx_btree = BTree::create(pager)?;
+                let idx_def = IndexDef {
+                    name: idx_name,
+                    table_name: ct.table_name.clone(),
+                    column_names: cols.clone(),
+                    index_type: IndexType::BTree,
+                    is_unique: true,
+                    btree_root: idx_btree.root_page_id(),
+                };
+                catalog.create_index(pager, idx_def)?;
+            }
+        }
+    }
+
     // Create unique indexes for columns marked UNIQUE (non-PK)
     for col_spec in &ct.columns {
         if col_spec.is_unique && !col_spec.is_primary_key {
@@ -127,7 +180,7 @@ fn exec_create_table(
             let idx_def = IndexDef {
                 name: format!("auto_unique_{}_{}", ct.table_name, col_spec.name),
                 table_name: ct.table_name.clone(),
-                column_name: col_spec.name.clone(),
+                column_names: vec![col_spec.name.clone()],
                 index_type: IndexType::BTree,
                 is_unique: true,
                 btree_root: idx_btree.root_page_id(),
@@ -204,44 +257,43 @@ fn exec_create_index(
         .get_table(pager, &ci.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", ci.table_name)))?;
 
-    // Verify column exists
-    if table_def.column_index(&ci.column_name).is_none() {
-        return Err(MuroError::Schema(format!(
-            "Column '{}' not found in table '{}'",
-            ci.column_name, ci.table_name
-        )));
+    // Verify all columns exist
+    let mut col_indices = Vec::new();
+    for col_name in &ci.column_names {
+        let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+            MuroError::Schema(format!(
+                "Column '{}' not found in table '{}'",
+                col_name, ci.table_name
+            ))
+        })?;
+        col_indices.push(col_idx);
     }
 
-    let idx_btree = BTree::create(pager)?;
+    let is_composite = ci.column_names.len() > 1;
 
-    let col_idx = table_def.column_index(&ci.column_name).ok_or_else(|| {
-        MuroError::Schema(format!(
-            "Column '{}' not found in table '{}'",
-            ci.column_name, ci.table_name
-        ))
-    })?;
-    let col_data_type = table_def.columns[col_idx].data_type;
+    let idx_btree = BTree::create(pager)?;
 
     // If unique, scan existing data for duplicates
     if ci.is_unique {
         let data_btree = BTree::open(table_def.data_btree_root);
-
         let mut seen_keys: Vec<Vec<u8>> = Vec::new();
         data_btree.scan(pager, |_k, v| {
             let row_values =
                 deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
-            if col_idx < row_values.len() {
-                let val = &row_values[col_idx];
-                if !val.is_null() {
-                    let encoded = encode_value(val, &col_data_type);
-                    if seen_keys.contains(&encoded) {
-                        return Err(MuroError::UniqueViolation(format!(
-                            "Duplicate value in column '{}'",
-                            ci.column_name
-                        )));
-                    }
-                    seen_keys.push(encoded);
+            let encoded = encode_index_key_from_row(
+                &row_values,
+                &col_indices,
+                &table_def.columns,
+                is_composite,
+            );
+            if let Some(key) = encoded {
+                if seen_keys.contains(&key) {
+                    return Err(MuroError::UniqueViolation(format!(
+                        "Duplicate value in column(s) '{}'",
+                        ci.column_names.join(", ")
+                    )));
                 }
+                seen_keys.push(key);
             }
             Ok(true)
         })?;
@@ -254,12 +306,10 @@ fn exec_create_index(
     data_btree.scan(pager, |pk_key, v| {
         let row_values =
             deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
-        if col_idx < row_values.len() {
-            let val = &row_values[col_idx];
-            if !val.is_null() {
-                let idx_key = encode_value(val, &col_data_type);
-                entries.push((idx_key, pk_key.to_vec()));
-            }
+        let encoded =
+            encode_index_key_from_row(&row_values, &col_indices, &table_def.columns, is_composite);
+        if let Some(idx_key) = encoded {
+            entries.push((idx_key, pk_key.to_vec()));
         }
         Ok(true)
     })?;
@@ -273,7 +323,7 @@ fn exec_create_index(
     let idx_def = IndexDef {
         name: ci.index_name.clone(),
         table_name: ci.table_name.clone(),
-        column_name: ci.column_name.clone(),
+        column_names: ci.column_names.clone(),
         index_type: IndexType::BTree,
         is_unique: ci.is_unique,
         btree_root: idx_btree_mut.root_page_id(),
@@ -409,31 +459,6 @@ fn exec_alter_add_column(
     // to know how many columns old rows have (short-row tolerance).
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
-    // UNIQUE with non-NULL default on non-empty table: all existing rows would
-    // have the same default value, immediately violating the unique constraint.
-    if col_spec.is_unique && !col_spec.is_primary_key {
-        if let Some(default_expr) = &col_spec.default_value {
-            let has_non_null_default = !matches!(default_expr, crate::sql::ast::Expr::Null);
-            if has_non_null_default {
-                let data_btree = BTree::open(table_def.data_btree_root);
-                let mut row_count = 0u64;
-                data_btree.scan(pager, |_k, _v| {
-                    row_count += 1;
-                    if row_count >= 2 {
-                        return Ok(false); // stop early
-                    }
-                    Ok(true)
-                })?;
-                if row_count >= 2 {
-                    return Err(MuroError::Schema(format!(
-                        "Cannot add UNIQUE column '{}' with non-NULL DEFAULT to a table with {} or more existing rows (all would have the same value)",
-                        col_spec.name, row_count
-                    )));
-                }
-            }
-        }
-    }
-
     // NOT NULL without DEFAULT: error if table has existing rows
     if !col_spec.is_nullable && col_spec.default_value.is_none() {
         let data_btree = BTree::open(table_def.data_btree_root);
@@ -470,16 +495,43 @@ fn exec_alter_add_column(
     table_def.columns.push(col);
     catalog.update_table(pager, &table_def)?;
 
-    // Create unique index if UNIQUE was specified
+    // Create unique index if UNIQUE was specified, and backfill existing rows
     if col_spec.is_unique && !col_spec.is_primary_key {
+        let new_col = table_def.columns.last().unwrap();
+        let default_val = default_value_for_column(new_col);
+
         let idx_btree = BTree::create(pager)?;
+        let mut idx_btree_mut = BTree::open(idx_btree.root_page_id());
+
+        // Backfill: insert default value for all existing rows into the index.
+        // For non-NULL defaults, duplicates are detected during backfill.
+        if !default_val.is_null() {
+            let idx_key = encode_value(&default_val, &new_col.data_type);
+            let data_btree = BTree::open(table_def.data_btree_root);
+            let mut pk_keys: Vec<Vec<u8>> = Vec::new();
+            data_btree.scan(pager, |k, _v| {
+                pk_keys.push(k.to_vec());
+                Ok(true)
+            })?;
+
+            if pk_keys.len() > 1 {
+                return Err(MuroError::Schema(format!(
+                    "Cannot add UNIQUE column '{}' with non-NULL DEFAULT: {} existing rows would all have the same value",
+                    col_spec.name, pk_keys.len()
+                )));
+            }
+            for pk_key in &pk_keys {
+                idx_btree_mut.insert(pager, &idx_key, pk_key)?;
+            }
+        }
+
         let idx_def = IndexDef {
             name: format!("auto_unique_{}_{}", table_def.name, col_spec.name),
             table_name: table_def.name.clone(),
-            column_name: col_spec.name.clone(),
+            column_names: vec![col_spec.name.clone()],
             index_type: IndexType::BTree,
             is_unique: true,
-            btree_root: idx_btree.root_page_id(),
+            btree_root: idx_btree_mut.root_page_id(),
         };
         catalog.create_index(pager, idx_def)?;
     }
@@ -509,7 +561,7 @@ fn exec_alter_drop_column(
     // Check if any index references this column
     let indexes = catalog.get_indexes_for_table(pager, table_name)?;
     for idx in &indexes {
-        if idx.column_name == col_name {
+        if idx.column_names.contains(&col_name.to_string()) {
             return Err(MuroError::Schema(format!(
                 "Cannot drop column '{}': index '{}' depends on it",
                 col_name, idx.name
@@ -648,9 +700,14 @@ fn exec_alter_change_column(
     // Update any indexes referencing the old column name
     let indexes = catalog.get_indexes_for_table(pager, table_name)?;
     for mut idx in indexes {
-        if idx.column_name == old_name {
-            idx.column_name = col_spec.name.clone();
-            // Re-store the index with updated column name
+        let mut changed = false;
+        for cn in &mut idx.column_names {
+            if cn == old_name {
+                *cn = col_spec.name.clone();
+                changed = true;
+            }
+        }
+        if changed {
             let idx_key = format!("index:{}", idx.name);
             let idx_serialized = idx.serialize();
             catalog
@@ -712,7 +769,9 @@ fn reconcile_unique_index(
 ) -> Result<()> {
     let indexes = catalog.get_indexes_for_table(pager, &table_def.name)?;
     let existing_unique = indexes.iter().find(|idx| {
-        idx.is_unique && (idx.column_name == col_spec.name || idx.column_name == old_col_name)
+        idx.is_unique
+            && idx.column_names.len() == 1
+            && (idx.column_names[0] == col_spec.name || idx.column_names[0] == old_col_name)
     });
 
     if col_spec.is_unique && existing_unique.is_none() {
@@ -754,7 +813,7 @@ fn reconcile_unique_index(
         let idx_def = IndexDef {
             name: format!("auto_unique_{}_{}", table_def.name, col_spec.name),
             table_name: table_def.name.clone(),
-            column_name: col_spec.name.clone(),
+            column_names: vec![col_spec.name.clone()],
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: idx_btree_mut.root_page_id(),
@@ -929,18 +988,16 @@ fn exec_insert(
             }
         }
 
-        // Auto-generate for AUTO_INCREMENT columns
-        let pk_idx = table_def
-            .pk_column_index()
-            .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
-
-        if table_def.columns[pk_idx].auto_increment && values[pk_idx].is_null() {
-            table_def.next_rowid += 1;
-            values[pk_idx] = Value::Integer(table_def.next_rowid);
-        } else if table_def.columns[pk_idx].is_hidden && values[pk_idx].is_null() {
-            // Auto-generate _rowid for hidden PK columns
-            table_def.next_rowid += 1;
-            values[pk_idx] = Value::Integer(table_def.next_rowid);
+        // Auto-generate for AUTO_INCREMENT / hidden _rowid columns
+        let pk_indices = table_def.pk_column_indices();
+        if pk_indices.len() == 1 {
+            let pk_idx = pk_indices[0];
+            if (table_def.columns[pk_idx].auto_increment || table_def.columns[pk_idx].is_hidden)
+                && values[pk_idx].is_null()
+            {
+                table_def.next_rowid += 1;
+                values[pk_idx] = Value::Integer(table_def.next_rowid);
+            }
         }
 
         // Validate NOT NULL constraints
@@ -987,59 +1044,24 @@ fn exec_insert(
             }
         }
 
-        let pk_value = &values[pk_idx];
-        let pk_data_type = &table_def.columns[pk_idx].data_type;
-        let pk_key = encode_value(pk_value, pk_data_type);
+        let pk_key = encode_pk_key(&table_def, &values);
 
         // Check PK uniqueness
         if data_btree.search(pager, &pk_key)?.is_some() {
-            return Err(MuroError::UniqueViolation(format!(
-                "Duplicate primary key: {}",
-                pk_value
-            )));
+            return Err(MuroError::UniqueViolation(
+                "Duplicate primary key".to_string(),
+            ));
         }
 
         // Check unique index constraints
-        for idx in &indexes {
-            if idx.is_unique {
-                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!("Column '{}' not found", idx.column_name))
-                })?;
-                let val = &values[col_idx];
-                if !val.is_null() {
-                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
-                    let idx_btree = BTree::open(idx.btree_root);
-                    if idx_btree.search(pager, &idx_key)?.is_some() {
-                        return Err(MuroError::UniqueViolation(format!(
-                            "Duplicate value in unique column '{}'",
-                            idx.column_name
-                        )));
-                    }
-                }
-            }
-        }
+        check_unique_index_constraints(&table_def, &indexes, &values, pager)?;
 
         // Serialize row and insert into data B-tree
         let row_data = serialize_row(&values, &table_def.columns);
         data_btree.insert(pager, &pk_key, &row_data)?;
 
         // Update secondary indexes
-        for idx in &indexes {
-            if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let val = &values[col_idx];
-                if !val.is_null() {
-                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
-                    let mut idx_btree = BTree::open(idx.btree_root);
-                    idx_btree.insert(pager, &idx_key, &pk_key)?;
-                }
-            }
-        }
+        insert_into_secondary_indexes(&table_def, &indexes, &values, &pk_key, pager)?;
 
         // Update table_def if btree root changed or next_rowid changed
         table_def.data_btree_root = data_btree.root_page_id();
@@ -1066,14 +1088,14 @@ fn exec_select(
     }
 
     let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
-    let index_columns: Vec<(String, String)> = indexes
+    let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
-        .map(|idx| (idx.name.clone(), idx.column_name.clone()))
+        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
 
     let plan = plan_select(
         &sel.table_name,
-        table_def.pk_column.as_deref(),
+        &table_def.pk_columns,
         &index_columns,
         &sel.where_clause,
     );
@@ -1085,12 +1107,8 @@ fn exec_select(
         let mut raw_rows: Vec<Vec<Value>> = Vec::new();
 
         match plan {
-            Plan::PkSeek { key_expr, .. } => {
-                let key_val = eval_expr(&key_expr, &|_| None)?;
-                let pk_idx = table_def
-                    .pk_column_index()
-                    .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
-                let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
+            Plan::PkSeek { key_exprs, .. } => {
+                let pk_key = eval_pk_seek_key(&table_def, &key_exprs)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
@@ -1105,23 +1123,17 @@ fn exec_select(
             }
             Plan::IndexSeek {
                 index_name,
-                key_expr,
+                column_names,
+                key_exprs,
                 ..
             } => {
-                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let idx_key = eval_index_seek_key(&table_def, &column_names, &key_exprs)?;
                 let idx = indexes
                     .iter()
                     .find(|i| i.name == index_name)
                     .ok_or_else(|| {
                         MuroError::Execution(format!("Index '{}' not found", index_name))
                     })?;
-                let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
                 let idx_btree = BTree::open(idx.btree_root);
                 if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
                     let data_btree = BTree::open(table_def.data_btree_root);
@@ -1181,12 +1193,8 @@ fn exec_select(
         let mut rows: Vec<Row> = Vec::new();
 
         match plan {
-            Plan::PkSeek { key_expr, .. } => {
-                let key_val = eval_expr(&key_expr, &|_| None)?;
-                let pk_idx = table_def
-                    .pk_column_index()
-                    .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
-                let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
+            Plan::PkSeek { key_exprs, .. } => {
+                let pk_key = eval_pk_seek_key(&table_def, &key_exprs)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
@@ -1202,23 +1210,17 @@ fn exec_select(
             }
             Plan::IndexSeek {
                 index_name,
-                key_expr,
+                column_names,
+                key_exprs,
                 ..
             } => {
-                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let idx_key = eval_index_seek_key(&table_def, &column_names, &key_exprs)?;
                 let idx = indexes
                     .iter()
                     .find(|i| i.name == index_name)
                     .ok_or_else(|| {
                         MuroError::Execution(format!("Index '{}' not found", index_name))
                     })?;
-                let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
                 let idx_btree = BTree::open(idx.btree_root);
                 if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
                     let data_btree = BTree::open(table_def.data_btree_root);
@@ -1694,59 +1696,12 @@ fn exec_update(
             new_values[col_idx] = new_val;
         }
 
-        // Check unique constraints on updated indexed columns
-        for idx in &indexes {
-            if idx.is_unique && idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let old_val = &old_values[col_idx];
-                let new_val = &new_values[col_idx];
-                if old_val != new_val && !new_val.is_null() {
-                    let idx_key = encode_value(new_val, &table_def.columns[col_idx].data_type);
-                    let idx_btree = BTree::open(idx.btree_root);
-                    if idx_btree.search(pager, &idx_key)?.is_some() {
-                        return Err(MuroError::UniqueViolation(format!(
-                            "Duplicate value in unique column '{}'",
-                            idx.column_name
-                        )));
-                    }
-                }
-            }
-        }
+        // Check unique constraints on new values
+        check_unique_index_constraints(&table_def, &indexes, &new_values, pager)?;
 
         // Update secondary indexes: remove old entries, insert new entries
-        for idx in &indexes {
-            if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let old_val = &old_values[col_idx];
-                let new_val = &new_values[col_idx];
-                if old_val != new_val {
-                    // Remove old index entry
-                    if !old_val.is_null() {
-                        let old_idx_key =
-                            encode_value(old_val, &table_def.columns[col_idx].data_type);
-                        let mut idx_btree = BTree::open(idx.btree_root);
-                        idx_btree.delete(pager, &old_idx_key)?;
-                    }
-                    // Insert new index entry
-                    if !new_val.is_null() {
-                        let new_idx_key =
-                            encode_value(new_val, &table_def.columns[col_idx].data_type);
-                        let mut idx_btree = BTree::open(idx.btree_root);
-                        idx_btree.insert(pager, &new_idx_key, &pk_key)?;
-                    }
-                }
-            }
-        }
+        delete_from_secondary_indexes(&table_def, &indexes, &old_values, pager)?;
+        insert_into_secondary_indexes(&table_def, &indexes, &new_values, &pk_key, pager)?;
 
         let row_data = serialize_row(&new_values, &table_def.columns);
         data_btree.insert(pager, &pk_key, &row_data)?;
@@ -1784,24 +1739,7 @@ fn exec_delete(
     let mut count = 0u64;
 
     for (pk_key, values) in &to_delete {
-        // Delete from secondary indexes
-        for idx in &indexes {
-            if idx.index_type == IndexType::BTree {
-                let col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                    MuroError::Schema(format!(
-                        "Index column '{}' not found in table",
-                        idx.column_name
-                    ))
-                })?;
-                let val = &values[col_idx];
-                if !val.is_null() {
-                    let idx_key = encode_value(val, &table_def.columns[col_idx].data_type);
-                    let mut idx_btree = BTree::open(idx.btree_root);
-                    idx_btree.delete(pager, &idx_key)?;
-                }
-            }
-        }
-
+        delete_from_secondary_indexes(&table_def, &indexes, values, pager)?;
         data_btree.delete(pager, pk_key)?;
         count += 1;
     }
@@ -1832,10 +1770,29 @@ fn exec_show_create_table(
     let mut sql = format!("CREATE TABLE {} (\n", table_name);
     let visible_columns: Vec<&ColumnDef> =
         table_def.columns.iter().filter(|c| !c.is_hidden).collect();
+    let is_composite_pk = table_def.is_composite_pk();
 
+    // Collect table-level constraints to append after columns
+    let mut table_constraints = Vec::new();
+    if is_composite_pk {
+        table_constraints.push(format!(
+            "  PRIMARY KEY ({})",
+            table_def.pk_columns.join(", ")
+        ));
+    }
+
+    // Collect composite UNIQUE indexes
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    for idx in &indexes {
+        if idx.is_unique && idx.column_names.len() > 1 {
+            table_constraints.push(format!("  UNIQUE ({})", idx.column_names.join(", ")));
+        }
+    }
+
+    let total_items = visible_columns.len() + table_constraints.len();
     for (i, col) in visible_columns.iter().enumerate() {
         sql.push_str(&format!("  {} {}", col.name, col.data_type));
-        if col.is_primary_key {
+        if col.is_primary_key && !is_composite_pk {
             sql.push_str(" PRIMARY KEY");
         }
         if col.auto_increment {
@@ -1857,7 +1814,14 @@ fn exec_show_create_table(
         if let Some(check) = &col.check_expr {
             sql.push_str(&format!(" CHECK ({})", check));
         }
-        if i < visible_columns.len() - 1 {
+        if i < total_items - 1 {
+            sql.push(',');
+        }
+        sql.push('\n');
+    }
+    for (i, constraint) in table_constraints.iter().enumerate() {
+        sql.push_str(constraint);
+        if i < table_constraints.len() - 1 {
             sql.push(',');
         }
         sql.push('\n');
@@ -2107,6 +2071,208 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Varbinary(b), _) => b.clone(),
         (Value::Null, _) => Vec::new(),
     }
+}
+
+/// Encode an index key from a row's values at the given column indices.
+/// For composite indexes (is_composite=true), uses encode_composite_key.
+/// For single-column indexes, uses encode_value.
+/// Returns None if any value is NULL (NULL values are not indexed for UNIQUE).
+fn encode_index_key_from_row(
+    row_values: &[Value],
+    col_indices: &[usize],
+    columns: &[crate::schema::column::ColumnDef],
+    is_composite: bool,
+) -> Option<Vec<u8>> {
+    if is_composite {
+        // For composite: skip if any value is NULL
+        let mut vals = Vec::new();
+        let mut types = Vec::new();
+        for &ci in col_indices {
+            if ci >= row_values.len() || row_values[ci].is_null() {
+                return None;
+            }
+            vals.push(&row_values[ci]);
+            types.push(&columns[ci].data_type);
+        }
+        Some(encode_composite_key(&vals, &types))
+    } else {
+        let ci = col_indices[0];
+        if ci >= row_values.len() || row_values[ci].is_null() {
+            return None;
+        }
+        Some(encode_value(&row_values[ci], &columns[ci].data_type))
+    }
+}
+
+/// Evaluate PK seek key from planner key expressions.
+fn eval_pk_seek_key(table_def: &TableDef, key_exprs: &[(String, Expr)]) -> Result<Vec<u8>> {
+    if table_def.is_composite_pk() {
+        let mut vals = Vec::new();
+        let mut types = Vec::new();
+        for (col_name, expr) in key_exprs {
+            let val = eval_expr(expr, &|_| None)?;
+            let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+                MuroError::Execution(format!("PK column '{}' not found", col_name))
+            })?;
+            types.push(table_def.columns[col_idx].data_type);
+            vals.push(val);
+        }
+        let val_refs: Vec<&Value> = vals.iter().collect();
+        let type_refs: Vec<&DataType> = types.iter().collect();
+        Ok(encode_composite_key(&val_refs, &type_refs))
+    } else {
+        let (col_name, expr) = &key_exprs[0];
+        let key_val = eval_expr(expr, &|_| None)?;
+        let col_idx = table_def
+            .column_index(col_name)
+            .ok_or_else(|| MuroError::Execution(format!("PK column '{}' not found", col_name)))?;
+        Ok(encode_value(
+            &key_val,
+            &table_def.columns[col_idx].data_type,
+        ))
+    }
+}
+
+/// Evaluate index seek key from planner key expressions.
+fn eval_index_seek_key(
+    table_def: &TableDef,
+    column_names: &[String],
+    key_exprs: &[Expr],
+) -> Result<Vec<u8>> {
+    if column_names.len() > 1 {
+        let mut vals = Vec::new();
+        let mut types = Vec::new();
+        for (col_name, expr) in column_names.iter().zip(key_exprs.iter()) {
+            let val = eval_expr(expr, &|_| None)?;
+            let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+                MuroError::Execution(format!("Index column '{}' not found", col_name))
+            })?;
+            types.push(table_def.columns[col_idx].data_type);
+            vals.push(val);
+        }
+        let val_refs: Vec<&Value> = vals.iter().collect();
+        let type_refs: Vec<&DataType> = types.iter().collect();
+        Ok(encode_composite_key(&val_refs, &type_refs))
+    } else {
+        let key_val = eval_expr(&key_exprs[0], &|_| None)?;
+        let col_idx = table_def.column_index(&column_names[0]).ok_or_else(|| {
+            MuroError::Execution(format!("Index column '{}' not found", column_names[0]))
+        })?;
+        Ok(encode_value(
+            &key_val,
+            &table_def.columns[col_idx].data_type,
+        ))
+    }
+}
+
+/// Encode the primary key for a row.
+fn encode_pk_key(table_def: &TableDef, values: &[Value]) -> Vec<u8> {
+    if table_def.is_composite_pk() {
+        let pk_indices = table_def.pk_column_indices();
+        let pk_vals: Vec<&Value> = pk_indices.iter().map(|&i| &values[i]).collect();
+        let pk_types: Vec<&DataType> = pk_indices
+            .iter()
+            .map(|&i| &table_def.columns[i].data_type)
+            .collect();
+        encode_composite_key(&pk_vals, &pk_types)
+    } else if let Some(pk_idx) = table_def.pk_column_index() {
+        encode_value(&values[pk_idx], &table_def.columns[pk_idx].data_type)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Check unique index constraints for a set of values.
+fn check_unique_index_constraints(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if idx_btree.search(pager, &idx_key)?.is_some() {
+                    return Err(MuroError::UniqueViolation(format!(
+                        "Duplicate value in unique column(s) '{}'",
+                        idx.column_names.join(", ")
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Insert values into secondary indexes.
+fn insert_into_secondary_indexes(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    pk_key: &[u8],
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.index_type == IndexType::BTree {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let mut idx_btree = BTree::open(idx.btree_root);
+                idx_btree.insert(pager, &idx_key, pk_key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete values from secondary indexes.
+fn delete_from_secondary_indexes(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.index_type == IndexType::BTree {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let mut idx_btree = BTree::open(idx.btree_root);
+                idx_btree.delete(pager, &idx_key)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate that a value fits within the constraints of the data type.

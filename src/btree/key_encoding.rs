@@ -57,6 +57,67 @@ pub fn compare_keys(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     a.cmp(b)
 }
 
+/// Encode a composite key from multiple values into a single byte sequence
+/// that preserves sort order under lexicographic comparison.
+///
+/// Each column is encoded as:
+/// - NULL: `0x00` (1 byte) — NULL sorts smallest
+/// - Non-NULL: `0x01` + encoded value
+///   - Fixed-length integers: sign-bit-flipped big-endian (existing encode_iN)
+///   - Variable-length (VARCHAR/TEXT/VARBINARY): byte-stuffing
+///     (`0x00` → `0x00 0x01`, terminated by `0x00 0x00`)
+pub fn encode_composite_key(
+    values: &[&crate::types::Value],
+    data_types: &[&crate::types::DataType],
+) -> Vec<u8> {
+    use crate::types::{DataType, Value};
+
+    let mut buf = Vec::new();
+    for (val, dt) in values.iter().zip(data_types.iter()) {
+        match val {
+            Value::Null => {
+                buf.push(0x00);
+            }
+            Value::Integer(n) => {
+                buf.push(0x01);
+                match dt {
+                    DataType::TinyInt => buf.extend_from_slice(&encode_i8(*n as i8)),
+                    DataType::SmallInt => buf.extend_from_slice(&encode_i16(*n as i16)),
+                    DataType::Int => buf.extend_from_slice(&encode_i32(*n as i32)),
+                    DataType::BigInt => buf.extend_from_slice(&encode_i64(*n)),
+                    _ => buf.extend_from_slice(&encode_i64(*n)),
+                }
+            }
+            Value::Varchar(s) => {
+                buf.push(0x01);
+                encode_byte_stuffed(&mut buf, s.as_bytes());
+            }
+            Value::Varbinary(b) => {
+                buf.push(0x01);
+                encode_byte_stuffed(&mut buf, b);
+            }
+        }
+    }
+    buf
+}
+
+/// Byte-stuffing encoding for variable-length data.
+/// Each `0x00` byte in the input is replaced with `0x00 0x01`.
+/// The sequence is terminated with `0x00 0x00`.
+/// This preserves lexicographic order.
+fn encode_byte_stuffed(buf: &mut Vec<u8>, data: &[u8]) {
+    for &b in data {
+        if b == 0x00 {
+            buf.push(0x00);
+            buf.push(0x01);
+        } else {
+            buf.push(b);
+        }
+    }
+    buf.push(0x00);
+    buf.push(0x00);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +198,66 @@ mod tests {
         assert!(compare_keys(b"abc", b"abd") == std::cmp::Ordering::Less);
         assert!(compare_keys(b"abc", b"abc") == std::cmp::Ordering::Equal);
         assert!(compare_keys(b"b", b"a") == std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn test_composite_key_order_int_string() {
+        use crate::types::{DataType, Value};
+
+        let v1a = Value::Integer(1);
+        let v1b = Value::Varchar("abc".to_string());
+        let v2a = Value::Integer(1);
+        let v2b = Value::Varchar("abd".to_string());
+
+        let dt = [&DataType::Int, &DataType::Varchar(None)];
+
+        let k1 = encode_composite_key(&[&v1a, &v1b], &dt);
+        let k2 = encode_composite_key(&[&v2a, &v2b], &dt);
+        assert!(k1 < k2, "(1, 'abc') should be < (1, 'abd')");
+    }
+
+    #[test]
+    fn test_composite_key_null_less_than_non_null() {
+        use crate::types::{DataType, Value};
+
+        let v1a = Value::Integer(1);
+        let v1b = Value::Null;
+        let v2a = Value::Integer(1);
+        let v2b = Value::Varchar("a".to_string());
+
+        let dt = [&DataType::Int, &DataType::Varchar(None)];
+
+        let k1 = encode_composite_key(&[&v1a, &v1b], &dt);
+        let k2 = encode_composite_key(&[&v2a, &v2b], &dt);
+        assert!(k1 < k2, "(1, NULL) should be < (1, 'a')");
+    }
+
+    #[test]
+    fn test_composite_key_with_nul_byte_in_varchar() {
+        use crate::types::{DataType, Value};
+
+        let v1 = Value::Varchar("a\0b".to_string());
+        let v2 = Value::Varchar("a\0c".to_string());
+
+        let dt = [&DataType::Varchar(None)];
+
+        let k1 = encode_composite_key(&[&v1], &dt);
+        let k2 = encode_composite_key(&[&v2], &dt);
+        assert!(k1 < k2, "'a\\0b' should be < 'a\\0c'");
+    }
+
+    #[test]
+    fn test_composite_key_equality() {
+        use crate::types::{DataType, Value};
+
+        let dt = [&DataType::Int, &DataType::Varchar(None)];
+
+        let v1 = [&Value::Integer(42), &Value::Varchar("hello".to_string())];
+        let v2 = [&Value::Integer(42), &Value::Varchar("hello".to_string())];
+
+        assert_eq!(
+            encode_composite_key(&v1, &dt),
+            encode_composite_key(&v2, &dt)
+        );
     }
 }

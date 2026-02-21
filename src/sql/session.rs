@@ -35,6 +35,7 @@ pub struct Session {
     active_tx: Option<Transaction>,
     next_txid: TxId,
     checkpoint_stats: CheckpointStats,
+    poisoned: Option<String>,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
 }
@@ -49,13 +50,22 @@ impl Session {
             active_tx: None,
             next_txid,
             checkpoint_stats: CheckpointStats::default(),
+            poisoned: None,
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
         }
     }
 
+    fn check_poisoned(&self) -> Result<()> {
+        if let Some(ref msg) = self.poisoned {
+            return Err(MuroError::SessionPoisoned(msg.clone()));
+        }
+        Ok(())
+    }
+
     /// Execute a SQL string, handling BEGIN/COMMIT/ROLLBACK at the session level.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
+        self.check_poisoned()?;
         let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
 
         match &stmt {
@@ -92,7 +102,14 @@ impl Session {
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
         let catalog_root = self.catalog.root_page_id();
         self.pager.set_next_txid(self.next_txid);
-        tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
+        match tx.commit(&mut self.pager, &mut self.wal, catalog_root) {
+            Err(e @ MuroError::CommitInDoubt(_)) => {
+                self.poisoned = Some(e.to_string());
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
         self.post_commit_checkpoint();
         Ok(ExecResult::Ok)
     }
@@ -129,7 +146,14 @@ impl Session {
                 // Commit via WAL (catalog_root included in WAL MetaUpdate)
                 let catalog_root = self.catalog.root_page_id();
                 self.pager.set_next_txid(self.next_txid);
-                tx.commit(&mut self.pager, &mut self.wal, catalog_root)?;
+                match tx.commit(&mut self.pager, &mut self.wal, catalog_root) {
+                    Err(e @ MuroError::CommitInDoubt(_)) => {
+                        self.poisoned = Some(e.to_string());
+                        return Err(e);
+                    }
+                    Err(e) => return Err(e),
+                    Ok(_) => {}
+                }
                 self.post_commit_checkpoint();
                 Ok(exec_result)
             }

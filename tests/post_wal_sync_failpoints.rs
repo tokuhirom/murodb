@@ -7,6 +7,7 @@
 /// committed transaction and converge to the correct state.
 use murodb::crypto::aead::MasterKey;
 use murodb::error::MuroError;
+use murodb::sql::executor::ExecResult;
 use murodb::storage::pager::Pager;
 use murodb::tx::transaction::Transaction;
 use murodb::wal::recovery::recover;
@@ -298,5 +299,114 @@ fn test_flush_meta_failure_prior_tx_survives() {
         page0.cell(0),
         Some(b"baseline".as_slice()),
         "prior committed data must survive flush_meta failure + recovery"
+    );
+}
+
+// ── Session poison tests ──
+
+#[test]
+fn test_session_poisoned_after_commit_in_doubt() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+
+    // Get mutable access to pager via session to inject failure
+    let mut session = db.into_session();
+
+    // Inject write_page failure so next commit triggers CommitInDoubt
+    session
+        .pager_mut()
+        .set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
+
+    let result = session.execute("INSERT INTO t VALUES (1, 'alice')");
+    assert!(
+        matches!(&result, Err(MuroError::CommitInDoubt(_))),
+        "expected CommitInDoubt, got: {:?}",
+        result
+    );
+
+    // Subsequent operations must fail with SessionPoisoned
+    let result = session.execute("SELECT * FROM t");
+    assert!(
+        matches!(&result, Err(MuroError::SessionPoisoned(_))),
+        "expected SessionPoisoned, got: {:?}",
+        result
+    );
+
+    // Even DDL must be rejected
+    let result = session.execute("CREATE TABLE t2 (id BIGINT PRIMARY KEY)");
+    assert!(
+        matches!(&result, Err(MuroError::SessionPoisoned(_))),
+        "expected SessionPoisoned for DDL, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_reopen_after_commit_in_doubt_recovers_data() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+
+    // Inject failure for the next commit
+    let mut session = db.into_session();
+    session
+        .pager_mut()
+        .set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
+
+    let result = session.execute("INSERT INTO t VALUES (2, 'bob')");
+    assert!(matches!(&result, Err(MuroError::CommitInDoubt(_))));
+
+    // Drop session to simulate close
+    drop(session);
+
+    // Reopen — WAL recovery should replay the committed transaction
+    let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+    let rows = match db.execute("SELECT * FROM t").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        other => panic!("expected Rows, got: {:?}", other),
+    };
+    assert_eq!(rows.len(), 2, "both rows should be recovered");
+}
+
+#[test]
+fn test_explicit_tx_commit_in_doubt_poisons_session() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+
+    let mut session = db.into_session();
+
+    session.execute("BEGIN").unwrap();
+    session.execute("INSERT INTO t VALUES (1)").unwrap();
+
+    // Inject failure before COMMIT
+    session
+        .pager_mut()
+        .set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
+
+    let result = session.execute("COMMIT");
+    assert!(
+        matches!(&result, Err(MuroError::CommitInDoubt(_))),
+        "expected CommitInDoubt, got: {:?}",
+        result
+    );
+
+    // Session must be poisoned
+    let result = session.execute("SELECT * FROM t");
+    assert!(
+        matches!(&result, Err(MuroError::SessionPoisoned(_))),
+        "expected SessionPoisoned, got: {:?}",
+        result
     );
 }

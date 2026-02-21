@@ -81,6 +81,10 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 3. `README.md` の SQL Surface セクションと Roadmap も同期更新
 4. 内部構造に影響する変更 (WAL、ストレージ、B-tree等) は `docs-site/src/internals/` に追記・新規作成
 
+## Git Workflow
+
+main ブランチに直接コミットしないこと。必ずフィーチャーブランチを作成し、PR 経由でマージする。
+
 ## Pre-commit Review Rule
 
 コミット前に必ず、DB/SQL専門家のsubagent (subagent_type=general-purpose) を起動してレビューを実施すること。

@@ -1,0 +1,45 @@
+name: Nightly Stress Test
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of crash/kill iterations'
+        default: '200'
+      seed:
+        description: 'Base PRNG seed (empty for random)'
+        default: ''
+
+jobs:
+  crash-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CRASH_STRESS_ARTIFACT_DIR: /tmp/crash_stress_artifacts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build crash stress test
+        run: cargo test --test crash_stress --no-run
+
+      - name: Run crash stress test
+        run: |
+          ARGS="--harness --iterations ${{ github.event.inputs.iterations || '200' }}"
+          if [ -n "${{ github.event.inputs.seed }}" ]; then
+            ARGS="$ARGS --seed ${{ github.event.inputs.seed }}"
+          fi
+          cargo test --test crash_stress -- $ARGS
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-stress-artifacts
+          path: /tmp/crash_stress_artifacts/
+          retention-days: 30

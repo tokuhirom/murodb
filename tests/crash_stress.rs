@@ -160,16 +160,25 @@ fn parse_journal(journal_path: &Path) -> HashMap<i64, String> {
 
         match parts[0] {
             "INSERT" if parts.len() >= 3 => {
-                let id: i64 = parts[1].parse().unwrap();
+                let id: i64 = match parts[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => continue, // truncated by kill
+                };
                 let name = parts[2].to_string();
                 state.insert(id, name);
             }
             "DELETE" if parts.len() >= 2 => {
-                let id: i64 = parts[1].parse().unwrap();
+                let id: i64 = match parts[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 state.remove(&id);
             }
             "UPDATE" if parts.len() >= 3 => {
-                let id: i64 = parts[1].parse().unwrap();
+                let id: i64 = match parts[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 let name = parts[2].to_string();
                 // UPDATE only affects existing rows
                 if state.contains_key(&id) {
@@ -288,6 +297,35 @@ fn kill_delay_ms(rng: &mut Rng, iteration: u64) -> u64 {
     }
 }
 
+// ── Failure artifact saving ──
+
+fn save_failure_artifacts(
+    artifact_dir: &Path,
+    db_path: &Path,
+    journal_path: &Path,
+    iteration: u64,
+    seed: u64,
+) {
+    let _ = fs::create_dir_all(artifact_dir);
+    let _ = fs::copy(db_path, artifact_dir.join("stress.db"));
+    // Also copy the WAL file if present
+    let wal_path = db_path.with_extension("wal");
+    if wal_path.exists() {
+        let _ = fs::copy(&wal_path, artifact_dir.join("stress.wal"));
+    }
+    if journal_path.exists() {
+        let _ = fs::copy(journal_path, artifact_dir.join("journal.log"));
+    }
+    let repro = format!(
+        "cargo test --test crash_stress -- --harness --iterations {} --seed {}\nFailed at iteration {}",
+        iteration + 1,
+        seed,
+        iteration
+    );
+    let _ = fs::write(artifact_dir.join("repro.txt"), repro);
+    eprintln!("  Failure artifacts saved to: {}", artifact_dir.display());
+}
+
 // ── Harness mode ──
 
 fn run_harness(iterations: u64, base_seed: u64) {
@@ -298,6 +336,12 @@ fn run_harness(iterations: u64, base_seed: u64) {
     eprintln!(
         "Reproduce: cargo test --test crash_stress -- --harness --iterations {} --seed {}",
         iterations, base_seed
+    );
+
+    // Artifact directory for CI upload on failure
+    let artifact_dir = PathBuf::from(
+        env::var("CRASH_STRESS_ARTIFACT_DIR")
+            .unwrap_or_else(|_| "/tmp/crash_stress_artifacts".to_string()),
     );
 
     let dir = tempfile::TempDir::new().expect("create tempdir");
@@ -346,8 +390,14 @@ fn run_harness(iterations: u64, base_seed: u64) {
         // Parse journal and update committed state model
         let committed = parse_journal(&journal_path);
 
-        // Verify invariants
-        verify_invariants(&db_path, &master_key, &committed, i, base_seed);
+        // Verify invariants — on failure, save artifacts for CI
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_invariants(&db_path, &master_key, &committed, i, base_seed);
+        }));
+        if let Err(payload) = result {
+            save_failure_artifacts(&artifact_dir, &db_path, &journal_path, i, base_seed);
+            std::panic::resume_unwind(payload);
+        }
 
         if (i + 1) % 10 == 0 || i == iterations - 1 {
             eprintln!(

@@ -16,6 +16,8 @@ jobs:
   crash-stress:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CRASH_STRESS_ARTIFACT_DIR: /tmp/crash_stress_artifacts
     steps:
       - uses: actions/checkout@v4
 
@@ -34,10 +36,10 @@ jobs:
           fi
           cargo test --test crash_stress -- $ARGS
 
-      - name: Upload logs on failure
+      - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: crash-stress-logs
-          path: /tmp/crash_stress_*
+          name: crash-stress-artifacts
+          path: /tmp/crash_stress_artifacts/
           retention-days: 30

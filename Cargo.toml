@@ -6,6 +6,10 @@ license = "MIT"
 authors = ["Tokuhiro Matsuno"]
 description = "Encrypted embedded SQL database with B-Tree + FTS (Bigram)"
 
+[[bin]]
+name = "murodb-wal-inspect"
+path = "src/bin/murodb_wal_inspect.rs"
+
 [dependencies]
 nom = "7"
 aes-gcm-siv = "0.11"

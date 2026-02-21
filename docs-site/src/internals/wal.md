@@ -85,7 +85,7 @@ See [Recovery](../user-guide/recovery.md) for user-facing documentation.
 
 ### Inspect-WAL JSON Contract
 
-`--inspect-wal --format json` returns machine-readable diagnostics with a stable schema contract:
+`murodb-wal-inspect --format json` returns machine-readable diagnostics with a stable schema contract:
 
 - `schema_version=1` for the current contract
 - `status`: `ok` / `warning` / `fatal`

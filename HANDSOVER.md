@@ -8,7 +8,7 @@
 ## Current Focus
 - WAL リカバリの堅牢性強化
 - checkpoint 失敗時の耐性と可観測性強化
-- `inspect-wal --format json` の機械可読契約の安定化
+- `murodb-wal-inspect --format json` の機械可読契約の安定化
 
 ## Implementation Plan (Next)
 1. Checkpoint reliability hardening
@@ -40,7 +40,7 @@
 - CI（build/test/clippy/fmt）緑
 - 主要 failure-path がテストで固定されている
 - `docs/crash-resilience.md` が実装と一致
-- `inspect-wal` JSON 契約が機械利用で安定
+- `murodb-wal-inspect` JSON 契約が機械利用で安定
 
 ## Working Agreement
 - 小粒で止めず、関連変更をまとめた中〜大粒コミットを継続

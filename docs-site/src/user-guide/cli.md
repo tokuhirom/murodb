@@ -14,8 +14,6 @@ murodb <database-file> [options]
 | `--create` | Create a new database |
 | `--password <PW>` | Password (prompts if omitted) |
 | `--recovery-mode <strict\|permissive>` | WAL recovery policy for open |
-| `--inspect-wal <PATH>` | Analyze WAL consistency and exit |
-| `--format <text\|json>` | Output format (mainly for `--inspect-wal`) |
 
 ## Examples
 
@@ -35,30 +33,14 @@ murodb mydb.db
 # Open with permissive recovery mode
 murodb mydb.db --recovery-mode permissive
 
-# Inspect WAL consistency
-murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive
-
-# Inspect as JSON
-murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
 ```
 
-## `--inspect-wal` exit codes
+## WAL inspection
 
-| Exit Code | Meaning |
-|---|---|
-| `0` | No malformed transactions detected |
-| `10` | Malformed transactions detected (inspection succeeded) |
-| `20` | Fatal error (decrypt/IO/strict failure, etc.) |
+WAL inspection is handled by a dedicated command so the query CLI stays simple:
 
-## JSON output
+```bash
+murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive
+```
 
-When using `--format json`, the output includes stable fields:
-
-- `schema_version` - Schema version for the JSON format
-- `mode` - Recovery mode used
-- `wal_path` - Path to the WAL file
-- `generated_at` - Timestamp of the inspection
-- `status` - `ok`, `warning`, or `fatal`
-- `exit_code` - Exit code
-- `skipped[].code` - Machine-readable classification of skipped transactions
-- `fatal_error` / `fatal_error_code` - Present on fatal failures
+See [WAL Inspection](wal-inspect.md) for exit codes and JSON schema.

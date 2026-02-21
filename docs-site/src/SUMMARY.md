@@ -10,6 +10,7 @@
 # User Guide
 
 - [CLI Options](user-guide/cli.md)
+- [WAL Inspection](user-guide/wal-inspect.md)
 - [SQL Reference](user-guide/sql-reference.md)
 - [Full-Text Search](user-guide/full-text-search.md)
 - [Recovery](user-guide/recovery.md)

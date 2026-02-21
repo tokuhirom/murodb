@@ -83,6 +83,16 @@ Database::open(path, master_key)
 
 See [Recovery](../user-guide/recovery.md) for user-facing documentation.
 
+### Inspect-WAL JSON Contract
+
+`--inspect-wal --format json` returns machine-readable diagnostics with a stable schema contract:
+
+- `schema_version=1` for the current contract
+- `status`: `ok` / `warning` / `fatal`
+- `exit_code`: mirrors CLI exit code semantics (`0`, `10`, `20`)
+- `skipped[].code`: stable machine-readable skip classification
+- On fatal failures, `fatal_error` and `fatal_error_code` are included
+
 ## Secondary Index Consistency
 
 All index updates happen within the same transaction as the data update:
@@ -117,6 +127,8 @@ All index updates happen within the same transaction as the data update:
 ### WAL file size
 
 After successful commits and explicit `ROLLBACK`, the Session auto-checkpoints the WAL (truncates to empty). Checkpoint is best-effort and does not affect commit success.
+
+When checkpoint truncate fails, MuroDB emits a warning with `wal_path` and `wal_size_bytes` so operators can detect and triage WAL growth.
 
 ## TLA+ Correspondence
 

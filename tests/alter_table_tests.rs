@@ -1,4 +1,5 @@
 /// Integration tests for Phase 4: ALTER TABLE & RENAME TABLE.
+use murodb::btree::ops::BTree;
 use murodb::crypto::aead::MasterKey;
 use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult, Row};
@@ -716,4 +717,245 @@ fn test_modify_column_to_not_null_without_nulls_ok() {
         &mut catalog,
         "ALTER TABLE t MODIFY COLUMN name VARCHAR NOT NULL",
     );
+}
+
+/// Downgrade a table to v0 format: rewrite all rows without the u16 column-count
+/// prefix and set row_format_version=0 in the catalog. This simulates a table
+/// created by an older version of murodb.
+fn downgrade_table_to_v0(pager: &mut Pager, catalog: &mut SystemCatalog, table_name: &str) {
+    let mut table_def = catalog.get_table(pager, table_name).unwrap().unwrap();
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    data_btree
+        .scan(pager, |k, v| {
+            // Strip the u16 prefix (first 2 bytes) to get v0 format
+            entries.push((k.to_vec(), v[2..].to_vec()));
+            Ok(true)
+        })
+        .unwrap();
+
+    let mut data_btree = BTree::open(table_def.data_btree_root);
+    for (key, v0_data) in entries {
+        data_btree.insert(pager, &key, &v0_data).unwrap();
+    }
+
+    table_def.row_format_version = 0;
+    catalog.update_table(pager, &table_def).unwrap();
+}
+
+// --- Regression tests for v0/v1 row format and UNIQUE+DEFAULT ---
+
+#[test]
+fn test_legacy_v0_table_insert_then_read() {
+    // Simulate: a table created before row_format_version was introduced
+    // would have row_format_version=0. Inserting new rows should upgrade
+    // the table to v1 and all rows (old and new) should remain readable.
+    let (mut pager, mut catalog, _dir) = setup();
+
+    // Create table (gets v1 by default in new code)
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Downgrade to v0 to simulate a legacy table
+    downgrade_table_to_v0(&mut pager, &mut catalog, "t");
+
+    // Now insert a new row — this should trigger ensure_row_format_v1
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'bob')",
+    );
+
+    // Both rows should be readable
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alice".into())));
+    assert_eq!(rows[1].get("id"), Some(&Value::Integer(2)));
+    assert_eq!(rows[1].get("name"), Some(&Value::Varchar("bob".into())));
+
+    // Verify table is now v1
+    let table_def = catalog.get_table(&mut pager, "t").unwrap().unwrap();
+    assert_eq!(table_def.row_format_version, 1);
+}
+
+#[test]
+fn test_legacy_v0_table_update_then_read() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Downgrade to v0
+    downgrade_table_to_v0(&mut pager, &mut catalog, "t");
+
+    // Update should trigger ensure_row_format_v1
+    exec(
+        &mut pager,
+        &mut catalog,
+        "UPDATE t SET name = 'alicia' WHERE id = 1",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alicia".into())));
+}
+
+#[test]
+fn test_legacy_v0_table_add_column_upgrades() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Downgrade to v0
+    downgrade_table_to_v0(&mut pager, &mut catalog, "t");
+
+    // ADD COLUMN should upgrade to v1
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN age INT DEFAULT 0",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name, age FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alice".into())));
+    assert_eq!(rows[0].get("age"), Some(&Value::Integer(0)));
+}
+
+#[test]
+fn test_add_column_unique_with_nonnull_default_rejects_nonempty() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'bob')",
+    );
+
+    // UNIQUE with non-NULL default on 2+ rows should fail
+    let result = execute(
+        "ALTER TABLE t ADD COLUMN code VARCHAR UNIQUE DEFAULT 'X'",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("UNIQUE"),
+        "Error should mention UNIQUE: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_add_column_unique_with_null_default_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'bob')",
+    );
+
+    // UNIQUE with NULL default is fine (NULLs don't violate UNIQUE)
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN code VARCHAR UNIQUE",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name, code FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("code"), Some(&Value::Null));
+    assert_eq!(rows[1].get("code"), Some(&Value::Null));
+}
+
+#[test]
+fn test_add_column_unique_with_nonnull_default_single_row_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Only 1 row — no duplicate, so UNIQUE + default is fine
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN code VARCHAR UNIQUE DEFAULT 'X'",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name, code FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("code"), Some(&Value::Varchar("X".into())));
 }

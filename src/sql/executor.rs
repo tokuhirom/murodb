@@ -405,6 +405,35 @@ fn exec_alter_add_column(
         ));
     }
 
+    // Upgrade v0 tables: ADD COLUMN relies on v1 format's stored column count
+    // to know how many columns old rows have (short-row tolerance).
+    ensure_row_format_v1(&mut table_def, pager, catalog)?;
+
+    // UNIQUE with non-NULL default on non-empty table: all existing rows would
+    // have the same default value, immediately violating the unique constraint.
+    if col_spec.is_unique && !col_spec.is_primary_key {
+        if let Some(default_expr) = &col_spec.default_value {
+            let has_non_null_default = !matches!(default_expr, crate::sql::ast::Expr::Null);
+            if has_non_null_default {
+                let data_btree = BTree::open(table_def.data_btree_root);
+                let mut row_count = 0u64;
+                data_btree.scan(pager, |_k, _v| {
+                    row_count += 1;
+                    if row_count >= 2 {
+                        return Ok(false); // stop early
+                    }
+                    Ok(true)
+                })?;
+                if row_count >= 2 {
+                    return Err(MuroError::Schema(format!(
+                        "Cannot add UNIQUE column '{}' with non-NULL DEFAULT to a table with {} or more existing rows (all would have the same value)",
+                        col_spec.name, row_count
+                    )));
+                }
+            }
+        }
+    }
+
     // NOT NULL without DEFAULT: error if table has existing rows
     if !col_spec.is_nullable && col_spec.default_value.is_none() {
         let data_btree = BTree::open(table_def.data_btree_root);
@@ -518,6 +547,7 @@ fn exec_alter_drop_column(
     }
 
     table_def.data_btree_root = new_btree.root_page_id();
+    table_def.row_format_version = 1; // rewritten rows are v1 format
     catalog.update_table(pager, &table_def)?;
 
     Ok(ExecResult::Ok)
@@ -577,6 +607,7 @@ fn exec_alter_modify_column(
         }
 
         table_def.data_btree_root = new_btree.root_page_id();
+        table_def.row_format_version = 1; // rewritten rows are v1 format
     } else {
         // Metadata-only change
         update_column_def(&mut table_def.columns[col_idx], col_spec);
@@ -657,6 +688,7 @@ fn exec_alter_change_column(
         }
 
         table_def.data_btree_root = new_btree.root_page_id();
+        table_def.row_format_version = 1; // rewritten rows are v1 format
     } else {
         update_column_def(&mut table_def.columns[col_idx], col_spec);
     }
@@ -830,6 +862,40 @@ fn exec_rename_table(
     Ok(ExecResult::Ok)
 }
 
+/// Upgrade a table from row_format_version 0 to 1 and persist to catalog.
+/// This must be called before any write to a v0 table, because serialize_row
+/// always writes v1 format (with u16 column-count prefix).
+fn ensure_row_format_v1(
+    table_def: &mut TableDef,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<()> {
+    if table_def.row_format_version >= 1 {
+        return Ok(());
+    }
+
+    // Rewrite all existing rows from v0 format to v1 format
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+    data_btree.scan(pager, |k, v| {
+        let values = deserialize_row_versioned(v, &table_def.columns, 0)?;
+        entries.push((k.to_vec(), values));
+        Ok(true)
+    })?;
+
+    if !entries.is_empty() {
+        let mut data_btree = BTree::open(table_def.data_btree_root);
+        for (pk_key, values) in &entries {
+            let row_data = serialize_row(values, &table_def.columns);
+            data_btree.insert(pager, pk_key, &row_data)?;
+        }
+    }
+
+    table_def.row_format_version = 1;
+    catalog.update_table(pager, table_def)?;
+    Ok(())
+}
+
 fn exec_insert(
     ins: &Insert,
     pager: &mut impl PageStore,
@@ -838,6 +904,9 @@ fn exec_insert(
     let mut table_def = catalog
         .get_table(pager, &ins.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", ins.table_name)))?;
+
+    // Upgrade v0 tables before writing v1-format rows
+    ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
     let indexes = catalog.get_indexes_for_table(pager, &ins.table_name)?;
 
@@ -1584,9 +1653,12 @@ fn exec_update(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let table_def = catalog
+    let mut table_def = catalog
         .get_table(pager, &upd.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", upd.table_name)))?;
+
+    // Upgrade v0 tables before writing v1-format rows
+    ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
     let indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
 

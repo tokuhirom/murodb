@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Tokuhiro Matsuno"]
-description = "Encrypted embedded SQL database with B-Tree + FTS (Bigram)"
+description = "Encrypted embedded SQL database with B+Tree (no leaf links) + FTS (Bigram)"
 
 [[bin]]
 name = "murodb-wal-inspect"

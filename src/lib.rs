@@ -1,4 +1,4 @@
-//! MuroDB: Encrypted Embedded SQL Database with B-Tree + FTS (Bigram)
+//! MuroDB: Encrypted Embedded SQL Database with B+Tree (no leaf links) + FTS (Bigram)
 //!
 //! A single-file encrypted database with:
 //! - AES-256-GCM-SIV transparent encryption

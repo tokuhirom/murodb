@@ -2028,16 +2028,16 @@ fn execute_aggregation(
         // Feed rows into accumulators
         for raw_row in group_rows {
             for (i, agg_info) in aggs.iter().enumerate() {
-                if agg_info.arg.is_none() {
-                    // COUNT(*)
-                    accumulators[i].feed_count_star();
-                } else {
-                    let val = eval_expr(agg_info.arg.as_ref().unwrap(), &|name| {
+                if let Some(arg_expr) = &agg_info.arg {
+                    let val = eval_expr(arg_expr, &|name| {
                         table_def
                             .column_index(name)
                             .and_then(|j| raw_row.get(j).cloned())
                     })?;
                     accumulators[i].feed(&val);
+                } else {
+                    // COUNT(*)
+                    accumulators[i].feed_count_star();
                 }
             }
         }
@@ -2173,11 +2173,11 @@ fn execute_aggregation_join(
 
         for jrow in group_rows {
             for (i, agg_info) in aggs.iter().enumerate() {
-                if agg_info.arg.is_none() {
-                    accumulators[i].feed_count_star();
-                } else {
-                    let val = eval_join_expr(agg_info.arg.as_ref().unwrap(), jrow)?;
+                if let Some(arg_expr) = &agg_info.arg {
+                    let val = eval_join_expr(arg_expr, jrow)?;
                     accumulators[i].feed(&val);
+                } else {
+                    accumulators[i].feed_count_star();
                 }
             }
         }

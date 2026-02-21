@@ -164,6 +164,14 @@ impl WalWriter {
     ///
     /// Safe to call after a successful commit because data pages and metadata
     /// have already been flushed to the main database file.
+    ///
+    /// ## Durability
+    ///
+    /// After `set_len()`, `sync_all()` is called to ensure the truncated state
+    /// reaches stable storage. A best-effort directory fsync follows to harden
+    /// the metadata change. If the process crashes before `sync_all()` completes,
+    /// the old WAL may still be present and will be replayed idempotently on
+    /// next open.
     pub fn checkpoint_truncate(&mut self) -> Result<()> {
         self.file.set_len(WAL_HEADER_SIZE as u64)?;
         self.file.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;

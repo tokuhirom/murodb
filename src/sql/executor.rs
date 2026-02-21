@@ -131,6 +131,12 @@ fn exec_create_table(
                 let idx_name = name
                     .clone()
                     .unwrap_or_else(|| format!("auto_unique_{}_{}", ct.table_name, cols.join("_")));
+                if table_level_uniques.iter().any(|(n, _)| n == &idx_name) {
+                    return Err(MuroError::Schema(format!(
+                        "Duplicate UNIQUE constraint '{}'",
+                        idx_name
+                    )));
+                }
                 table_level_uniques.push((idx_name, cols.clone()));
             }
         }

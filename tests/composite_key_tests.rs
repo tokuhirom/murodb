@@ -622,6 +622,22 @@ fn test_duplicate_unique_constraint_does_not_leave_table() {
     assert!(rows.is_empty(), "Table should not have been created");
 }
 
+#[test]
+fn test_duplicate_table_level_unique_does_not_leave_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    // Two identical table-level UNIQUE(a) constraints
+    let err = exec_err(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, UNIQUE (a), UNIQUE (a))",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(err.contains("Duplicate UNIQUE"), "Got: {}", err);
+
+    let rows = get_rows(exec("SHOW TABLES", &mut pager, &mut catalog));
+    assert!(rows.is_empty(), "Table should not have been created");
+}
+
 // --- Bug fix: Non-unique composite index with duplicate values ---
 
 #[test]

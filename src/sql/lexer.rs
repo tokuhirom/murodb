@@ -67,6 +67,7 @@ pub enum Token {
     Describe,
     Is,
     Checkpoint,
+    Database,
     Stats,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
     TinyIntType,   // "TINYINT"
@@ -287,6 +288,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "CHECK" => Token::Check,
         "IS" => Token::Is,
         "CHECKPOINT" => Token::Checkpoint,
+        "DATABASE" => Token::Database,
         "STATS" => Token::Stats,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"

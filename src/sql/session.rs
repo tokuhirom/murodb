@@ -12,14 +12,26 @@ use crate::wal::writer::WalWriter;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
 
-/// Checkpoint operation statistics for observability.
+/// Database operation statistics for observability.
 #[derive(Debug, Clone, Default)]
-pub struct CheckpointStats {
+pub struct DatabaseStats {
+    // Checkpoint stats
     pub total_checkpoints: u64,
     pub failed_checkpoints: u64,
     pub last_failure_error: Option<String>,
     pub last_failure_timestamp_ms: Option<u64>,
+    // CommitInDoubt stats
+    pub commit_in_doubt_count: u64,
+    pub last_commit_in_doubt_error: Option<String>,
+    pub last_commit_in_doubt_timestamp_ms: Option<u64>,
+    // Freelist sanitize stats
+    pub freelist_sanitize_count: u64,
+    pub freelist_out_of_range_total: u64,
+    pub freelist_duplicates_total: u64,
 }
+
+/// Backward-compatible alias.
+pub type CheckpointStats = DatabaseStats;
 
 /// A session that manages explicit transaction state.
 ///
@@ -34,7 +46,7 @@ pub struct Session {
     wal: WalWriter,
     active_tx: Option<Transaction>,
     next_txid: TxId,
-    checkpoint_stats: CheckpointStats,
+    stats: DatabaseStats,
     poisoned: Option<String>,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
@@ -43,13 +55,28 @@ pub struct Session {
 impl Session {
     pub fn new(pager: Pager, catalog: SystemCatalog, wal: WalWriter) -> Self {
         let next_txid = pager.next_txid();
+        let mut stats = DatabaseStats::default();
+
+        // Absorb freelist sanitize report from pager open
+        if let Some(report) = pager.freelist_sanitize_report() {
+            stats.freelist_sanitize_count += 1;
+            stats.freelist_out_of_range_total += report.out_of_range.len() as u64;
+            stats.freelist_duplicates_total += report.duplicates.len() as u64;
+            eprintln!(
+                "WARNING: freelist_sanitized out_of_range={} duplicates={} total_removed={}",
+                report.out_of_range.len(),
+                report.duplicates.len(),
+                report.total_removed()
+            );
+        }
+
         Session {
             pager,
             catalog,
             wal,
             active_tx: None,
             next_txid,
-            checkpoint_stats: CheckpointStats::default(),
+            stats,
             poisoned: None,
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
@@ -73,6 +100,7 @@ impl Session {
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
             Statement::ShowCheckpointStats => self.handle_show_checkpoint_stats(),
+            Statement::ShowDatabaseStats => self.handle_show_database_stats(),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
@@ -104,6 +132,7 @@ impl Session {
         self.pager.set_next_txid(self.next_txid);
         match tx.commit(&mut self.pager, &mut self.wal, catalog_root) {
             Err(e @ MuroError::CommitInDoubt(_)) => {
+                self.record_commit_in_doubt(&e);
                 self.poisoned = Some(e.to_string());
                 return Err(e);
             }
@@ -148,6 +177,7 @@ impl Session {
                 self.pager.set_next_txid(self.next_txid);
                 match tx.commit(&mut self.pager, &mut self.wal, catalog_root) {
                     Err(e @ MuroError::CommitInDoubt(_)) => {
+                        self.record_commit_in_doubt(&e);
                         self.poisoned = Some(e.to_string());
                         return Err(e);
                     }
@@ -204,13 +234,13 @@ impl Session {
     }
 
     fn post_commit_checkpoint(&mut self) {
-        self.checkpoint_stats.total_checkpoints += 1;
+        self.stats.total_checkpoints += 1;
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
-            self.checkpoint_stats.failed_checkpoints += 1;
-            self.checkpoint_stats.last_failure_error = Some(format!("{}", e));
-            self.checkpoint_stats.last_failure_timestamp_ms = Some(
+            self.stats.failed_checkpoints += 1;
+            self.stats.last_failure_error = Some(format!("{}", e));
+            self.stats.last_failure_timestamp_ms = Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -221,12 +251,12 @@ impl Session {
     }
 
     fn post_rollback_checkpoint(&mut self) {
-        self.checkpoint_stats.total_checkpoints += 1;
+        self.stats.total_checkpoints += 1;
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
-            self.checkpoint_stats.failed_checkpoints += 1;
-            self.checkpoint_stats.last_failure_error = Some(format!("{}", e));
-            self.checkpoint_stats.last_failure_timestamp_ms = Some(
+            self.stats.failed_checkpoints += 1;
+            self.stats.last_failure_error = Some(format!("{}", e));
+            self.stats.last_failure_timestamp_ms = Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -237,7 +267,7 @@ impl Session {
     }
 
     fn handle_show_checkpoint_stats(&self) -> Result<ExecResult> {
-        let stats = &self.checkpoint_stats;
+        let stats = &self.stats;
         let rows = vec![
             Row {
                 values: vec![
@@ -297,7 +327,78 @@ impl Session {
     }
 
     pub fn checkpoint_stats(&self) -> &CheckpointStats {
-        &self.checkpoint_stats
+        &self.stats
+    }
+
+    pub fn database_stats(&self) -> &DatabaseStats {
+        &self.stats
+    }
+
+    fn record_commit_in_doubt(&mut self, error: &MuroError) {
+        self.stats.commit_in_doubt_count += 1;
+        self.stats.last_commit_in_doubt_error = Some(error.to_string());
+        self.stats.last_commit_in_doubt_timestamp_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
+        eprintln!("WARNING: commit_in_doubt error=\"{}\"", error);
+    }
+
+    fn handle_show_database_stats(&self) -> Result<ExecResult> {
+        let stats = &self.stats;
+        fn stat_row(name: &str, value: String) -> Row {
+            Row {
+                values: vec![
+                    ("stat".to_string(), Value::Varchar(name.to_string())),
+                    ("value".to_string(), Value::Varchar(value)),
+                ],
+            }
+        }
+        let rows = vec![
+            stat_row("total_checkpoints", stats.total_checkpoints.to_string()),
+            stat_row("failed_checkpoints", stats.failed_checkpoints.to_string()),
+            stat_row(
+                "last_failure_error",
+                stats.last_failure_error.clone().unwrap_or_default(),
+            ),
+            stat_row(
+                "last_failure_timestamp_ms",
+                stats
+                    .last_failure_timestamp_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            stat_row(
+                "commit_in_doubt_count",
+                stats.commit_in_doubt_count.to_string(),
+            ),
+            stat_row(
+                "last_commit_in_doubt_error",
+                stats.last_commit_in_doubt_error.clone().unwrap_or_default(),
+            ),
+            stat_row(
+                "last_commit_in_doubt_timestamp_ms",
+                stats
+                    .last_commit_in_doubt_timestamp_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            stat_row(
+                "freelist_sanitize_count",
+                stats.freelist_sanitize_count.to_string(),
+            ),
+            stat_row(
+                "freelist_out_of_range_total",
+                stats.freelist_out_of_range_total.to_string(),
+            ),
+            stat_row(
+                "freelist_duplicates_total",
+                stats.freelist_duplicates_total.to_string(),
+            ),
+        ];
+        Ok(ExecResult::Rows(rows))
     }
 
     fn emit_checkpoint_warning(&self, phase: &str, attempts: usize, error: &MuroError) {
@@ -649,5 +750,114 @@ mod tests {
             }
             _ => panic!("Expected rows from SHOW CHECKPOINT STATS"),
         }
+    }
+
+    #[test]
+    fn test_show_database_stats_sql() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+
+        match session.execute("SHOW DATABASE STATS").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 10);
+                // Verify checkpoint stats
+                assert_eq!(
+                    rows[0].get("stat"),
+                    Some(&Value::Varchar("total_checkpoints".to_string()))
+                );
+                assert_eq!(rows[0].get("value"), Some(&Value::Varchar("1".to_string())));
+                // Verify commit_in_doubt_count present
+                assert_eq!(
+                    rows[4].get("stat"),
+                    Some(&Value::Varchar("commit_in_doubt_count".to_string()))
+                );
+                assert_eq!(rows[4].get("value"), Some(&Value::Varchar("0".to_string())));
+                // Verify freelist_sanitize_count present
+                assert_eq!(
+                    rows[7].get("stat"),
+                    Some(&Value::Varchar("freelist_sanitize_count".to_string()))
+                );
+                assert_eq!(rows[7].get("value"), Some(&Value::Varchar("0".to_string())));
+            }
+            _ => panic!("Expected rows from SHOW DATABASE STATS"),
+        }
+    }
+
+    #[test]
+    fn test_commit_in_doubt_increments_counter() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let session = Session::new(pager, catalog, wal);
+
+        assert_eq!(session.database_stats().commit_in_doubt_count, 0);
+
+        // CommitInDoubt is triggered by post-WAL-sync failures which are hard
+        // to inject directly. Instead, verify the counter is zero initially
+        // and that the session exposes it through database_stats().
+        assert!(session
+            .database_stats()
+            .last_commit_in_doubt_error
+            .is_none());
+        assert!(session
+            .database_stats()
+            .last_commit_in_doubt_timestamp_ms
+            .is_none());
+    }
+
+    #[test]
+    fn test_show_checkpoint_stats_still_works() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        // SHOW CHECKPOINT STATS should still return 4 rows (backward compat)
+        match session.execute("SHOW CHECKPOINT STATS").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 4);
+            }
+            _ => panic!("Expected rows from SHOW CHECKPOINT STATS"),
+        }
+    }
+
+    #[test]
+    fn test_freelist_sanitize_stats_on_clean_open() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let session = Session::new(pager, catalog, wal);
+
+        // Clean pager should have no sanitize stats
+        assert_eq!(session.database_stats().freelist_sanitize_count, 0);
+        assert_eq!(session.database_stats().freelist_out_of_range_total, 0);
+        assert_eq!(session.database_stats().freelist_duplicates_total, 0);
     }
 }

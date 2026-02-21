@@ -69,8 +69,9 @@ pub fn execute_statement(
         Statement::Begin
         | Statement::Commit
         | Statement::Rollback
-        | Statement::ShowCheckpointStats => Err(MuroError::Execution(
-            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS must be handled by Session".into(),
+        | Statement::ShowCheckpointStats
+        | Statement::ShowDatabaseStats => Err(MuroError::Execution(
+            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS must be handled by Session".into(),
         )),
     }
 }

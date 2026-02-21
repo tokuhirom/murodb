@@ -54,6 +54,19 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 | `fts/` | tokenizer.rs, postings.rs, index.rs, query.rs, scoring.rs, snippet.rs | 全文検索 |
 | `concurrency/` | mod.rs | 並行性制御 |
 
+## Pre-commit Review Rule
+
+コミット前に必ず、DB/SQL専門家のsubagent (subagent_type=general-purpose) を起動してレビューを実施すること。
+subagent には「あなたはDB/SQLの専門家です」というペルソナを与え、`git diff --staged` の内容を渡して以下の観点でレビューさせる:
+
+1. **耐障害性**: クラッシュリカバリ、データ整合性、WAL の正しさ、エラーハンドリング
+2. **MySQL互換性**: MySQL の挙動・構文との互換性 (MuroDBはMySQL互換を目指す)
+3. **SQL標準互換性**: SQL標準 (ISO/IEC 9075) との準拠度
+4. **ユーザビリティ**: エラーメッセージのわかりやすさ、APIの直感性、ドキュメントとの整合性
+
+レビューで問題が指摘された場合は、修正してから再レビューを行うこと。
+レビューで問題がなければ、そのままコミットして良い。
+
 ## Known Limitations
 
 - Posting list が 4096B ページを超えるとエラー (大量文書の共通bigramで発生しうる)

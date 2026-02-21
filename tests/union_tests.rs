@@ -103,6 +103,23 @@ fn test_union_column_count_mismatch() {
 }
 
 #[test]
+fn test_union_column_count_mismatch_empty_first() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_tables(&mut pager, &mut catalog);
+
+    // First SELECT returns 0 rows but has 1 column; second has 2 columns
+    let result = execute(
+        "SELECT id FROM t1 WHERE id = 999 UNION SELECT id, name FROM t2",
+        &mut pager,
+        &mut catalog,
+    );
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("same number of columns"), "got: {}", err);
+}
+
+#[test]
 fn test_union_with_order_by() {
     let (mut pager, mut catalog, _dir) = setup();
     setup_tables(&mut pager, &mut catalog);

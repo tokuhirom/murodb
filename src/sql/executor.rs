@@ -2068,14 +2068,33 @@ fn build_join_row(
     Ok(Row { values: row_values })
 }
 
+fn select_col_count(sel: &Select) -> Option<usize> {
+    // Star expands to all table columns, so we can't determine the count statically
+    if sel.columns.iter().any(|c| matches!(c, SelectColumn::Star)) {
+        None
+    } else {
+        Some(sel.columns.len())
+    }
+}
+
 fn exec_set_query(
     sq: &SetQuery,
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    // Determine expected column count from AST when possible
+    let mut expected_col_count: Option<usize> = select_col_count(&sq.left);
+
     // Execute the first SELECT
     let first_result = exec_select_returning_rows(&sq.left, pager, catalog)?;
-    let col_count = first_result.first().map(|r| r.values.len()).unwrap_or(0);
+
+    // If we couldn't determine from AST (e.g. SELECT *), use result rows
+    if expected_col_count.is_none() {
+        if let Some(first_row) = first_result.first() {
+            expected_col_count = Some(first_row.values.len());
+        }
+    }
+
     let col_names: Vec<String> = first_result
         .first()
         .map(|r| r.values.iter().map(|(n, _)| n.clone()).collect())
@@ -2084,16 +2103,32 @@ fn exec_set_query(
     let mut rows = first_result;
 
     for (op, sel) in &sq.ops {
-        let sel_rows = exec_select_returning_rows(sel, pager, catalog)?;
-
-        // Validate column count matches
-        if let Some(first_row) = sel_rows.first() {
-            if first_row.values.len() != col_count && col_count > 0 {
+        // Check column count from AST before executing
+        if let (Some(expected), Some(actual)) = (expected_col_count, select_col_count(sel)) {
+            if actual != expected {
                 return Err(MuroError::Execution(format!(
                     "UNION queries must have the same number of columns (expected {}, got {})",
-                    col_count,
-                    first_row.values.len()
+                    expected, actual
                 )));
+            }
+        }
+
+        let sel_rows = exec_select_returning_rows(sel, pager, catalog)?;
+
+        // Validate column count from result rows (handles SELECT * cases)
+        if let Some(first_row) = sel_rows.first() {
+            match expected_col_count {
+                Some(expected) if first_row.values.len() != expected => {
+                    return Err(MuroError::Execution(format!(
+                        "UNION queries must have the same number of columns (expected {}, got {})",
+                        expected,
+                        first_row.values.len()
+                    )));
+                }
+                None => {
+                    expected_col_count = Some(first_row.values.len());
+                }
+                _ => {}
             }
         }
 

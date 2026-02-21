@@ -1,11 +1,11 @@
 # MuroDB
 
-Encrypted embedded SQL database with B-Tree + Full-Text Search (Bigram), written in Rust.
+Encrypted embedded SQL database with B+Tree (no leaf links) + Full-Text Search (Bigram), written in Rust.
 
 ## Features
 
 - **Transparent encryption** - AES-256-GCM-SIV (nonce-misuse resistant) for all pages and WAL
-- **B-tree storage** - PRIMARY KEY (TINYINT/SMALLINT/INT/BIGINT), UNIQUE indexes (single column)
+- **B+tree storage (no leaf links)** - PRIMARY KEY (TINYINT/SMALLINT/INT/BIGINT), UNIQUE indexes (single column)
 - **Full-text search** - Bigram (n=2) with NFKC normalization
   - MySQL-style `MATCH(col) AGAINST(...)` syntax
   - NATURAL LANGUAGE MODE with BM25 scoring

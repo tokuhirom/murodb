@@ -18,7 +18,10 @@ use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{plan_select, Plan};
 use crate::storage::page_store::PageStore;
-use crate::types::{DataType, Value, ValueKey};
+use crate::types::{
+    format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
+    DataType, Value, ValueKey,
+};
 
 /// A result row.
 #[derive(Debug, Clone)]
@@ -1088,6 +1091,9 @@ fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
                 *n as f64,
                 target_type,
             )?)),
+            DataType::Date | DataType::DateTime | DataType::Timestamp => Err(MuroError::Execution(
+                "Cannot coerce integer to date/time type".into(),
+            )),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
             DataType::Varbinary(_) => Err(MuroError::Execution(
                 "Cannot coerce integer to VARBINARY".into(),
@@ -1100,6 +1106,9 @@ fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
             DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
                 Ok(Value::Integer(float_to_i64_checked(*n)?))
             }
+            DataType::Date | DataType::DateTime | DataType::Timestamp => Err(MuroError::Execution(
+                "Cannot coerce float to date/time type".into(),
+            )),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
             DataType::Varbinary(_) => Err(MuroError::Execution(
                 "Cannot coerce floating-point value to VARBINARY".into(),
@@ -1118,8 +1127,53 @@ fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
                 })?;
                 Ok(Value::Float(validate_float_for_target(n, target_type)?))
             }
+            DataType::Date => {
+                let d = parse_date_string(s).ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot convert '{}' to DATE", s))
+                })?;
+                Ok(Value::Date(d))
+            }
+            DataType::DateTime => {
+                let dt = parse_datetime_string(s).ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot convert '{}' to DATETIME", s))
+                })?;
+                Ok(Value::DateTime(dt))
+            }
+            DataType::Timestamp => {
+                let ts = parse_timestamp_string(s).ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot convert '{}' to TIMESTAMP", s))
+                })?;
+                Ok(Value::Timestamp(ts))
+            }
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(s.clone())),
             DataType::Varbinary(_) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
+        },
+        Value::Date(d) => match target_type {
+            DataType::Date => Ok(Value::Date(*d)),
+            DataType::DateTime => Ok(Value::DateTime((*d as i64) * 1_000_000)),
+            DataType::Timestamp => Ok(Value::Timestamp((*d as i64) * 1_000_000)),
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_date(*d))),
+            _ => Err(MuroError::Execution(
+                "Cannot coerce DATE to target type".into(),
+            )),
+        },
+        Value::DateTime(dt) => match target_type {
+            DataType::DateTime => Ok(Value::DateTime(*dt)),
+            DataType::Timestamp => Ok(Value::Timestamp(*dt)),
+            DataType::Date => Ok(Value::Date((*dt / 1_000_000) as i32)),
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_datetime(*dt))),
+            _ => Err(MuroError::Execution(
+                "Cannot coerce DATETIME to target type".into(),
+            )),
+        },
+        Value::Timestamp(ts) => match target_type {
+            DataType::Timestamp => Ok(Value::Timestamp(*ts)),
+            DataType::DateTime => Ok(Value::DateTime(*ts)),
+            DataType::Date => Ok(Value::Date((*ts / 1_000_000) as i32)),
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_datetime(*ts))),
+            _ => Err(MuroError::Execution(
+                "Cannot coerce TIMESTAMP to target type".into(),
+            )),
         },
         Value::Varbinary(b) => match target_type {
             DataType::Varchar(_) | DataType::Text => {
@@ -1419,6 +1473,18 @@ fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::IntLiteral(*n),
         Value::Float(n) => Expr::FloatLiteral(*n),
+        Value::Date(n) => Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(format_date(*n))),
+            target_type: DataType::Date,
+        },
+        Value::DateTime(n) => Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(format_datetime(*n))),
+            target_type: DataType::DateTime,
+        },
+        Value::Timestamp(n) => Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(format_datetime(*n))),
+            target_type: DataType::Timestamp,
+        },
         Value::Varchar(s) => Expr::StringLiteral(s.clone()),
         Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
         Value::Null => Expr::Null,
@@ -3020,6 +3086,8 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::BigInt => buf.extend_from_slice(&n.to_le_bytes()),
                 DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
                 DataType::Double => buf.extend_from_slice(&(*n as f64).to_le_bytes()),
+                DataType::Date => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
+                DataType::DateTime | DataType::Timestamp => buf.extend_from_slice(&n.to_le_bytes()),
                 DataType::Varchar(_) | DataType::Text => {
                     let bytes = n.to_string().as_bytes().to_vec();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -3038,6 +3106,10 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::BigInt => buf.extend_from_slice(&(*n as i64).to_le_bytes()),
                 DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
                 DataType::Double => buf.extend_from_slice(&n.to_le_bytes()),
+                DataType::Date | DataType::DateTime | DataType::Timestamp => {
+                    // Coercion should reject this path before serialize_row.
+                    panic!("float value reached date/time serializer")
+                }
                 DataType::Varchar(_) | DataType::Text => {
                     let bytes = n.to_string().as_bytes().to_vec();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -3048,6 +3120,52 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&b);
                 }
+            },
+            Value::Date(d) => match columns[i].data_type {
+                DataType::Date => buf.extend_from_slice(&d.to_le_bytes()),
+                DataType::DateTime | DataType::Timestamp => {
+                    let v = (*d as i64) * 1_000_000;
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+                DataType::Varchar(_) | DataType::Text => {
+                    let s = format_date(*d);
+                    let bytes = s.as_bytes();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+                _ => panic!("date value reached incompatible serializer"),
+            },
+            Value::DateTime(dt) => match columns[i].data_type {
+                DataType::Date => {
+                    let d = (*dt / 1_000_000) as i32;
+                    buf.extend_from_slice(&d.to_le_bytes());
+                }
+                DataType::DateTime | DataType::Timestamp => {
+                    buf.extend_from_slice(&dt.to_le_bytes());
+                }
+                DataType::Varchar(_) | DataType::Text => {
+                    let s = format_datetime(*dt);
+                    let bytes = s.as_bytes();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+                _ => panic!("datetime value reached incompatible serializer"),
+            },
+            Value::Timestamp(ts) => match columns[i].data_type {
+                DataType::Date => {
+                    let d = (*ts / 1_000_000) as i32;
+                    buf.extend_from_slice(&d.to_le_bytes());
+                }
+                DataType::DateTime | DataType::Timestamp => {
+                    buf.extend_from_slice(&ts.to_le_bytes());
+                }
+                DataType::Varchar(_) | DataType::Text => {
+                    let s = format_datetime(*ts);
+                    let bytes = s.as_bytes();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+                _ => panic!("timestamp value reached incompatible serializer"),
             },
             Value::Varchar(s) => {
                 let bytes = s.as_bytes();
@@ -3160,6 +3278,30 @@ pub fn deserialize_row_versioned(
                 values.push(Value::Float(n));
                 offset += 8;
             }
+            DataType::Date => {
+                if offset + 4 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                values.push(Value::Date(n));
+                offset += 4;
+            }
+            DataType::DateTime => {
+                if offset + 8 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                values.push(Value::DateTime(n));
+                offset += 8;
+            }
+            DataType::Timestamp => {
+                if offset + 8 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                values.push(Value::Timestamp(n));
+                offset += 8;
+            }
             DataType::Varchar(_) | DataType::Text => {
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -3232,6 +3374,8 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Integer(n), DataType::BigInt) => encode_i64(*n).to_vec(),
         (Value::Integer(n), DataType::Float) => encode_f32(*n as f32).to_vec(),
         (Value::Integer(n), DataType::Double) => encode_f64(*n as f64).to_vec(),
+        (Value::Integer(n), DataType::Date) => encode_i32(*n as i32).to_vec(),
+        (Value::Integer(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
         (Value::Integer(n), _) => encode_i64(*n).to_vec(),
         (Value::Float(n), DataType::TinyInt) => {
             float_as_integral_i64(*n).map_or_else(impossible_int_seek_key, |v| {
@@ -3264,7 +3408,21 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
             .map_or_else(impossible_int_seek_key, |v| encode_i64(v).to_vec()),
         (Value::Float(n), DataType::Float) => encode_f32(*n as f32).to_vec(),
         (Value::Float(n), DataType::Double) => encode_f64(*n).to_vec(),
+        (Value::Float(_), DataType::Date | DataType::DateTime | DataType::Timestamp) => {
+            impossible_int_seek_key()
+        }
         (Value::Float(n), _) => encode_f64(*n).to_vec(),
+        (Value::Date(n), DataType::Date) => encode_i32(*n).to_vec(),
+        (Value::Date(n), DataType::DateTime | DataType::Timestamp) => {
+            encode_i64((*n as i64) * 1_000_000).to_vec()
+        }
+        (Value::Date(n), _) => encode_i32(*n).to_vec(),
+        (Value::DateTime(n), DataType::Date) => encode_i32((*n / 1_000_000) as i32).to_vec(),
+        (Value::DateTime(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
+        (Value::DateTime(n), _) => encode_i64(*n).to_vec(),
+        (Value::Timestamp(n), DataType::Date) => encode_i32((*n / 1_000_000) as i32).to_vec(),
+        (Value::Timestamp(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
+        (Value::Timestamp(n), _) => encode_i64(*n).to_vec(),
         (Value::Varchar(s), _) => s.as_bytes().to_vec(),
         (Value::Varbinary(b), _) => b.clone(),
         (Value::Null, _) => Vec::new(),
@@ -4136,6 +4294,9 @@ fn value_to_fts_text(value: &Value) -> Option<String> {
         Value::Null => None,
         Value::Integer(n) => Some(n.to_string()),
         Value::Float(n) => Some(n.to_string()),
+        Value::Date(n) => Some(format_date(*n)),
+        Value::DateTime(n) => Some(format_datetime(*n)),
+        Value::Timestamp(n) => Some(format_datetime(*n)),
         Value::Varbinary(_) => None,
     }
 }
@@ -4683,13 +4844,7 @@ fn substitute_aggregates(expr: &Expr, aggs: &[AggregateInfo], agg_values: &[Valu
             distinct,
         } => {
             if let Some(idx) = find_aggregate_index(aggs, name, arg, *distinct) {
-                match &agg_values[idx] {
-                    Value::Integer(n) => Expr::IntLiteral(*n),
-                    Value::Float(n) => Expr::FloatLiteral(*n),
-                    Value::Varchar(s) => Expr::StringLiteral(s.clone()),
-                    Value::Null => Expr::Null,
-                    Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
-                }
+                value_to_expr(&agg_values[idx])
             } else {
                 Expr::Null
             }
@@ -5020,7 +5175,17 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
         }
         (Some(Value::Integer(a)), Some(Value::Float(b))) => cmp_i64_f64(*a, *b),
         (Some(Value::Float(a)), Some(Value::Integer(b))) => cmp_i64_f64(*b, *a).reverse(),
+        (Some(Value::Date(a)), Some(Value::Date(b))) => a.cmp(b),
+        (Some(Value::DateTime(a)), Some(Value::DateTime(b))) => a.cmp(b),
+        (Some(Value::Timestamp(a)), Some(Value::Timestamp(b))) => a.cmp(b),
+        (Some(Value::Date(a)), Some(Value::DateTime(b))) => ((*a as i64) * 1_000_000).cmp(b),
+        (Some(Value::DateTime(a)), Some(Value::Date(b))) => a.cmp(&((*b as i64) * 1_000_000)),
+        (Some(Value::Date(a)), Some(Value::Timestamp(b))) => ((*a as i64) * 1_000_000).cmp(b),
+        (Some(Value::Timestamp(a)), Some(Value::Date(b))) => a.cmp(&((*b as i64) * 1_000_000)),
+        (Some(Value::DateTime(a)), Some(Value::Timestamp(b))) => a.cmp(b),
+        (Some(Value::Timestamp(a)), Some(Value::DateTime(b))) => a.cmp(b),
         (Some(Value::Varchar(a)), Some(Value::Varchar(b))) => a.cmp(b),
+        (Some(Value::Varbinary(a)), Some(Value::Varbinary(b))) => a.cmp(b),
         (Some(Value::Null), _) | (None, _) => std::cmp::Ordering::Less,
         (_, Some(Value::Null)) | (_, None) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,
@@ -5298,5 +5463,90 @@ mod tests {
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 100);
         }
+    }
+
+    #[test]
+    fn test_temporal_in_subquery_materialization_preserves_type() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, d DATE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, '2026-02-21')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, '2026-02-22')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT id FROM t WHERE d IN (SELECT d FROM t WHERE id = 1)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_having_max_date_preserves_temporal_type() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, d DATE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, '2026-02-21')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, '2026-02-20')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT MAX(d) AS md FROM t HAVING MAX(d) = CAST('2026-02-21' AS DATE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("md"), Some(&Value::Date(20260221)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_encode_value_float_to_temporal_is_non_empty_impossible_key() {
+        let key_date = encode_value(&Value::Float(1.5), &DataType::Date);
+        let key_dt = encode_value(&Value::Float(1.5), &DataType::DateTime);
+        let key_ts = encode_value(&Value::Float(1.5), &DataType::Timestamp);
+        assert_eq!(key_date.len(), 9);
+        assert_eq!(key_dt.len(), 9);
+        assert_eq!(key_ts.len(), 9);
     }
 }

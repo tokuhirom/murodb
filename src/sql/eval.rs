@@ -1,7 +1,10 @@
 /// Expression evaluator for WHERE clauses.
 use crate::error::{MuroError, Result};
 use crate::sql::ast::{BinaryOp, Expr, UnaryOp};
-use crate::types::{DataType, Value};
+use crate::types::{
+    format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
+    DataType, Value,
+};
 
 /// Evaluate an expression given a row's column values.
 /// `columns` maps column name -> Value.
@@ -925,6 +928,22 @@ fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         Ok(n as i64)
     }
 
+    fn float_checked(n: f64, target_type: &DataType) -> Result<f64> {
+        if !n.is_finite() {
+            return Err(MuroError::Execution(format!(
+                "Cannot cast non-finite float '{}' to {}",
+                n, target_type
+            )));
+        }
+        if *target_type == DataType::Float && (n < f32::MIN as f64 || n > f32::MAX as f64) {
+            return Err(MuroError::Execution(format!(
+                "Float '{}' out of range for FLOAT",
+                n
+            )));
+        }
+        Ok(n)
+    }
+
     if val.is_null() {
         return Ok(Value::Null);
     }
@@ -945,21 +964,65 @@ fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
             ))),
         },
         DataType::Float | DataType::Double => match val {
-            Value::Integer(n) => Ok(Value::Float(*n as f64)),
-            Value::Float(n) => Ok(Value::Float(*n)),
+            Value::Integer(n) => Ok(Value::Float(float_checked(*n as f64, target_type)?)),
+            Value::Float(n) => Ok(Value::Float(float_checked(*n, target_type)?)),
             Value::Varchar(s) => {
                 let n: f64 = s
                     .trim()
                     .parse()
                     .map_err(|_| MuroError::Execution(format!("Cannot cast '{}' to float", s)))?;
-                Ok(Value::Float(n))
+                Ok(Value::Float(float_checked(n, target_type)?))
             }
             _ => Err(MuroError::Execution(format!(
                 "Cannot cast {:?} to float",
                 val
             ))),
         },
-        DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(val.to_string())),
+        DataType::Date => match val {
+            Value::Date(d) => Ok(Value::Date(*d)),
+            Value::DateTime(dt) => Ok(Value::Date((*dt / 1_000_000) as i32)),
+            Value::Timestamp(ts) => Ok(Value::Date((*ts / 1_000_000) as i32)),
+            Value::Varchar(s) => parse_date_string(s)
+                .map(Value::Date)
+                .ok_or_else(|| MuroError::Execution(format!("Cannot cast '{}' to DATE", s))),
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to DATE",
+                val
+            ))),
+        },
+        DataType::DateTime => match val {
+            Value::Date(d) => Ok(Value::DateTime((*d as i64) * 1_000_000)),
+            Value::DateTime(dt) => Ok(Value::DateTime(*dt)),
+            Value::Timestamp(ts) => Ok(Value::DateTime(*ts)),
+            Value::Varchar(s) => parse_datetime_string(s)
+                .map(Value::DateTime)
+                .ok_or_else(|| MuroError::Execution(format!("Cannot cast '{}' to DATETIME", s))),
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to DATETIME",
+                val
+            ))),
+        },
+        DataType::Timestamp => match val {
+            Value::Date(d) => Ok(Value::Timestamp((*d as i64) * 1_000_000)),
+            Value::DateTime(dt) => Ok(Value::Timestamp(*dt)),
+            Value::Timestamp(ts) => Ok(Value::Timestamp(*ts)),
+            Value::Varchar(s) => parse_timestamp_string(s)
+                .map(Value::Timestamp)
+                .ok_or_else(|| MuroError::Execution(format!("Cannot cast '{}' to TIMESTAMP", s))),
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to TIMESTAMP",
+                val
+            ))),
+        },
+        DataType::Varchar(_) | DataType::Text => {
+            let s = match val {
+                Value::Date(d) => format_date(*d),
+                Value::DateTime(dt) => format_datetime(*dt),
+                Value::Timestamp(ts) => format_datetime(*ts),
+                _ => val.to_string(),
+            };
+            Ok(Value::Varchar(s))
+        }
         DataType::Varbinary(_) => match val {
             Value::Varbinary(b) => Ok(Value::Varbinary(b.clone())),
             Value::Varchar(s) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
@@ -1051,6 +1114,15 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Float(a), Value::Integer(b)) => cmp_i64_f64(*b, *a).map(|o| o.reverse()),
         (Value::Varchar(a), Value::Varchar(b)) => Some(a.cmp(b)),
         (Value::Varbinary(a), Value::Varbinary(b)) => Some(a.cmp(b)),
+        (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
+        (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        (Value::Date(a), Value::DateTime(b)) => Some(((*a as i64) * 1_000_000).cmp(b)),
+        (Value::DateTime(a), Value::Date(b)) => Some(a.cmp(&((*b as i64) * 1_000_000))),
+        (Value::Date(a), Value::Timestamp(b)) => Some(((*a as i64) * 1_000_000).cmp(b)),
+        (Value::Timestamp(a), Value::Date(b)) => Some(a.cmp(&((*b as i64) * 1_000_000))),
+        (Value::DateTime(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::DateTime(b)) => Some(a.cmp(b)),
         _ => None,
     }
 }
@@ -1061,6 +1133,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Float(n) => *n != 0.0,
         Value::Varchar(s) => !s.is_empty(),
         Value::Varbinary(b) => !b.is_empty(),
+        Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) => true,
         Value::Null => false,
     }
 }

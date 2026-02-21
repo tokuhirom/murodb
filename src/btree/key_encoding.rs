@@ -117,6 +117,8 @@ pub fn encode_composite_key(
     data_types: &[&crate::types::DataType],
 ) -> Vec<u8> {
     use crate::types::{DataType, Value};
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
+    const I64_UPPER_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0; // 2^63
 
     let mut buf = Vec::new();
     for (val, dt) in values.iter().zip(data_types.iter()) {
@@ -175,8 +177,8 @@ pub fn encode_composite_key(
                     DataType::BigInt => {
                         if n.is_finite()
                             && n.fract() == 0.0
-                            && *n >= i64::MIN as f64
-                            && *n <= i64::MAX as f64
+                            && *n >= I64_MIN_F64
+                            && *n < I64_UPPER_EXCLUSIVE_F64
                         {
                             buf.extend_from_slice(&encode_i64(*n as i64));
                         } else {
@@ -186,6 +188,26 @@ pub fn encode_composite_key(
                     DataType::Float => buf.extend_from_slice(&encode_f32(*n as f32)),
                     DataType::Double => buf.extend_from_slice(&encode_f64(*n)),
                     _ => buf.extend_from_slice(&encode_f64(*n)),
+                }
+            }
+            Value::Date(n) => {
+                buf.push(0x01);
+                match dt {
+                    DataType::Date => buf.extend_from_slice(&encode_i32(*n)),
+                    DataType::DateTime | DataType::Timestamp => {
+                        buf.extend_from_slice(&encode_i64((*n as i64) * 1_000_000))
+                    }
+                    _ => buf.extend_from_slice(&encode_i32(*n)),
+                }
+            }
+            Value::DateTime(n) | Value::Timestamp(n) => {
+                buf.push(0x01);
+                match dt {
+                    DataType::Date => buf.extend_from_slice(&encode_i32((*n / 1_000_000) as i32)),
+                    DataType::DateTime | DataType::Timestamp => {
+                        buf.extend_from_slice(&encode_i64(*n))
+                    }
+                    _ => buf.extend_from_slice(&encode_i64(*n)),
                 }
             }
             Value::Varchar(s) => {
@@ -377,6 +399,34 @@ mod tests {
         assert_eq!(
             encode_composite_key(&v1, &dt),
             encode_composite_key(&v2, &dt)
+        );
+    }
+
+    #[test]
+    fn test_composite_key_date_literal_for_datetime_column() {
+        use crate::types::{DataType, Value};
+
+        let vals_date = [&Value::Date(20260221)];
+        let vals_dt = [&Value::DateTime(20260221000000)];
+        let dts = [&DataType::DateTime];
+
+        assert_eq!(
+            encode_composite_key(&vals_date, &dts),
+            encode_composite_key(&vals_dt, &dts)
+        );
+    }
+
+    #[test]
+    fn test_composite_key_datetime_literal_for_date_column() {
+        use crate::types::{DataType, Value};
+
+        let vals_dt = [&Value::DateTime(20260221123456)];
+        let vals_date = [&Value::Date(20260221)];
+        let dts = [&DataType::Date];
+
+        assert_eq!(
+            encode_composite_key(&vals_dt, &dts),
+            encode_composite_key(&vals_date, &dts)
         );
     }
 }

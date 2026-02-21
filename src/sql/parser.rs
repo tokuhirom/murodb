@@ -421,6 +421,9 @@ impl Parser {
                 Some(Token::BigIntType) => Ok(DataType::BigInt),
                 Some(Token::FloatType) => Ok(DataType::Float),
                 Some(Token::DoubleType) => Ok(DataType::Double),
+                Some(Token::DateType) => Ok(DataType::Date),
+                Some(Token::DateTimeType) => Ok(DataType::DateTime),
+                Some(Token::TimestampType) => Ok(DataType::Timestamp),
                 Some(Token::VarcharType) => {
                     let size = self.parse_optional_size()?;
                     Ok(DataType::Varchar(size))

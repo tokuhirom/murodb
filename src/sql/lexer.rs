@@ -104,6 +104,9 @@ pub enum Token {
     BigIntType,    // "BIGINT"
     FloatType,     // "FLOAT"
     DoubleType,    // "DOUBLE"
+    DateType,      // "DATE"
+    DateTimeType,  // "DATETIME"
+    TimestampType, // "TIMESTAMP"
     VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
     TextType,      // "TEXT"
@@ -395,6 +398,9 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "BIGINT" => Token::BigIntType,
         "FLOAT" => Token::FloatType,
         "DOUBLE" => Token::DoubleType,
+        "DATE" => Token::DateType,
+        "DATETIME" => Token::DateTimeType,
+        "TIMESTAMP" => Token::TimestampType,
         "VARCHAR" => Token::VarcharType,
         "VARBINARY" => Token::VarbinaryType,
         "TEXT" => Token::TextType,

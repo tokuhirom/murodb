@@ -8,7 +8,7 @@ pub enum Statement {
     DropTable(DropTable),
     DropIndex(DropIndex),
     Insert(Insert),
-    Select(Select),
+    Select(Box<Select>),
     Update(Update),
     Delete(Delete),
     ShowTables,
@@ -95,11 +95,14 @@ pub struct JoinClause {
 
 #[derive(Debug, Clone)]
 pub struct Select {
+    pub distinct: bool,
     pub columns: Vec<SelectColumn>,
     pub table_name: String,
     pub table_alias: Option<String>,
     pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,
+    pub group_by: Option<Vec<Expr>>,
+    pub having: Option<Expr>,
     pub order_by: Option<Vec<OrderByItem>>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
@@ -191,6 +194,11 @@ pub enum Expr {
     Cast {
         expr: Box<Expr>,
         target_type: DataType,
+    },
+    AggregateFunc {
+        name: String,           // COUNT, SUM, AVG, MIN, MAX
+        arg: Option<Box<Expr>>, // None for COUNT(*)
+        distinct: bool,         // COUNT(DISTINCT col)
     },
     /// Comparison result: expr > 0 (used as a where clause)
     GreaterThanZero(Box<Expr>),

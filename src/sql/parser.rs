@@ -39,6 +39,15 @@ impl Parser {
     fn expect_ident(&mut self) -> Result<String, String> {
         match self.advance() {
             Some(Token::Ident(s)) => Ok(s),
+            // Allow aggregate keywords to be used as identifiers (column names, aliases)
+            Some(Token::Count) => Ok("count".to_string()),
+            Some(Token::Sum) => Ok("sum".to_string()),
+            Some(Token::Avg) => Ok("avg".to_string()),
+            Some(Token::Min) => Ok("min".to_string()),
+            Some(Token::Max) => Ok("max".to_string()),
+            Some(Token::Group) => Ok("group".to_string()),
+            Some(Token::Having) => Ok("having".to_string()),
+            Some(Token::Distinct) => Ok("distinct".to_string()),
             Some(t) => Err(format!("Expected identifier, got {:?}", t)),
             None => Err("Expected identifier, got end of input".into()),
         }
@@ -48,7 +57,7 @@ impl Parser {
         let stmt = match self.peek() {
             Some(Token::Create) => self.parse_create()?,
             Some(Token::Drop) => self.parse_drop()?,
-            Some(Token::Select) => Statement::Select(self.parse_select()?),
+            Some(Token::Select) => Statement::Select(Box::new(self.parse_select()?)),
             Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
@@ -478,6 +487,14 @@ impl Parser {
     fn parse_select(&mut self) -> Result<Select, String> {
         self.advance(); // SELECT
 
+        // Parse optional DISTINCT
+        let distinct = if self.peek() == Some(&Token::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let columns = self.parse_select_columns()?;
 
         self.expect(&Token::From)?;
@@ -561,6 +578,32 @@ impl Parser {
             None
         };
 
+        // GROUP BY
+        let group_by = if self.peek() == Some(&Token::Group) {
+            self.advance();
+            self.expect(&Token::By)?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expr()?);
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            Some(exprs)
+        } else {
+            None
+        };
+
+        // HAVING
+        let having = if self.peek() == Some(&Token::Having) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
         let order_by = if self.peek() == Some(&Token::Order) {
             self.advance();
             self.expect(&Token::By)?;
@@ -609,11 +652,14 @@ impl Parser {
         };
 
         Ok(Select {
+            distinct,
             columns,
             table_name,
             table_alias,
             joins,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
@@ -626,6 +672,8 @@ impl Parser {
             self.peek(),
             Some(
                 Token::Where
+                    | Token::Group
+                    | Token::Having
                     | Token::Order
                     | Token::Limit
                     | Token::Offset
@@ -991,6 +1039,8 @@ impl Parser {
                 self.advance();
                 Ok(Expr::DefaultValue)
             }
+            Some(Token::Count) | Some(Token::Sum) | Some(Token::Avg) | Some(Token::Min)
+            | Some(Token::Max) => self.parse_aggregate_func(),
             Some(Token::Match) => self.parse_match_against(),
             Some(Token::FtsSnippet) => self.parse_fts_snippet(),
             Some(Token::Case) => self.parse_case_when(),
@@ -1117,6 +1167,45 @@ impl Parser {
         Ok(Expr::Cast {
             expr: Box::new(expr),
             target_type,
+        })
+    }
+
+    fn parse_aggregate_func(&mut self) -> Result<Expr, String> {
+        let name = match self.advance() {
+            Some(Token::Count) => "COUNT",
+            Some(Token::Sum) => "SUM",
+            Some(Token::Avg) => "AVG",
+            Some(Token::Min) => "MIN",
+            Some(Token::Max) => "MAX",
+            _ => unreachable!(),
+        };
+        self.expect(&Token::LParen)?;
+
+        if name == "COUNT" && self.peek() == Some(&Token::Star) {
+            // COUNT(*)
+            self.advance();
+            self.expect(&Token::RParen)?;
+            return Ok(Expr::AggregateFunc {
+                name: name.to_string(),
+                arg: None,
+                distinct: false,
+            });
+        }
+
+        let distinct = if self.peek() == Some(&Token::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let arg = self.parse_expr()?;
+        self.expect(&Token::RParen)?;
+
+        Ok(Expr::AggregateFunc {
+            name: name.to_string(),
+            arg: Some(Box::new(arg)),
+            distinct,
         })
     }
 

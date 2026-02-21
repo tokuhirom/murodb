@@ -1,4 +1,7 @@
 /// SQL executor: executes statements against the B-tree storage.
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use crate::btree::key_encoding::{encode_i16, encode_i32, encode_i64, encode_i8};
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
@@ -10,7 +13,7 @@ use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{plan_select, Plan};
 use crate::storage::page_store::PageStore;
-use crate::types::{DataType, Value};
+use crate::types::{DataType, Value, ValueKey};
 
 /// A result row.
 #[derive(Debug, Clone)]
@@ -527,101 +530,191 @@ fn exec_select(
         &sel.where_clause,
     );
 
-    let mut rows: Vec<Row> = Vec::new();
+    let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();
 
-    match plan {
-        Plan::PkSeek { key_expr, .. } => {
-            let key_val = eval_expr(&key_expr, &|_| None)?;
-            let pk_idx = table_def
-                .pk_column_index()
-                .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
-            let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
-            let data_btree = BTree::open(table_def.data_btree_root);
-            if let Some(data) = data_btree.search(pager, &pk_key)? {
-                let values = deserialize_row(&data, &table_def.columns)?;
-                let row = build_row(&table_def, &values, &sel.columns)?;
-                // Apply additional WHERE predicates if any
-                if matches_where(&sel.where_clause, &table_def, &values)? {
-                    rows.push(row);
-                }
-            }
-        }
-        Plan::IndexSeek {
-            index_name,
-            key_expr,
-            ..
-        } => {
-            let key_val = eval_expr(&key_expr, &|_| None)?;
-            let idx = indexes
-                .iter()
-                .find(|i| i.name == index_name)
-                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
-            let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
-                MuroError::Schema(format!(
-                    "Index column '{}' not found in table",
-                    idx.column_name
-                ))
-            })?;
-            let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
-            let idx_btree = BTree::open(idx.btree_root);
-            if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
+    if need_aggregation {
+        // Aggregation path: collect raw values first
+        let mut raw_rows: Vec<Vec<Value>> = Vec::new();
+
+        match plan {
+            Plan::PkSeek { key_expr, .. } => {
+                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let pk_idx = table_def
+                    .pk_column_index()
+                    .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
+                let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
                 let data_btree = BTree::open(table_def.data_btree_root);
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row(&data, &table_def.columns)?;
                     if matches_where(&sel.where_clause, &table_def, &values)? {
-                        let row = build_row(&table_def, &values, &sel.columns)?;
+                        raw_rows.push(values);
+                    }
+                }
+            }
+            Plan::IndexSeek {
+                index_name,
+                key_expr,
+                ..
+            } => {
+                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let idx = indexes
+                    .iter()
+                    .find(|i| i.name == index_name)
+                    .ok_or_else(|| {
+                        MuroError::Execution(format!("Index '{}' not found", index_name))
+                    })?;
+                let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
+                let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
+                    let data_btree = BTree::open(table_def.data_btree_root);
+                    if let Some(data) = data_btree.search(pager, &pk_key)? {
+                        let values = deserialize_row(&data, &table_def.columns)?;
+                        if matches_where(&sel.where_clause, &table_def, &values)? {
+                            raw_rows.push(values);
+                        }
+                    }
+                }
+            }
+            Plan::FullScan { .. } | Plan::FtsScan { .. } => {
+                let data_btree = BTree::open(table_def.data_btree_root);
+                data_btree.scan(pager, |_k, v| {
+                    let values = deserialize_row(v, &table_def.columns)?;
+                    if matches_where(&sel.where_clause, &table_def, &values)? {
+                        raw_rows.push(values);
+                    }
+                    Ok(true)
+                })?;
+            }
+        }
+
+        let mut rows = execute_aggregation(raw_rows, &table_def, sel)?;
+
+        // ORDER BY
+        if let Some(order_items) = &sel.order_by {
+            sort_rows(&mut rows, order_items);
+        }
+
+        // OFFSET
+        if let Some(offset) = sel.offset {
+            let offset = offset as usize;
+            if offset >= rows.len() {
+                rows.clear();
+            } else {
+                rows = rows.into_iter().skip(offset).collect();
+            }
+        }
+
+        // LIMIT
+        if let Some(limit) = sel.limit {
+            rows.truncate(limit as usize);
+        }
+
+        Ok(ExecResult::Rows(rows))
+    } else {
+        // Non-aggregation path (original)
+        let mut rows: Vec<Row> = Vec::new();
+
+        match plan {
+            Plan::PkSeek { key_expr, .. } => {
+                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let pk_idx = table_def
+                    .pk_column_index()
+                    .ok_or_else(|| MuroError::Execution("Table has no primary key".into()))?;
+                let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
+                let data_btree = BTree::open(table_def.data_btree_root);
+                if let Some(data) = data_btree.search(pager, &pk_key)? {
+                    let values = deserialize_row(&data, &table_def.columns)?;
+                    let row = build_row(&table_def, &values, &sel.columns)?;
+                    if matches_where(&sel.where_clause, &table_def, &values)? {
                         rows.push(row);
                     }
                 }
             }
-        }
-        Plan::FullScan { .. } => {
-            let data_btree = BTree::open(table_def.data_btree_root);
-            data_btree.scan(pager, |_k, v| {
-                let values = deserialize_row(v, &table_def.columns)?;
-                if matches_where(&sel.where_clause, &table_def, &values)? {
-                    let row = build_row(&table_def, &values, &sel.columns)?;
-                    rows.push(row);
+            Plan::IndexSeek {
+                index_name,
+                key_expr,
+                ..
+            } => {
+                let key_val = eval_expr(&key_expr, &|_| None)?;
+                let idx = indexes
+                    .iter()
+                    .find(|i| i.name == index_name)
+                    .ok_or_else(|| {
+                        MuroError::Execution(format!("Index '{}' not found", index_name))
+                    })?;
+                let idx_col_idx = table_def.column_index(&idx.column_name).ok_or_else(|| {
+                    MuroError::Schema(format!(
+                        "Index column '{}' not found in table",
+                        idx.column_name
+                    ))
+                })?;
+                let idx_key = encode_value(&key_val, &table_def.columns[idx_col_idx].data_type);
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
+                    let data_btree = BTree::open(table_def.data_btree_root);
+                    if let Some(data) = data_btree.search(pager, &pk_key)? {
+                        let values = deserialize_row(&data, &table_def.columns)?;
+                        if matches_where(&sel.where_clause, &table_def, &values)? {
+                            let row = build_row(&table_def, &values, &sel.columns)?;
+                            rows.push(row);
+                        }
+                    }
                 }
-                Ok(true)
-            })?;
+            }
+            Plan::FullScan { .. } | Plan::FtsScan { .. } => {
+                let data_btree = BTree::open(table_def.data_btree_root);
+                data_btree.scan(pager, |_k, v| {
+                    let values = deserialize_row(v, &table_def.columns)?;
+                    if matches_where(&sel.where_clause, &table_def, &values)? {
+                        let row = build_row(&table_def, &values, &sel.columns)?;
+                        rows.push(row);
+                    }
+                    Ok(true)
+                })?;
+            }
         }
-        Plan::FtsScan { .. } => {
-            // FTS scan - handled in FTS steps
-            // For now, fall back to full scan
-            let data_btree = BTree::open(table_def.data_btree_root);
-            data_btree.scan(pager, |_k, v| {
-                let values = deserialize_row(v, &table_def.columns)?;
-                if matches_where(&sel.where_clause, &table_def, &values)? {
-                    let row = build_row(&table_def, &values, &sel.columns)?;
-                    rows.push(row);
-                }
-                Ok(true)
-            })?;
+
+        // SELECT DISTINCT
+        if sel.distinct {
+            let mut seen = HashSet::new();
+            rows.retain(|row| {
+                let key: Vec<ValueKey> = row
+                    .values
+                    .iter()
+                    .map(|(_, v)| ValueKey(v.clone()))
+                    .collect();
+                seen.insert(key)
+            });
         }
-    }
 
-    // ORDER BY
-    if let Some(order_items) = &sel.order_by {
-        sort_rows(&mut rows, order_items);
-    }
-
-    // OFFSET
-    if let Some(offset) = sel.offset {
-        let offset = offset as usize;
-        if offset >= rows.len() {
-            rows.clear();
-        } else {
-            rows = rows.into_iter().skip(offset).collect();
+        // ORDER BY
+        if let Some(order_items) = &sel.order_by {
+            sort_rows(&mut rows, order_items);
         }
-    }
 
-    // LIMIT
-    if let Some(limit) = sel.limit {
-        rows.truncate(limit as usize);
-    }
+        // OFFSET
+        if let Some(offset) = sel.offset {
+            let offset = offset as usize;
+            if offset >= rows.len() {
+                rows.clear();
+            } else {
+                rows = rows.into_iter().skip(offset).collect();
+            }
+        }
 
-    Ok(ExecResult::Rows(rows))
+        // LIMIT
+        if let Some(limit) = sel.limit {
+            rows.truncate(limit as usize);
+        }
+
+        Ok(ExecResult::Rows(rows))
+    }
 }
 
 /// Scan all rows of a table into qualified name format: Vec<Vec<(String, Value)>>
@@ -825,46 +918,88 @@ fn exec_select_join(
         }
     }
 
-    // 4. ORDER BY (before projection, so all columns are accessible)
-    if let Some(order_items) = &sel.order_by {
-        joined_rows.sort_by(|a, b| {
-            for item in order_items {
-                if let Expr::ColumnRef(col) = &item.expr {
-                    let va = resolve_join_column(col, a).ok().flatten();
-                    let vb = resolve_join_column(col, b).ok().flatten();
-                    let ord = cmp_values(va, vb);
-                    if ord != std::cmp::Ordering::Equal {
-                        return if item.descending { ord.reverse() } else { ord };
+    let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();
+
+    if need_aggregation {
+        // Aggregation path for joins
+        let mut rows = execute_aggregation_join(&joined_rows, sel, &hidden_columns)?;
+
+        // ORDER BY
+        if let Some(order_items) = &sel.order_by {
+            sort_rows(&mut rows, order_items);
+        }
+
+        // OFFSET
+        if let Some(offset) = sel.offset {
+            let offset = offset as usize;
+            if offset >= rows.len() {
+                rows.clear();
+            } else {
+                rows = rows.into_iter().skip(offset).collect();
+            }
+        }
+
+        // LIMIT
+        if let Some(limit) = sel.limit {
+            rows.truncate(limit as usize);
+        }
+
+        Ok(ExecResult::Rows(rows))
+    } else {
+        // 4. ORDER BY (before projection, so all columns are accessible)
+        if let Some(order_items) = &sel.order_by {
+            joined_rows.sort_by(|a, b| {
+                for item in order_items {
+                    if let Expr::ColumnRef(col) = &item.expr {
+                        let va = resolve_join_column(col, a).ok().flatten();
+                        let vb = resolve_join_column(col, b).ok().flatten();
+                        let ord = cmp_values(va, vb);
+                        if ord != std::cmp::Ordering::Equal {
+                            return if item.descending { ord.reverse() } else { ord };
+                        }
                     }
                 }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
-
-    // 5. OFFSET
-    if let Some(offset) = sel.offset {
-        let offset = offset as usize;
-        if offset >= joined_rows.len() {
-            joined_rows.clear();
-        } else {
-            joined_rows = joined_rows.into_iter().skip(offset).collect();
+                std::cmp::Ordering::Equal
+            });
         }
-    }
 
-    // 6. LIMIT
-    if let Some(limit) = sel.limit {
-        joined_rows.truncate(limit as usize);
-    }
+        // 5. OFFSET
+        if let Some(offset) = sel.offset {
+            let offset = offset as usize;
+            if offset >= joined_rows.len() {
+                joined_rows.clear();
+            } else {
+                joined_rows = joined_rows.into_iter().skip(offset).collect();
+            }
+        }
 
-    // 7. Project SELECT columns
-    let mut rows: Vec<Row> = Vec::new();
-    for jrow in &joined_rows {
-        let row = build_join_row(jrow, &sel.columns, &hidden_columns)?;
-        rows.push(row);
-    }
+        // 6. LIMIT
+        if let Some(limit) = sel.limit {
+            joined_rows.truncate(limit as usize);
+        }
 
-    Ok(ExecResult::Rows(rows))
+        // 7. Project SELECT columns
+        let mut rows: Vec<Row> = Vec::new();
+        for jrow in &joined_rows {
+            let row = build_join_row(jrow, &sel.columns, &hidden_columns)?;
+            rows.push(row);
+        }
+
+        // SELECT DISTINCT
+        if sel.distinct {
+            let mut seen = HashSet::new();
+            rows.retain(|row| {
+                let key: Vec<ValueKey> = row
+                    .values
+                    .iter()
+                    .map(|(_, v)| ValueKey(v.clone()))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+
+        Ok(ExecResult::Rows(rows))
+    }
 }
 
 fn build_join_row(
@@ -1517,6 +1652,598 @@ fn build_row(
     }
 
     Ok(Row { values: row_values })
+}
+
+// --- Aggregation infrastructure ---
+
+/// Check if any SelectColumn or HAVING clause contains an aggregate function.
+fn has_aggregates(columns: &[SelectColumn], having: &Option<Expr>) -> bool {
+    for col in columns {
+        if let SelectColumn::Expr(expr, _) = col {
+            if expr_contains_aggregate(expr) {
+                return true;
+            }
+        }
+    }
+    if let Some(h) = having {
+        if expr_contains_aggregate(h) {
+            return true;
+        }
+    }
+    false
+}
+
+fn expr_contains_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::AggregateFunc { .. } => true,
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_aggregate(left) || expr_contains_aggregate(right)
+        }
+        Expr::UnaryOp { operand, .. } => expr_contains_aggregate(operand),
+        Expr::Like { expr, pattern, .. } => {
+            expr_contains_aggregate(expr) || expr_contains_aggregate(pattern)
+        }
+        Expr::IsNull { expr, .. } => expr_contains_aggregate(expr),
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(op) = operand {
+                if expr_contains_aggregate(op) {
+                    return true;
+                }
+            }
+            for (cond, then) in when_clauses {
+                if expr_contains_aggregate(cond) || expr_contains_aggregate(then) {
+                    return true;
+                }
+            }
+            if let Some(e) = else_clause {
+                if expr_contains_aggregate(e) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expr::Cast { expr, .. } => expr_contains_aggregate(expr),
+        Expr::InList { expr, list, .. } => {
+            expr_contains_aggregate(expr) || list.iter().any(expr_contains_aggregate)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_aggregate(expr)
+                || expr_contains_aggregate(low)
+                || expr_contains_aggregate(high)
+        }
+        Expr::GreaterThanZero(inner) => expr_contains_aggregate(inner),
+        _ => false,
+    }
+}
+
+/// Accumulator for aggregate functions.
+enum Accumulator {
+    Count { count: i64 },
+    CountDistinct { values: HashSet<ValueKey> },
+    Sum { total: Option<i64> },
+    Min { val: Option<Value> },
+    Max { val: Option<Value> },
+    Avg { sum: i64, count: i64 },
+}
+
+impl Accumulator {
+    fn new(name: &str, distinct: bool) -> Self {
+        match name {
+            "COUNT" if distinct => Accumulator::CountDistinct {
+                values: HashSet::new(),
+            },
+            "COUNT" => Accumulator::Count { count: 0 },
+            "SUM" => Accumulator::Sum { total: None },
+            "MIN" => Accumulator::Min { val: None },
+            "MAX" => Accumulator::Max { val: None },
+            "AVG" => Accumulator::Avg { sum: 0, count: 0 },
+            _ => Accumulator::Count { count: 0 },
+        }
+    }
+
+    fn feed(&mut self, val: &Value) {
+        match self {
+            Accumulator::Count { count } => {
+                // COUNT(col) skips NULLs; COUNT(*) uses arg=None so this won't be called for NULLs
+                if !val.is_null() {
+                    *count += 1;
+                }
+            }
+            Accumulator::CountDistinct { values } => {
+                if !val.is_null() {
+                    values.insert(ValueKey(val.clone()));
+                }
+            }
+            Accumulator::Sum { total } => {
+                if let Value::Integer(n) = val {
+                    *total = Some(total.unwrap_or(0) + n);
+                }
+                // Skip NULLs and non-integer values
+            }
+            Accumulator::Min { val: current } => {
+                if val.is_null() {
+                    return;
+                }
+                match current {
+                    None => *current = Some(val.clone()),
+                    Some(cur) => {
+                        if cmp_values(Some(val), Some(cur)) == std::cmp::Ordering::Less {
+                            *current = Some(val.clone());
+                        }
+                    }
+                }
+            }
+            Accumulator::Max { val: current } => {
+                if val.is_null() {
+                    return;
+                }
+                match current {
+                    None => *current = Some(val.clone()),
+                    Some(cur) => {
+                        if cmp_values(Some(val), Some(cur)) == std::cmp::Ordering::Greater {
+                            *current = Some(val.clone());
+                        }
+                    }
+                }
+            }
+            Accumulator::Avg { sum, count } => {
+                if let Value::Integer(n) = val {
+                    *sum += n;
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    fn feed_count_star(&mut self) {
+        if let Accumulator::Count { count } = self {
+            *count += 1;
+        }
+    }
+
+    fn finalize(&self) -> Value {
+        match self {
+            Accumulator::Count { count } => Value::Integer(*count),
+            Accumulator::CountDistinct { values } => Value::Integer(values.len() as i64),
+            Accumulator::Sum { total } => match total {
+                Some(n) => Value::Integer(*n),
+                None => Value::Null,
+            },
+            Accumulator::Min { val } => val.clone().unwrap_or(Value::Null),
+            Accumulator::Max { val } => val.clone().unwrap_or(Value::Null),
+            Accumulator::Avg { sum, count } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    Value::Integer(*sum / *count)
+                }
+            }
+        }
+    }
+}
+
+/// Collect all AggregateFunc expressions from a list of SelectColumns and an optional HAVING clause.
+/// Returns a list of (index, name, arg, distinct) for each aggregate found.
+struct AggregateInfo {
+    name: String,
+    arg: Option<Expr>,
+    distinct: bool,
+}
+
+fn collect_aggregates(columns: &[SelectColumn], having: &Option<Expr>) -> Vec<AggregateInfo> {
+    let mut aggs = Vec::new();
+    for col in columns {
+        if let SelectColumn::Expr(expr, _) = col {
+            collect_aggregates_from_expr(expr, &mut aggs);
+        }
+    }
+    if let Some(h) = having {
+        collect_aggregates_from_expr(h, &mut aggs);
+    }
+    aggs
+}
+
+fn collect_aggregates_from_expr(expr: &Expr, aggs: &mut Vec<AggregateInfo>) {
+    match expr {
+        Expr::AggregateFunc {
+            name,
+            arg,
+            distinct,
+        } => {
+            // Check if we already have an identical aggregate
+            let already_exists = aggs.iter().any(|a| {
+                a.name == *name
+                    && a.distinct == *distinct
+                    && format!("{:?}", a.arg) == format!("{:?}", arg.as_deref().cloned())
+            });
+            if !already_exists {
+                aggs.push(AggregateInfo {
+                    name: name.clone(),
+                    arg: arg.as_deref().cloned(),
+                    distinct: *distinct,
+                });
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_aggregates_from_expr(left, aggs);
+            collect_aggregates_from_expr(right, aggs);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            collect_aggregates_from_expr(operand, aggs);
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_aggregates_from_expr(arg, aggs);
+            }
+        }
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(op) = operand {
+                collect_aggregates_from_expr(op, aggs);
+            }
+            for (cond, then) in when_clauses {
+                collect_aggregates_from_expr(cond, aggs);
+                collect_aggregates_from_expr(then, aggs);
+            }
+            if let Some(e) = else_clause {
+                collect_aggregates_from_expr(e, aggs);
+            }
+        }
+        Expr::Cast { expr, .. } => collect_aggregates_from_expr(expr, aggs),
+        Expr::Like { expr, pattern, .. } => {
+            collect_aggregates_from_expr(expr, aggs);
+            collect_aggregates_from_expr(pattern, aggs);
+        }
+        Expr::IsNull { expr, .. } => collect_aggregates_from_expr(expr, aggs),
+        Expr::InList { expr, list, .. } => {
+            collect_aggregates_from_expr(expr, aggs);
+            for item in list {
+                collect_aggregates_from_expr(item, aggs);
+            }
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_aggregates_from_expr(expr, aggs);
+            collect_aggregates_from_expr(low, aggs);
+            collect_aggregates_from_expr(high, aggs);
+        }
+        Expr::GreaterThanZero(inner) => collect_aggregates_from_expr(inner, aggs),
+        _ => {}
+    }
+}
+
+/// Find the index of an aggregate in the aggs list that matches a given AggregateFunc expression.
+fn find_aggregate_index(
+    aggs: &[AggregateInfo],
+    name: &str,
+    arg: &Option<Box<Expr>>,
+    distinct: bool,
+) -> Option<usize> {
+    aggs.iter().position(|a| {
+        a.name == name
+            && a.distinct == distinct
+            && format!("{:?}", a.arg) == format!("{:?}", arg.as_deref().cloned())
+    })
+}
+
+/// Substitute aggregate expressions in an Expr with their computed values.
+/// Returns a new Expr with aggregates replaced by their finalized values.
+fn substitute_aggregates(expr: &Expr, aggs: &[AggregateInfo], agg_values: &[Value]) -> Expr {
+    match expr {
+        Expr::AggregateFunc {
+            name,
+            arg,
+            distinct,
+        } => {
+            if let Some(idx) = find_aggregate_index(aggs, name, arg, *distinct) {
+                match &agg_values[idx] {
+                    Value::Integer(n) => Expr::IntLiteral(*n),
+                    Value::Varchar(s) => Expr::StringLiteral(s.clone()),
+                    Value::Null => Expr::Null,
+                    Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
+                }
+            } else {
+                Expr::Null
+            }
+        }
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(substitute_aggregates(left, aggs, agg_values)),
+            op: *op,
+            right: Box::new(substitute_aggregates(right, aggs, agg_values)),
+        },
+        Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+            op: *op,
+            operand: Box::new(substitute_aggregates(operand, aggs, agg_values)),
+        },
+        _ => expr.clone(),
+    }
+}
+
+/// Execute the aggregation pipeline for non-join queries.
+/// Takes raw rows (Vec<Vec<Value>>), groups them, computes aggregates,
+/// applies HAVING, and returns projected Rows.
+fn execute_aggregation(
+    raw_rows: Vec<Vec<Value>>,
+    table_def: &TableDef,
+    sel: &Select,
+) -> Result<Vec<Row>> {
+    let aggs = collect_aggregates(&sel.columns, &sel.having);
+    let has_group_by = sel.group_by.is_some();
+
+    // Build groups: group_key -> list of raw rows
+    let mut groups: Vec<(Vec<ValueKey>, Vec<Vec<Value>>)> = Vec::new();
+    let mut group_index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
+
+    for raw_row in &raw_rows {
+        let group_key = if let Some(group_exprs) = &sel.group_by {
+            let mut key = Vec::with_capacity(group_exprs.len());
+            for gexpr in group_exprs {
+                let val = eval_expr(gexpr, &|name| {
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| raw_row.get(i).cloned())
+                })?;
+                key.push(ValueKey(val));
+            }
+            key
+        } else {
+            // No GROUP BY: all rows in one group
+            vec![]
+        };
+
+        if let Some(&idx) = group_index.get(&group_key) {
+            groups[idx].1.push(raw_row.clone());
+        } else {
+            let idx = groups.len();
+            group_index.insert(group_key.clone(), idx);
+            groups.push((group_key, vec![raw_row.clone()]));
+        }
+    }
+
+    // If no rows and no GROUP BY, produce a single group (for SELECT COUNT(*) FROM empty_table)
+    if groups.is_empty() && !has_group_by {
+        groups.push((vec![], vec![]));
+    }
+
+    let mut result_rows = Vec::new();
+
+    for (_group_key, group_rows) in &groups {
+        // Create accumulators for each aggregate
+        let mut accumulators: Vec<Accumulator> = aggs
+            .iter()
+            .map(|a| Accumulator::new(&a.name, a.distinct))
+            .collect();
+
+        // Feed rows into accumulators
+        for raw_row in group_rows {
+            for (i, agg_info) in aggs.iter().enumerate() {
+                if agg_info.arg.is_none() {
+                    // COUNT(*)
+                    accumulators[i].feed_count_star();
+                } else {
+                    let val = eval_expr(agg_info.arg.as_ref().unwrap(), &|name| {
+                        table_def
+                            .column_index(name)
+                            .and_then(|j| raw_row.get(j).cloned())
+                    })?;
+                    accumulators[i].feed(&val);
+                }
+            }
+        }
+
+        // Finalize aggregates
+        let agg_values: Vec<Value> = accumulators.iter().map(|a| a.finalize()).collect();
+
+        // Apply HAVING filter
+        if let Some(having_expr) = &sel.having {
+            let substituted = substitute_aggregates(having_expr, &aggs, &agg_values);
+            // Use a representative row from the group for column references
+            let rep_row = group_rows.first();
+            let result = eval_expr(&substituted, &|name| {
+                if let Some(row) = rep_row {
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| row.get(i).cloned())
+                } else {
+                    None
+                }
+            })?;
+            if !is_truthy(&result) {
+                continue;
+            }
+        }
+
+        // Project SELECT columns
+        let rep_row = group_rows.first();
+        let mut row_values = Vec::new();
+
+        for sel_col in &sel.columns {
+            match sel_col {
+                SelectColumn::Star => {
+                    if let Some(raw) = rep_row {
+                        for (i, col) in table_def.columns.iter().enumerate() {
+                            if col.is_hidden {
+                                continue;
+                            }
+                            let val = raw.get(i).cloned().unwrap_or(Value::Null);
+                            row_values.push((col.name.clone(), val));
+                        }
+                    }
+                }
+                SelectColumn::Expr(expr, alias) => {
+                    let substituted = substitute_aggregates(expr, &aggs, &agg_values);
+                    let val = eval_expr(&substituted, &|name| {
+                        if let Some(row) = rep_row {
+                            table_def
+                                .column_index(name)
+                                .and_then(|i| row.get(i).cloned())
+                        } else {
+                            None
+                        }
+                    })?;
+                    let name = alias.clone().unwrap_or_else(|| match expr {
+                        Expr::ColumnRef(n) => n.clone(),
+                        Expr::AggregateFunc {
+                            name,
+                            arg,
+                            distinct,
+                        } => {
+                            let arg_str = match arg {
+                                None => "*".to_string(),
+                                Some(a) => {
+                                    if *distinct {
+                                        format!("DISTINCT {:?}", a)
+                                    } else {
+                                        format!("{:?}", a)
+                                    }
+                                }
+                            };
+                            format!("{}({})", name, arg_str)
+                        }
+                        _ => "?column?".to_string(),
+                    });
+                    row_values.push((name, val));
+                }
+            }
+        }
+
+        result_rows.push(Row { values: row_values });
+    }
+
+    Ok(result_rows)
+}
+
+/// Execute the aggregation pipeline for join queries.
+fn execute_aggregation_join(
+    joined_rows: &[Vec<(String, Value)>],
+    sel: &Select,
+    hidden_columns: &[String],
+) -> Result<Vec<Row>> {
+    let aggs = collect_aggregates(&sel.columns, &sel.having);
+    let has_group_by = sel.group_by.is_some();
+
+    // Build groups
+    #[allow(clippy::type_complexity)]
+    let mut groups: Vec<(Vec<ValueKey>, Vec<&Vec<(String, Value)>>)> = Vec::new();
+    let mut group_index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
+
+    for jrow in joined_rows {
+        let group_key = if let Some(group_exprs) = &sel.group_by {
+            let mut key = Vec::with_capacity(group_exprs.len());
+            for gexpr in group_exprs {
+                let val = eval_join_expr(gexpr, jrow)?;
+                key.push(ValueKey(val));
+            }
+            key
+        } else {
+            vec![]
+        };
+
+        if let Some(&idx) = group_index.get(&group_key) {
+            groups[idx].1.push(jrow);
+        } else {
+            let idx = groups.len();
+            group_index.insert(group_key.clone(), idx);
+            groups.push((group_key, vec![jrow]));
+        }
+    }
+
+    if groups.is_empty() && !has_group_by {
+        groups.push((vec![], vec![]));
+    }
+
+    let mut result_rows = Vec::new();
+
+    for (_group_key, group_rows) in &groups {
+        let mut accumulators: Vec<Accumulator> = aggs
+            .iter()
+            .map(|a| Accumulator::new(&a.name, a.distinct))
+            .collect();
+
+        for jrow in group_rows {
+            for (i, agg_info) in aggs.iter().enumerate() {
+                if agg_info.arg.is_none() {
+                    accumulators[i].feed_count_star();
+                } else {
+                    let val = eval_join_expr(agg_info.arg.as_ref().unwrap(), jrow)?;
+                    accumulators[i].feed(&val);
+                }
+            }
+        }
+
+        let agg_values: Vec<Value> = accumulators.iter().map(|a| a.finalize()).collect();
+
+        if let Some(having_expr) = &sel.having {
+            let substituted = substitute_aggregates(having_expr, &aggs, &agg_values);
+            let rep_row = group_rows.first().map(|r| r.as_slice()).unwrap_or(&[]);
+            let result = eval_join_expr(&substituted, rep_row)?;
+            if !is_truthy(&result) {
+                continue;
+            }
+        }
+
+        let rep_row = group_rows.first().map(|r| r.as_slice()).unwrap_or(&[]);
+        let mut row_values = Vec::new();
+
+        for sel_col in &sel.columns {
+            match sel_col {
+                SelectColumn::Star => {
+                    for (qualified_name, val) in rep_row {
+                        if hidden_columns.contains(qualified_name) {
+                            continue;
+                        }
+                        let col_name = qualified_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(qualified_name)
+                            .to_string();
+                        row_values.push((col_name, val.clone()));
+                    }
+                }
+                SelectColumn::Expr(expr, alias) => {
+                    let substituted = substitute_aggregates(expr, &aggs, &agg_values);
+                    let val = eval_join_expr(&substituted, rep_row)?;
+                    let name = alias.clone().unwrap_or_else(|| match expr {
+                        Expr::ColumnRef(n) => n.clone(),
+                        Expr::AggregateFunc {
+                            name,
+                            arg,
+                            distinct,
+                        } => {
+                            let arg_str = match arg {
+                                None => "*".to_string(),
+                                Some(a) => {
+                                    if *distinct {
+                                        format!("DISTINCT {:?}", a)
+                                    } else {
+                                        format!("{:?}", a)
+                                    }
+                                }
+                            };
+                            format!("{}({})", name, arg_str)
+                        }
+                        _ => "?column?".to_string(),
+                    });
+                    row_values.push((name, val));
+                }
+            }
+        }
+
+        result_rows.push(Row { values: row_values });
+    }
+
+    Ok(result_rows)
 }
 
 fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {

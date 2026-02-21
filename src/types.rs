@@ -1,4 +1,5 @@
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -42,6 +43,36 @@ impl fmt::Display for Value {
             Value::Varchar(v) => write!(f, "{}", v),
             Value::Varbinary(v) => write!(f, "<binary {} bytes>", v.len()),
             Value::Null => write!(f, "NULL"),
+        }
+    }
+}
+
+/// Wrapper for Value that implements Eq + Hash, for use in HashMap/HashSet (GROUP BY, COUNT DISTINCT).
+#[derive(Debug, Clone)]
+pub struct ValueKey(pub Value);
+
+impl PartialEq for ValueKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Varchar(a), Value::Varchar(b)) => a == b,
+            (Value::Varbinary(a), Value::Varbinary(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ValueKey {}
+
+impl Hash for ValueKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(&self.0).hash(state);
+        match &self.0 {
+            Value::Integer(n) => n.hash(state),
+            Value::Varchar(s) => s.hash(state),
+            Value::Varbinary(b) => b.hash(state),
+            Value::Null => {}
         }
     }
 }

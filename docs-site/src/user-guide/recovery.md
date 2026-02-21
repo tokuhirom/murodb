@@ -34,16 +34,16 @@ Analyze WAL consistency without modifying the database.
 
 ```bash
 # Text output
-murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive
+murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive
 
 # JSON output (for automation)
-murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
+murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive --format json
 ```
 
 Quarantine files can also be inspected directly:
 
 ```bash
-murodb mydb.db --inspect-wal mydb.wal.quarantine.20240101_120000
+murodb-wal-inspect mydb.db --wal mydb.wal.quarantine.20240101_120000
 ```
 
 ### Exit codes

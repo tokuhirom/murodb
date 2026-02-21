@@ -20,7 +20,7 @@ ls -lh mydb.wal
 If the database cannot be opened, inspect the WAL without modifying it:
 
 ```bash
-murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
+murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive --format json
 ```
 
 ## Scenario: CommitInDoubt Detected
@@ -74,7 +74,7 @@ murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
 
 1. **Inspect first** — do not delete any files:
    ```bash
-   murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
+   murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive --format json
    ```
 2. Review the report. If only incomplete (uncommitted) transactions are malformed, they can be safely skipped.
 3. Open with permissive mode to recover valid data:
@@ -119,6 +119,6 @@ Escalate to the development team if:
 When escalating, include:
 
 1. Full `SHOW DATABASE STATS` output.
-2. WAL inspection JSON output (`--format json`).
+2. WAL inspection JSON output (`murodb-wal-inspect --format json`).
 3. Kernel logs around the time of failure (`dmesg`, `journalctl`).
 4. The quarantined WAL file(s), if any.

@@ -7,6 +7,9 @@ use crate::btree::key_encoding::{
 };
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
+use crate::fts::index::{FtsIndex, FtsPendingOp};
+use crate::fts::query::{query_boolean, query_natural, FtsResult};
+use crate::fts::snippet::fts_snippet;
 use crate::schema::catalog::{SystemCatalog, TableDef};
 use crate::schema::column::{ColumnDef, DefaultValue};
 use crate::schema::index::{IndexDef, IndexType};
@@ -37,6 +40,22 @@ pub enum ExecResult {
     Ok,
 }
 
+const SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
+const SQL_FTS_SCORE_SCALE: f64 = 1_000_000.0;
+
+#[derive(Clone)]
+struct FtsEvalContext {
+    doc_id: Option<u64>,
+    score_maps: HashMap<MatchExprKey, HashMap<u64, i64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MatchExprKey {
+    column: String,
+    query: String,
+    mode: MatchMode,
+}
+
 /// Execute a SQL string.
 pub fn execute(
     sql: &str,
@@ -55,13 +74,7 @@ pub fn execute_statement(
     match stmt {
         Statement::CreateTable(ct) => exec_create_table(ct, pager, catalog),
         Statement::CreateIndex(ci) => exec_create_index(ci, pager, catalog),
-        Statement::CreateFulltextIndex(_fi) => {
-            // TODO: FTS index integration with catalog is not yet complete.
-            // FTS operations (create/update/delete) need catalog metadata support.
-            Err(MuroError::Execution(
-                "CREATE FULLTEXT INDEX is not yet fully integrated with the SQL engine".into(),
-            ))
-        }
+        Statement::CreateFulltextIndex(fi) => exec_create_fulltext_index(fi, pager, catalog),
         Statement::DropTable(dt) => exec_drop_table(dt, pager, catalog),
         Statement::DropIndex(di) => exec_drop_index(di, pager, catalog),
         Statement::AlterTable(at) => exec_alter_table(at, pager, catalog),
@@ -392,6 +405,79 @@ fn exec_create_index(
         index_type: IndexType::BTree,
         is_unique: ci.is_unique,
         btree_root: idx_btree_mut.root_page_id(),
+    };
+    catalog.create_index(pager, idx_def)?;
+
+    Ok(ExecResult::Ok)
+}
+
+fn exec_create_fulltext_index(
+    fi: &CreateFulltextIndex,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let table_def = catalog
+        .get_table(pager, &fi.table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", fi.table_name)))?;
+
+    if catalog.get_index(pager, &fi.index_name)?.is_some() {
+        return Err(MuroError::Schema(format!(
+            "Index '{}' already exists",
+            fi.index_name
+        )));
+    }
+
+    let col_idx = table_def.column_index(&fi.column_name).ok_or_else(|| {
+        MuroError::Schema(format!(
+            "Column '{}' not found in table '{}'",
+            fi.column_name, fi.table_name
+        ))
+    })?;
+
+    validate_fulltext_parser(fi)?;
+    ensure_fts_supported_pk(&table_def)?;
+
+    let col_ty = table_def.columns[col_idx].data_type;
+    if !matches!(col_ty, DataType::Varchar(_) | DataType::Text) {
+        return Err(MuroError::Schema(format!(
+            "FULLTEXT index column '{}' must be VARCHAR or TEXT",
+            fi.column_name
+        )));
+    }
+
+    let mut fts_index = FtsIndex::create(pager, SQL_FTS_TERM_KEY)?;
+    let fts_root = fts_index.root_page_id();
+
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut docs: Vec<(u64, String)> = Vec::new();
+    data_btree.scan(pager, |_pk, row| {
+        let values =
+            deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
+        let doc_id = extract_fts_doc_id(&table_def, &values)?;
+        let text = values
+            .get(col_idx)
+            .and_then(value_to_fts_text)
+            .unwrap_or_default();
+        docs.push((doc_id, text));
+        Ok(true)
+    })?;
+    if let Err(e) = fts_index.build_from_docs(pager, &docs) {
+        let fts_btree = BTree::open(fts_root);
+        if let Ok(pages) = fts_btree.collect_all_pages(pager) {
+            for page_id in pages {
+                pager.free_page(page_id);
+            }
+        }
+        return Err(e);
+    }
+
+    let idx_def = IndexDef {
+        name: fi.index_name.clone(),
+        table_name: fi.table_name.clone(),
+        column_names: vec![fi.column_name.clone()],
+        index_type: IndexType::Fulltext,
+        is_unique: false,
+        btree_root: fts_root,
     };
     catalog.create_index(pager, idx_def)?;
 
@@ -1596,6 +1682,7 @@ fn exec_select(
     let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
+        .filter(|idx| idx.index_type == IndexType::BTree)
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
 
@@ -1655,7 +1742,7 @@ fn exec_select(
                     }
                 }
             }
-            Plan::FullScan { .. } | Plan::FtsScan { .. } => {
+            Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
                 data_btree.scan(pager, |_k, v| {
                     let values = deserialize_row_versioned(
@@ -1668,6 +1755,33 @@ fn exec_select(
                     }
                     Ok(true)
                 })?;
+            }
+            Plan::FtsScan {
+                column,
+                query,
+                mode,
+                ..
+            } => {
+                let mut fts_ctx = build_fts_eval_context(
+                    &sel.columns,
+                    &sel.where_clause,
+                    &table_def.name,
+                    &indexes,
+                    pager,
+                )?;
+                let fts_rows =
+                    execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
+                for values in fts_rows {
+                    fts_ctx.doc_id = extract_fts_doc_id(&table_def, &values).ok();
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
+                        raw_rows.push(values);
+                    }
+                }
             }
         }
 
@@ -1743,7 +1857,7 @@ fn exec_select(
                     }
                 }
             }
-            Plan::FullScan { .. } | Plan::FtsScan { .. } => {
+            Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
                 data_btree.scan(pager, |_k, v| {
                     let values = deserialize_row_versioned(
@@ -1757,6 +1871,35 @@ fn exec_select(
                     }
                     Ok(true)
                 })?;
+            }
+            Plan::FtsScan {
+                column,
+                query,
+                mode,
+                ..
+            } => {
+                let mut fts_ctx = build_fts_eval_context(
+                    &sel.columns,
+                    &sel.where_clause,
+                    &table_def.name,
+                    &indexes,
+                    pager,
+                )?;
+                let fts_rows =
+                    execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
+                for values in fts_rows {
+                    fts_ctx.doc_id = extract_fts_doc_id(&table_def, &values).ok();
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
+                        let row =
+                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                        rows.push(row);
+                    }
+                }
             }
         }
 
@@ -2208,6 +2351,7 @@ fn exec_explain(
     let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
+        .filter(|idx| idx.index_type == IndexType::BTree)
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
 
@@ -2233,11 +2377,21 @@ fn exec_explain(
             };
             ("ALL", String::new(), extra.to_string())
         }
-        Plan::FtsScan { column, .. } => (
-            "fulltext",
-            format!("fts_{}", column),
-            "Using where; Using fulltext".to_string(),
-        ),
+        Plan::FtsScan { column, .. } => {
+            let key_name = indexes
+                .iter()
+                .find(|idx| {
+                    idx.index_type == IndexType::Fulltext
+                        && idx.column_names.first().map(|c| c.as_str()) == Some(column.as_str())
+                })
+                .map(|idx| idx.name.clone())
+                .unwrap_or_else(|| format!("fts_{}", column));
+            (
+                "fulltext",
+                key_name,
+                "Using where; Using fulltext".to_string(),
+            )
+        }
     };
 
     let row = Row {
@@ -3156,6 +3310,19 @@ fn insert_into_secondary_indexes(
                     idx_btree.insert(pager, &full_key, pk_key)?;
                 }
             }
+        } else if idx.index_type == IndexType::Fulltext {
+            let Some(col_name) = idx.column_names.first() else {
+                continue;
+            };
+            let Some(col_idx) = table_def.column_index(col_name) else {
+                continue;
+            };
+            let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
+                continue;
+            };
+            let doc_id = extract_fts_doc_id(table_def, values)?;
+            let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
+            fts.apply_pending(pager, &[FtsPendingOp::Add { doc_id, text }])?;
         }
     }
     Ok(())
@@ -3193,9 +3360,378 @@ fn delete_from_secondary_indexes(
                     idx_btree.delete(pager, &full_key)?;
                 }
             }
+        } else if idx.index_type == IndexType::Fulltext {
+            let Some(col_name) = idx.column_names.first() else {
+                continue;
+            };
+            let Some(col_idx) = table_def.column_index(col_name) else {
+                continue;
+            };
+            let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
+                continue;
+            };
+            let doc_id = extract_fts_doc_id(table_def, values)?;
+            let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
+            fts.apply_pending(pager, &[FtsPendingOp::Remove { doc_id, text }])?;
         }
     }
     Ok(())
+}
+
+fn execute_fts_scan_rows(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    column: &str,
+    query: &str,
+    mode: MatchMode,
+    pager: &mut impl PageStore,
+) -> Result<Vec<Vec<Value>>> {
+    ensure_fts_supported_pk(table_def)?;
+    let fts = open_fulltext_index(indexes, &table_def.name, column);
+    let fts = fts?;
+    let results = match mode {
+        MatchMode::NaturalLanguage => query_natural(&fts, pager, query)?,
+        MatchMode::Boolean => query_boolean(&fts, pager, query)?,
+    };
+
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut rows = Vec::new();
+    for r in results {
+        let doc_id_i64 = i64::try_from(r.doc_id).map_err(|_| {
+            MuroError::Execution(format!("FTS doc_id {} is out of BIGINT range", r.doc_id))
+        })?;
+        let pk_key = encode_i64(doc_id_i64).to_vec();
+        if let Some(data) = data_btree.search(pager, &pk_key)? {
+            let values =
+                deserialize_row_versioned(&data, &table_def.columns, table_def.row_format_version)?;
+            rows.push(values);
+        }
+    }
+    Ok(rows)
+}
+
+fn open_fulltext_index(indexes: &[IndexDef], table_name: &str, column: &str) -> Result<FtsIndex> {
+    let idx = indexes
+        .iter()
+        .find(|i| {
+            i.index_type == IndexType::Fulltext
+                && i.column_names.first().map(|c| c.as_str()) == Some(column)
+        })
+        .ok_or_else(|| {
+            MuroError::Execution(format!(
+                "FULLTEXT index not found for column '{}' on table '{}'",
+                column, table_name
+            ))
+        })?;
+    Ok(FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY))
+}
+
+fn build_fts_eval_context(
+    select_columns: &[SelectColumn],
+    where_clause: &Option<Expr>,
+    table_name: &str,
+    indexes: &[IndexDef],
+    pager: &mut impl PageStore,
+) -> Result<FtsEvalContext> {
+    let mut keys: HashSet<MatchExprKey> = HashSet::new();
+    if let Some(where_expr) = where_clause {
+        collect_match_expr_keys(where_expr, &mut keys);
+    }
+    for col in select_columns {
+        if let SelectColumn::Expr(expr, _) = col {
+            collect_match_expr_keys(expr, &mut keys);
+        }
+    }
+
+    let mut score_maps: HashMap<MatchExprKey, HashMap<u64, i64>> = HashMap::new();
+    for key in keys {
+        let fts = open_fulltext_index(indexes, table_name, &key.column)?;
+        let results = match key.mode {
+            MatchMode::NaturalLanguage => query_natural(&fts, pager, &key.query)?,
+            MatchMode::Boolean => query_boolean(&fts, pager, &key.query)?,
+        };
+        let mut scores = HashMap::new();
+        for result in results {
+            scores.insert(result.doc_id, scale_fts_score(&result));
+        }
+        score_maps.insert(key, scores);
+    }
+
+    Ok(FtsEvalContext {
+        doc_id: None,
+        score_maps,
+    })
+}
+
+fn collect_match_expr_keys(expr: &Expr, keys: &mut HashSet<MatchExprKey>) {
+    match expr {
+        Expr::MatchAgainst {
+            column,
+            query,
+            mode,
+        } => {
+            keys.insert(MatchExprKey {
+                column: column.clone(),
+                query: query.clone(),
+                mode: *mode,
+            });
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_match_expr_keys(left, keys);
+            collect_match_expr_keys(right, keys);
+        }
+        Expr::UnaryOp { operand, .. } => collect_match_expr_keys(operand, keys),
+        Expr::Like { expr, pattern, .. } => {
+            collect_match_expr_keys(expr, keys);
+            collect_match_expr_keys(pattern, keys);
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_match_expr_keys(expr, keys);
+            for e in list {
+                collect_match_expr_keys(e, keys);
+            }
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_match_expr_keys(expr, keys);
+            collect_match_expr_keys(low, keys);
+            collect_match_expr_keys(high, keys);
+        }
+        Expr::IsNull { expr, .. } => collect_match_expr_keys(expr, keys),
+        Expr::FtsSnippet { .. } => {}
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_match_expr_keys(arg, keys);
+            }
+        }
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(op) = operand {
+                collect_match_expr_keys(op, keys);
+            }
+            for (c, t) in when_clauses {
+                collect_match_expr_keys(c, keys);
+                collect_match_expr_keys(t, keys);
+            }
+            if let Some(e) = else_clause {
+                collect_match_expr_keys(e, keys);
+            }
+        }
+        Expr::Cast { expr, .. } => collect_match_expr_keys(expr, keys),
+        Expr::GreaterThanZero(inner) => collect_match_expr_keys(inner, keys),
+        Expr::InSubquery { expr, .. } => collect_match_expr_keys(expr, keys),
+        _ => {}
+    }
+}
+
+fn materialize_fts_expr(
+    expr: &Expr,
+    table_def: &TableDef,
+    values: &[Value],
+    fts_ctx: Option<&FtsEvalContext>,
+) -> Expr {
+    match expr {
+        Expr::MatchAgainst {
+            column,
+            query,
+            mode,
+        } => {
+            let score = match (fts_ctx.and_then(|ctx| ctx.doc_id), fts_ctx) {
+                (Some(doc_id), Some(ctx)) => {
+                    let key = MatchExprKey {
+                        column: column.clone(),
+                        query: query.clone(),
+                        mode: *mode,
+                    };
+                    ctx.score_maps
+                        .get(&key)
+                        .and_then(|scores| scores.get(&doc_id).copied())
+                        .unwrap_or(0)
+                }
+                _ => 0,
+            };
+            Expr::IntLiteral(score)
+        }
+        Expr::FtsSnippet {
+            column,
+            query,
+            pre_tag,
+            post_tag,
+            context_chars,
+        } => {
+            let snippet = table_def
+                .column_index(column)
+                .and_then(|i| values.get(i))
+                .and_then(value_to_fts_text)
+                .map(|text| fts_snippet(&text, query, pre_tag, post_tag, *context_chars))
+                .unwrap_or_default();
+            Expr::StringLiteral(snippet)
+        }
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(materialize_fts_expr(left, table_def, values, fts_ctx)),
+            op: *op,
+            right: Box::new(materialize_fts_expr(right, table_def, values, fts_ctx)),
+        },
+        Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+            op: *op,
+            operand: Box::new(materialize_fts_expr(operand, table_def, values, fts_ctx)),
+        },
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(materialize_fts_expr(expr, table_def, values, fts_ctx)),
+            pattern: Box::new(materialize_fts_expr(pattern, table_def, values, fts_ctx)),
+            negated: *negated,
+        },
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => Expr::InList {
+            expr: Box::new(materialize_fts_expr(expr, table_def, values, fts_ctx)),
+            list: list
+                .iter()
+                .map(|e| materialize_fts_expr(e, table_def, values, fts_ctx))
+                .collect(),
+            negated: *negated,
+        },
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => Expr::Between {
+            expr: Box::new(materialize_fts_expr(expr, table_def, values, fts_ctx)),
+            low: Box::new(materialize_fts_expr(low, table_def, values, fts_ctx)),
+            high: Box::new(materialize_fts_expr(high, table_def, values, fts_ctx)),
+            negated: *negated,
+        },
+        Expr::IsNull { expr, negated } => Expr::IsNull {
+            expr: Box::new(materialize_fts_expr(expr, table_def, values, fts_ctx)),
+            negated: *negated,
+        },
+        Expr::FunctionCall { name, args } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| materialize_fts_expr(a, table_def, values, fts_ctx))
+                .collect(),
+        },
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => Expr::CaseWhen {
+            operand: operand
+                .as_ref()
+                .map(|o| Box::new(materialize_fts_expr(o, table_def, values, fts_ctx))),
+            when_clauses: when_clauses
+                .iter()
+                .map(|(c, t)| {
+                    (
+                        materialize_fts_expr(c, table_def, values, fts_ctx),
+                        materialize_fts_expr(t, table_def, values, fts_ctx),
+                    )
+                })
+                .collect(),
+            else_clause: else_clause
+                .as_ref()
+                .map(|e| Box::new(materialize_fts_expr(e, table_def, values, fts_ctx))),
+        },
+        Expr::Cast { expr, target_type } => Expr::Cast {
+            expr: Box::new(materialize_fts_expr(expr, table_def, values, fts_ctx)),
+            target_type: *target_type,
+        },
+        Expr::GreaterThanZero(inner) => Expr::GreaterThanZero(Box::new(materialize_fts_expr(
+            inner, table_def, values, fts_ctx,
+        ))),
+        _ => expr.clone(),
+    }
+}
+
+fn scale_fts_score(r: &FtsResult) -> i64 {
+    (r.score * SQL_FTS_SCORE_SCALE).round() as i64
+}
+
+fn validate_fulltext_parser(fi: &CreateFulltextIndex) -> Result<()> {
+    if !fi.parser.eq_ignore_ascii_case("ngram") {
+        return Err(MuroError::Execution(format!(
+            "Unsupported FULLTEXT parser '{}'; currently only 'ngram' is available",
+            fi.parser
+        )));
+    }
+    if fi.ngram_n != 2 {
+        return Err(MuroError::Execution(format!(
+            "Unsupported ngram size {}; currently only n=2 is available",
+            fi.ngram_n
+        )));
+    }
+    if !fi.normalize.eq_ignore_ascii_case("nfkc") {
+        return Err(MuroError::Execution(format!(
+            "Unsupported normalize='{}'; currently only 'nfkc' is available",
+            fi.normalize
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_fts_supported_pk(table_def: &TableDef) -> Result<()> {
+    if table_def.pk_columns.len() != 1 {
+        return Err(MuroError::Execution(
+            "FULLTEXT currently requires a single BIGINT primary key".into(),
+        ));
+    }
+    let pk_col = &table_def.pk_columns[0];
+    let pk_idx = table_def.column_index(pk_col).ok_or_else(|| {
+        MuroError::Execution(format!(
+            "Primary key column '{}' not found in table '{}'",
+            pk_col, table_def.name
+        ))
+    })?;
+    if table_def.columns[pk_idx].data_type != DataType::BigInt {
+        return Err(MuroError::Execution(
+            "FULLTEXT currently requires BIGINT primary key".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn extract_fts_doc_id(table_def: &TableDef, values: &[Value]) -> Result<u64> {
+    ensure_fts_supported_pk(table_def)?;
+    let pk_col = &table_def.pk_columns[0];
+    let pk_idx = table_def.column_index(pk_col).ok_or_else(|| {
+        MuroError::Execution(format!(
+            "Primary key column '{}' not found in table '{}'",
+            pk_col, table_def.name
+        ))
+    })?;
+    let pk = values
+        .get(pk_idx)
+        .ok_or_else(|| MuroError::Execution("Missing primary key value".into()))?;
+    match pk {
+        Value::Integer(n) if *n >= 0 => Ok(*n as u64),
+        Value::Integer(_) => Err(MuroError::Execution(
+            "FULLTEXT requires non-negative BIGINT primary key values".into(),
+        )),
+        _ => Err(MuroError::Execution(
+            "FULLTEXT requires BIGINT primary key values".into(),
+        )),
+    }
+}
+
+fn value_to_fts_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Varchar(s) => Some(s.clone()),
+        Value::Null => None,
+        Value::Integer(n) => Some(n.to_string()),
+        Value::Varbinary(_) => None,
+    }
 }
 
 /// Validate that a value fits within the constraints of the data type.
@@ -3327,6 +3863,26 @@ fn matches_where(
     }
 }
 
+fn matches_where_with_fts(
+    where_clause: &Option<Expr>,
+    table_def: &TableDef,
+    values: &[Value],
+    fts_ctx: Option<&FtsEvalContext>,
+) -> Result<bool> {
+    match where_clause {
+        None => Ok(true),
+        Some(expr) => {
+            let expr = materialize_fts_expr(expr, table_def, values, fts_ctx);
+            let result = eval_expr(&expr, &|name| {
+                table_def
+                    .column_index(name)
+                    .and_then(|i| values.get(i).cloned())
+            })?;
+            Ok(is_truthy(&result))
+        }
+    }
+}
+
 fn build_row(
     table_def: &TableDef,
     values: &[Value],
@@ -3353,6 +3909,44 @@ fn build_row(
                 })?;
                 let name = alias.clone().unwrap_or_else(|| match expr {
                     Expr::ColumnRef(n) => n.clone(),
+                    _ => "?column?".to_string(),
+                });
+                row_values.push((name, val));
+            }
+        }
+    }
+
+    Ok(Row { values: row_values })
+}
+
+fn build_row_with_fts(
+    table_def: &TableDef,
+    values: &[Value],
+    select_columns: &[SelectColumn],
+    fts_ctx: Option<&FtsEvalContext>,
+) -> Result<Row> {
+    let mut row_values = Vec::new();
+
+    for sel_col in select_columns {
+        match sel_col {
+            SelectColumn::Star => {
+                for (i, col) in table_def.columns.iter().enumerate() {
+                    if col.is_hidden {
+                        continue;
+                    }
+                    let val = values.get(i).cloned().unwrap_or(Value::Null);
+                    row_values.push((col.name.clone(), val));
+                }
+            }
+            SelectColumn::Expr(expr, alias) => {
+                let expr = materialize_fts_expr(expr, table_def, values, fts_ctx);
+                let val = eval_expr(&expr, &|name| {
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| values.get(i).cloned())
+                })?;
+                let name = alias.clone().unwrap_or_else(|| match expr {
+                    Expr::ColumnRef(ref n) => n.clone(),
                     _ => "?column?".to_string(),
                 });
                 row_values.push((name, val));

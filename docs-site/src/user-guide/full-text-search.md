@@ -1,39 +1,40 @@
 # Full-Text Search
 
-MuroDB has an internal FTS engine (bigram + BM25 + boolean query parser), but the SQL DDL path is still being integrated.
+MuroDB provides MySQL-compatible full-text search with bigram tokenization.
 
-## Current status
+## Creating a fulltext index
 
-- SQL syntax for `CREATE FULLTEXT INDEX` is parsed.
-- In the current release, executing `CREATE FULLTEXT INDEX ...` through SQL returns an execution error (integration in progress).
-- FTS is currently usable through the Rust API in `murodb::fts`.
-
-## Rust API workflow
-
-```rust
-use murodb::fts::index::{FtsIndex, FtsPendingOp};
-use murodb::fts::query::{query_boolean, query_natural};
-
-let mut idx = FtsIndex::create(&mut pager, term_key)?;
-
-idx.apply_pending(&mut pager, &[
-    FtsPendingOp::Add { doc_id: 1, text: "東京タワーの夜景".into() },
-    FtsPendingOp::Add { doc_id: 2, text: "京都の金閣寺".into() },
-])?;
-
-let natural = query_natural(&idx, &mut pager, "東京タワー")?;
-let boolean = query_boolean(&idx, &mut pager, "\"東京タワー\" +夜景 -混雑")?;
+```sql
+CREATE FULLTEXT INDEX t_body_fts ON t(body)
+  WITH PARSER ngram
+  OPTIONS (n=2, normalize='nfkc');
 ```
+
+`WITH PARSER` / `OPTIONS` syntax is available so parser variants can be expanded in future releases.
 
 ## Query semantics
 
-### NATURAL mode
+### NATURAL LANGUAGE MODE
 
 - BM25-based relevance ranking.
 
-### BOOLEAN mode
+```sql
+SELECT id, MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) AS score
+FROM t
+WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0
+ORDER BY score DESC
+LIMIT 20;
+```
+
+### BOOLEAN MODE
 
 Supports `+term` (required), `-term` (excluded), and `"phrase"` (exact phrase).
+
+```sql
+SELECT id
+FROM t
+WHERE MATCH(body) AGAINST('"東京タワー" +夜景 -混雑' IN BOOLEAN MODE) > 0;
+```
 
 | Operator | Meaning | Example |
 |---|---|---|
@@ -44,11 +45,14 @@ Supports `+term` (required), `-term` (excluded), and `"phrase"` (exact phrase).
 
 ## Snippet helper
 
-Use `murodb::fts::snippet::fts_snippet()` for highlighted excerpts.
+Use `fts_snippet()` for highlighted excerpts.
 
-```rust
-use murodb::fts::snippet::fts_snippet;
-let s = fts_snippet("東京タワーの夜景がきれい", "\"東京タワー\" +夜景", "<mark>", "</mark>", 30);
+```sql
+SELECT id,
+  fts_snippet(body, '"東京タワー"', '<mark>', '</mark>', 30) AS snippet
+FROM t
+WHERE MATCH(body) AGAINST('"東京タワー"' IN BOOLEAN MODE) > 0
+LIMIT 10;
 ```
 
 ## Internal design

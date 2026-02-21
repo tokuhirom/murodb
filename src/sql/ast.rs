@@ -289,7 +289,7 @@ pub enum UnaryOp {
     Neg,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatchMode {
     NaturalLanguage,
     Boolean,

@@ -496,3 +496,224 @@ fn test_select_star_after_add_column() {
     assert_eq!(rows[0].values.len(), 3);
     assert_eq!(rows[0].get("age"), Some(&Value::Integer(25)));
 }
+
+// ─── UNIQUE constraint via ALTER TABLE ─────────────────────────
+
+#[test]
+fn test_add_column_unique_creates_index() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN email VARCHAR UNIQUE",
+    );
+
+    // Insert with unique email should work
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, email) VALUES (2, 'bob', 'bob@test.com')",
+    );
+
+    // Insert duplicate email should fail
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, email) VALUES (3, 'charlie', 'bob@test.com')",
+    );
+    assert!(
+        err.contains("unique") || err.contains("Duplicate"),
+        "Error: {}",
+        err
+    );
+}
+
+#[test]
+fn test_modify_column_add_unique() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'bob')",
+    );
+
+    // Add UNIQUE constraint via MODIFY
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN name VARCHAR UNIQUE",
+    );
+
+    // Duplicate should now fail
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (3, 'alice')",
+    );
+    assert!(
+        err.contains("unique") || err.contains("Duplicate"),
+        "Error: {}",
+        err
+    );
+}
+
+#[test]
+fn test_modify_column_add_unique_with_duplicates_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'alice')",
+    );
+
+    // Adding UNIQUE should fail because duplicates exist
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN name VARCHAR UNIQUE",
+    );
+    assert!(
+        err.contains("Duplicate") || err.contains("unique"),
+        "Error: {}",
+        err
+    );
+}
+
+// ─── NOT NULL validation ───────────────────────────────────────
+
+#[test]
+fn test_add_column_not_null_without_default_on_nonempty_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t (id) VALUES (1)");
+
+    // Should fail: NOT NULL without DEFAULT on table with rows
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN val INT NOT NULL",
+    );
+    assert!(
+        err.contains("NOT NULL") && err.contains("DEFAULT"),
+        "Error: {}",
+        err
+    );
+}
+
+#[test]
+fn test_add_column_not_null_with_default_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t (id) VALUES (1)");
+
+    // NOT NULL with DEFAULT should succeed
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN val INT NOT NULL DEFAULT 0",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, val FROM t");
+    assert_eq!(rows[0].get("val"), Some(&Value::Integer(0)));
+}
+
+#[test]
+fn test_add_column_not_null_on_empty_table_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY)",
+    );
+
+    // NOT NULL without DEFAULT on empty table should succeed
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN val INT NOT NULL",
+    );
+}
+
+#[test]
+fn test_modify_column_to_not_null_with_nulls_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t (id) VALUES (1)"); // name is NULL
+
+    // MODIFY to NOT NULL should fail because name has NULL values
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN name VARCHAR NOT NULL",
+    );
+    assert!(
+        err.contains("NULL") && err.contains("NOT NULL"),
+        "Error: {}",
+        err
+    );
+}
+
+#[test]
+fn test_modify_column_to_not_null_without_nulls_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // All values are non-NULL, so this should succeed
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN name VARCHAR NOT NULL",
+    );
+}

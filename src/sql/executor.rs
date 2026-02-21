@@ -228,7 +228,8 @@ fn exec_create_index(
 
         let mut seen_keys: Vec<Vec<u8>> = Vec::new();
         data_btree.scan(pager, |_k, v| {
-            let row_values = deserialize_row(v, &table_def.columns)?;
+            let row_values =
+                deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
             if col_idx < row_values.len() {
                 let val = &row_values[col_idx];
                 if !val.is_null() {
@@ -251,7 +252,8 @@ fn exec_create_index(
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
     data_btree.scan(pager, |pk_key, v| {
-        let row_values = deserialize_row(v, &table_def.columns)?;
+        let row_values =
+            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
         if col_idx < row_values.len() {
             let val = &row_values[col_idx];
             if !val.is_null() {
@@ -403,6 +405,22 @@ fn exec_alter_add_column(
         ));
     }
 
+    // NOT NULL without DEFAULT: error if table has existing rows
+    if !col_spec.is_nullable && col_spec.default_value.is_none() {
+        let data_btree = BTree::open(table_def.data_btree_root);
+        let mut has_rows = false;
+        data_btree.scan(pager, |_k, _v| {
+            has_rows = true;
+            Ok(false) // stop after first row
+        })?;
+        if has_rows {
+            return Err(MuroError::Schema(format!(
+                "Cannot add NOT NULL column '{}' without DEFAULT to a table with existing rows",
+                col_spec.name
+            )));
+        }
+    }
+
     let mut col = ColumnDef::new(&col_spec.name, col_spec.data_type);
     if col_spec.is_unique {
         col = col.unique();
@@ -422,6 +440,20 @@ fn exec_alter_add_column(
 
     table_def.columns.push(col);
     catalog.update_table(pager, &table_def)?;
+
+    // Create unique index if UNIQUE was specified
+    if col_spec.is_unique && !col_spec.is_primary_key {
+        let idx_btree = BTree::create(pager)?;
+        let idx_def = IndexDef {
+            name: format!("auto_unique_{}_{}", table_def.name, col_spec.name),
+            table_name: table_def.name.clone(),
+            column_name: col_spec.name.clone(),
+            index_type: IndexType::BTree,
+            is_unique: true,
+            btree_root: idx_btree.root_page_id(),
+        };
+        catalog.create_index(pager, idx_def)?;
+    }
 
     Ok(ExecResult::Ok)
 }
@@ -462,7 +494,7 @@ fn exec_alter_drop_column(
 
     let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
     data_btree.scan(pager, |k, v| {
-        let row_values = deserialize_row(v, &old_columns)?;
+        let row_values = deserialize_row_versioned(v, &old_columns, table_def.row_format_version)?;
         entries.push((k.to_vec(), row_values));
         Ok(true)
     })?;
@@ -507,6 +539,12 @@ fn exec_alter_modify_column(
 
     let old_col = &table_def.columns[col_idx];
     let type_changed = old_col.data_type != col_spec.data_type;
+    let adding_not_null = old_col.is_nullable && !col_spec.is_nullable;
+
+    // If adding NOT NULL constraint, validate existing rows
+    if adding_not_null {
+        validate_no_nulls_in_column(&table_def, col_idx, pager)?;
+    }
 
     if type_changed {
         // Full table rewrite with type coercion
@@ -515,7 +553,8 @@ fn exec_alter_modify_column(
 
         let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
         data_btree.scan(pager, |k, v| {
-            let row_values = deserialize_row(v, &old_columns)?;
+            let row_values =
+                deserialize_row_versioned(v, &old_columns, table_def.row_format_version)?;
             entries.push((k.to_vec(), row_values));
             Ok(true)
         })?;
@@ -544,6 +583,10 @@ fn exec_alter_modify_column(
     }
 
     catalog.update_table(pager, &table_def)?;
+
+    // Reconcile unique index: create or drop as needed
+    reconcile_unique_index(&table_def, col_spec, &col_spec.name, pager, catalog)?;
+
     Ok(ExecResult::Ok)
 }
 
@@ -564,6 +607,12 @@ fn exec_alter_change_column(
 
     let old_col = &table_def.columns[col_idx];
     let type_changed = old_col.data_type != col_spec.data_type;
+    let adding_not_null = old_col.is_nullable && !col_spec.is_nullable;
+
+    // If adding NOT NULL constraint, validate existing rows
+    if adding_not_null {
+        validate_no_nulls_in_column(&table_def, col_idx, pager)?;
+    }
 
     // Update any indexes referencing the old column name
     let indexes = catalog.get_indexes_for_table(pager, table_name)?;
@@ -585,7 +634,8 @@ fn exec_alter_change_column(
 
         let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
         data_btree.scan(pager, |k, v| {
-            let row_values = deserialize_row(v, &old_columns)?;
+            let row_values =
+                deserialize_row_versioned(v, &old_columns, table_def.row_format_version)?;
             entries.push((k.to_vec(), row_values));
             Ok(true)
         })?;
@@ -612,7 +662,106 @@ fn exec_alter_change_column(
     }
 
     catalog.update_table(pager, &table_def)?;
+
+    // Reconcile unique index: create or drop as needed
+    reconcile_unique_index(&table_def, col_spec, old_name, pager, catalog)?;
+
     Ok(ExecResult::Ok)
+}
+
+/// Reconcile unique index for a column after ALTER TABLE MODIFY/CHANGE.
+/// Creates a new unique index if UNIQUE was added, or drops existing one if UNIQUE was removed.
+fn reconcile_unique_index(
+    table_def: &TableDef,
+    col_spec: &ColumnSpec,
+    old_col_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<()> {
+    let indexes = catalog.get_indexes_for_table(pager, &table_def.name)?;
+    let existing_unique = indexes.iter().find(|idx| {
+        idx.is_unique && (idx.column_name == col_spec.name || idx.column_name == old_col_name)
+    });
+
+    if col_spec.is_unique && existing_unique.is_none() {
+        // Need to create a unique index — first verify no duplicates
+        let col_idx = table_def
+            .column_index(&col_spec.name)
+            .ok_or_else(|| MuroError::Schema(format!("Column '{}' not found", col_spec.name)))?;
+        let data_btree = BTree::open(table_def.data_btree_root);
+        let col_data_type = table_def.columns[col_idx].data_type;
+
+        let mut seen_keys: Vec<Vec<u8>> = Vec::new();
+        let mut idx_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        data_btree.scan(pager, |pk_key, v| {
+            let row_values =
+                deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
+            if col_idx < row_values.len() {
+                let val = &row_values[col_idx];
+                if !val.is_null() {
+                    let encoded = encode_value(val, &col_data_type);
+                    if seen_keys.contains(&encoded) {
+                        return Err(MuroError::UniqueViolation(format!(
+                            "Duplicate value in column '{}'; cannot add UNIQUE constraint",
+                            col_spec.name
+                        )));
+                    }
+                    seen_keys.push(encoded.clone());
+                    idx_entries.push((encoded, pk_key.to_vec()));
+                }
+            }
+            Ok(true)
+        })?;
+
+        let idx_btree = BTree::create(pager)?;
+        let mut idx_btree_mut = BTree::open(idx_btree.root_page_id());
+        for (idx_key, pk_key) in &idx_entries {
+            idx_btree_mut.insert(pager, idx_key, pk_key)?;
+        }
+
+        let idx_def = IndexDef {
+            name: format!("auto_unique_{}_{}", table_def.name, col_spec.name),
+            table_name: table_def.name.clone(),
+            column_name: col_spec.name.clone(),
+            index_type: IndexType::BTree,
+            is_unique: true,
+            btree_root: idx_btree_mut.root_page_id(),
+        };
+        catalog.create_index(pager, idx_def)?;
+    } else if !col_spec.is_unique {
+        if let Some(idx) = existing_unique {
+            // Drop the unique index since UNIQUE was removed
+            let idx_btree = BTree::open(idx.btree_root);
+            let pages = idx_btree.collect_all_pages(pager)?;
+            for page_id in pages {
+                pager.free_page(page_id);
+            }
+            catalog.delete_index(pager, &idx.name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate that no rows have NULL in the given column.
+fn validate_no_nulls_in_column(
+    table_def: &TableDef,
+    col_idx: usize,
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let col_name = &table_def.columns[col_idx].name;
+    data_btree.scan(pager, |_k, v| {
+        let row_values =
+            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
+        if col_idx < row_values.len() && row_values[col_idx].is_null() {
+            return Err(MuroError::Schema(format!(
+                "Column '{}' contains NULL values; cannot set NOT NULL",
+                col_name
+            )));
+        }
+        Ok(true)
+    })?;
+    Ok(())
 }
 
 /// Update a ColumnDef in place from a ColumnSpec.
@@ -875,7 +1024,11 @@ fn exec_select(
                 let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
                 let data_btree = BTree::open(table_def.data_btree_root);
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
-                    let values = deserialize_row(&data, &table_def.columns)?;
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
                     if matches_where(&sel.where_clause, &table_def, &values)? {
                         raw_rows.push(values);
                     }
@@ -904,7 +1057,11 @@ fn exec_select(
                 if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
                     let data_btree = BTree::open(table_def.data_btree_root);
                     if let Some(data) = data_btree.search(pager, &pk_key)? {
-                        let values = deserialize_row(&data, &table_def.columns)?;
+                        let values = deserialize_row_versioned(
+                            &data,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
                         if matches_where(&sel.where_clause, &table_def, &values)? {
                             raw_rows.push(values);
                         }
@@ -914,7 +1071,11 @@ fn exec_select(
             Plan::FullScan { .. } | Plan::FtsScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
                 data_btree.scan(pager, |_k, v| {
-                    let values = deserialize_row(v, &table_def.columns)?;
+                    let values = deserialize_row_versioned(
+                        v,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
                     if matches_where(&sel.where_clause, &table_def, &values)? {
                         raw_rows.push(values);
                     }
@@ -959,7 +1120,11 @@ fn exec_select(
                 let pk_key = encode_value(&key_val, &table_def.columns[pk_idx].data_type);
                 let data_btree = BTree::open(table_def.data_btree_root);
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
-                    let values = deserialize_row(&data, &table_def.columns)?;
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
                     let row = build_row(&table_def, &values, &sel.columns)?;
                     if matches_where(&sel.where_clause, &table_def, &values)? {
                         rows.push(row);
@@ -989,7 +1154,11 @@ fn exec_select(
                 if let Some(pk_key) = idx_btree.search(pager, &idx_key)? {
                     let data_btree = BTree::open(table_def.data_btree_root);
                     if let Some(data) = data_btree.search(pager, &pk_key)? {
-                        let values = deserialize_row(&data, &table_def.columns)?;
+                        let values = deserialize_row_versioned(
+                            &data,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
                         if matches_where(&sel.where_clause, &table_def, &values)? {
                             let row = build_row(&table_def, &values, &sel.columns)?;
                             rows.push(row);
@@ -1000,7 +1169,11 @@ fn exec_select(
             Plan::FullScan { .. } | Plan::FtsScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
                 data_btree.scan(pager, |_k, v| {
-                    let values = deserialize_row(v, &table_def.columns)?;
+                    let values = deserialize_row_versioned(
+                        v,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
                     if matches_where(&sel.where_clause, &table_def, &values)? {
                         let row = build_row(&table_def, &values, &sel.columns)?;
                         rows.push(row);
@@ -1059,7 +1232,8 @@ fn scan_table_qualified(
     let data_btree = BTree::open(table_def.data_btree_root);
     let mut result = Vec::new();
     data_btree.scan(pager, |_k, v| {
-        let values = deserialize_row(v, &table_def.columns)?;
+        let values =
+            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
         let mut row: Vec<(String, Value)> = Vec::with_capacity(table_def.columns.len());
         for (i, col) in table_def.columns.iter().enumerate() {
             let val = values.get(i).cloned().unwrap_or(Value::Null);
@@ -1421,7 +1595,8 @@ fn exec_update(
     // Collect rows to update (to avoid modifying during scan)
     let mut to_update: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
     data_btree.scan(pager, |k, v| {
-        let values = deserialize_row(v, &table_def.columns)?;
+        let values =
+            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
         if matches_where(&upd.where_clause, &table_def, &values)? {
             to_update.push((k.to_vec(), values));
         }
@@ -1525,7 +1700,8 @@ fn exec_delete(
     // Collect keys and row values to delete
     let mut to_delete: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
     data_btree.scan(pager, |k, v| {
-        let values = deserialize_row(v, &table_def.columns)?;
+        let values =
+            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
         if matches_where(&del.where_clause, &table_def, &values)? {
             to_delete.push((k.to_vec(), values));
         }
@@ -1727,12 +1903,28 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
 }
 
 pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>> {
-    // Read stored column count from the u16 prefix
-    if data.len() < 2 {
-        return Err(MuroError::InvalidPage);
-    }
-    let stored_col_count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
-    let data = &data[2..]; // skip the u16 prefix
+    deserialize_row_versioned(data, columns, 1)
+}
+
+/// Deserialize a row with explicit row format version.
+/// version 0: legacy format (no prefix, stored_col_count == columns.len())
+/// version 1: u16 column count prefix
+pub fn deserialize_row_versioned(
+    data: &[u8],
+    columns: &[ColumnDef],
+    row_format_version: u8,
+) -> Result<Vec<Value>> {
+    let (stored_col_count, data) = if row_format_version >= 1 {
+        // New format: u16 column count prefix
+        if data.len() < 2 {
+            return Err(MuroError::InvalidPage);
+        }
+        let count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+        (count, &data[2..])
+    } else {
+        // Legacy format: no prefix, assume all current columns are stored
+        (columns.len(), data)
+    };
 
     let bitmap_bytes = stored_col_count.div_ceil(8);
     if data.len() < bitmap_bytes {

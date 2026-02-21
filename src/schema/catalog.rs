@@ -20,6 +20,9 @@ pub struct TableDef {
     pub pk_column: Option<String>,
     pub data_btree_root: PageId,
     pub next_rowid: i64,
+    /// Row format version: 0 = legacy (no prefix), 1 = u16 column count prefix.
+    /// Defaults to 0 for tables created before this field was added (backward compat).
+    pub row_format_version: u8,
 }
 
 impl TableDef {
@@ -52,6 +55,8 @@ impl TableDef {
         buf.extend_from_slice(&self.data_btree_root.to_le_bytes());
         // next_rowid
         buf.extend_from_slice(&self.next_rowid.to_le_bytes());
+        // row_format_version
+        buf.push(self.row_format_version);
         buf
     }
 
@@ -117,10 +122,15 @@ impl TableDef {
 
         // next_rowid (optional for backward compat, defaults to 0)
         let next_rowid = if data.len() >= offset + 8 {
-            i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+            let v = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            v
         } else {
             0
         };
+
+        // row_format_version (optional, defaults to 0 for old tables)
+        let row_format_version = if data.len() > offset { data[offset] } else { 0 };
 
         Some(TableDef {
             name,
@@ -128,6 +138,7 @@ impl TableDef {
             pk_column,
             data_btree_root,
             next_rowid,
+            row_format_version,
         })
     }
 
@@ -214,6 +225,7 @@ impl SystemCatalog {
             pk_column,
             data_btree_root,
             next_rowid: 0,
+            row_format_version: 1,
         };
 
         // Store in catalog
@@ -417,6 +429,7 @@ mod tests {
             pk_column: Some("id".to_string()),
             data_btree_root: 42,
             next_rowid: 0,
+            row_format_version: 1,
         };
 
         let bytes = table.serialize();
@@ -425,6 +438,7 @@ mod tests {
         assert_eq!(table2.columns.len(), 3);
         assert_eq!(table2.pk_column, Some("id".to_string()));
         assert_eq!(table2.data_btree_root, 42);
+        assert_eq!(table2.row_format_version, 1);
     }
 
     #[test]

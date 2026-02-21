@@ -20,6 +20,9 @@ pub struct TableDef {
     pub pk_column: Option<String>,
     pub data_btree_root: PageId,
     pub next_rowid: i64,
+    /// Row format version: 0 = legacy (no prefix), 1 = u16 column count prefix.
+    /// Defaults to 0 for tables created before this field was added (backward compat).
+    pub row_format_version: u8,
 }
 
 impl TableDef {
@@ -52,6 +55,8 @@ impl TableDef {
         buf.extend_from_slice(&self.data_btree_root.to_le_bytes());
         // next_rowid
         buf.extend_from_slice(&self.next_rowid.to_le_bytes());
+        // row_format_version
+        buf.push(self.row_format_version);
         buf
     }
 
@@ -117,10 +122,15 @@ impl TableDef {
 
         // next_rowid (optional for backward compat, defaults to 0)
         let next_rowid = if data.len() >= offset + 8 {
-            i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+            let v = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            v
         } else {
             0
         };
+
+        // row_format_version (optional, defaults to 0 for old tables)
+        let row_format_version = if data.len() > offset { data[offset] } else { 0 };
 
         Some(TableDef {
             name,
@@ -128,6 +138,7 @@ impl TableDef {
             pk_column,
             data_btree_root,
             next_rowid,
+            row_format_version,
         })
     }
 
@@ -163,6 +174,11 @@ impl SystemCatalog {
 
     pub fn root_page_id(&self) -> PageId {
         self.catalog_btree.root_page_id()
+    }
+
+    /// Get a mutable reference to the catalog B-tree (for direct index updates).
+    pub fn catalog_btree_mut(&mut self) -> &mut BTree {
+        &mut self.catalog_btree
     }
 
     /// Create a table. Returns the table definition with the allocated B-tree root.
@@ -209,6 +225,7 @@ impl SystemCatalog {
             pk_column,
             data_btree_root,
             next_rowid: 0,
+            row_format_version: 1,
         };
 
         // Store in catalog
@@ -285,6 +302,51 @@ impl SystemCatalog {
             Ok(true)
         })?;
         Ok(indexes)
+    }
+
+    /// Rename a table: delete old key, update name, insert with new key.
+    /// Also updates all indexes for the table.
+    pub fn rename_table(
+        &mut self,
+        pager: &mut impl PageStore,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        // Check old table exists
+        let mut table_def = self
+            .get_table(pager, old_name)?
+            .ok_or_else(|| MuroError::Schema(format!("Table '{}' does not exist", old_name)))?;
+
+        // Check new name doesn't exist
+        if self.get_table(pager, new_name)?.is_some() {
+            return Err(MuroError::Schema(format!(
+                "Table '{}' already exists",
+                new_name
+            )));
+        }
+
+        // Delete old key
+        let old_key = format!("table:{}", old_name);
+        self.catalog_btree.delete(pager, old_key.as_bytes())?;
+
+        // Update name and insert with new key
+        table_def.name = new_name.to_string();
+        let new_key = format!("table:{}", new_name);
+        let serialized = table_def.serialize();
+        self.catalog_btree
+            .insert(pager, new_key.as_bytes(), &serialized)?;
+
+        // Update all indexes for this table
+        let indexes = self.get_indexes_for_table(pager, old_name)?;
+        for mut idx in indexes {
+            let idx_key = format!("index:{}", idx.name);
+            idx.table_name = new_name.to_string();
+            let idx_serialized = idx.serialize();
+            self.catalog_btree
+                .insert(pager, idx_key.as_bytes(), &idx_serialized)?;
+        }
+
+        Ok(())
     }
 
     /// Delete a table from the catalog.
@@ -367,6 +429,7 @@ mod tests {
             pk_column: Some("id".to_string()),
             data_btree_root: 42,
             next_rowid: 0,
+            row_format_version: 1,
         };
 
         let bytes = table.serialize();
@@ -375,6 +438,7 @@ mod tests {
         assert_eq!(table2.columns.len(), 3);
         assert_eq!(table2.pk_column, Some("id".to_string()));
         assert_eq!(table2.data_btree_root, 42);
+        assert_eq!(table2.row_format_version, 1);
     }
 
     #[test]

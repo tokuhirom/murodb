@@ -7,6 +7,8 @@ pub enum Statement {
     CreateFulltextIndex(CreateFulltextIndex),
     DropTable(DropTable),
     DropIndex(DropIndex),
+    AlterTable(AlterTable),
+    RenameTable(RenameTable),
     Insert(Insert),
     Select(Box<Select>),
     Update(Update),
@@ -19,6 +21,26 @@ pub enum Statement {
     Rollback,
     ShowCheckpointStats,
     ShowDatabaseStats,
+}
+
+#[derive(Debug, Clone)]
+pub enum AlterTableOp {
+    AddColumn(ColumnSpec),
+    DropColumn(String),
+    ModifyColumn(ColumnSpec),
+    ChangeColumn(String, ColumnSpec), // (old_name, new_spec)
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterTable {
+    pub table_name: String,
+    pub operation: AlterTableOp,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenameTable {
+    pub old_name: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone)]

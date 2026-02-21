@@ -48,6 +48,12 @@ impl Parser {
             Some(Token::Group) => Ok("group".to_string()),
             Some(Token::Having) => Ok("having".to_string()),
             Some(Token::Distinct) => Ok("distinct".to_string()),
+            Some(Token::Add) => Ok("add".to_string()),
+            Some(Token::Column) => Ok("column".to_string()),
+            Some(Token::Modify) => Ok("modify".to_string()),
+            Some(Token::Change) => Ok("change".to_string()),
+            Some(Token::Rename) => Ok("rename".to_string()),
+            Some(Token::To) => Ok("to".to_string()),
             Some(t) => Err(format!("Expected identifier, got {:?}", t)),
             None => Err("Expected identifier, got end of input".into()),
         }
@@ -61,6 +67,8 @@ impl Parser {
             Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
+            Some(Token::Alter) => self.parse_alter()?,
+            Some(Token::Rename) => self.parse_rename()?,
             Some(Token::Show) => self.parse_show()?,
             Some(Token::Describe) => {
                 self.advance();
@@ -181,6 +189,66 @@ impl Parser {
             }
             _ => Err("Expected TABLE or INDEX after DROP".into()),
         }
+    }
+
+    fn parse_alter(&mut self) -> Result<Statement, String> {
+        self.advance(); // ALTER
+        self.expect(&Token::Table)?;
+        let table_name = self.expect_ident()?;
+
+        let operation = match self.peek() {
+            Some(Token::Add) => {
+                self.advance(); // ADD
+                                // Optional COLUMN keyword
+                if self.peek() == Some(&Token::Column) {
+                    self.advance();
+                }
+                let col_spec = self.parse_column_spec()?;
+                AlterTableOp::AddColumn(col_spec)
+            }
+            Some(Token::Drop) => {
+                self.advance(); // DROP
+                self.expect(&Token::Column)?;
+                let col_name = self.expect_ident()?;
+                AlterTableOp::DropColumn(col_name)
+            }
+            Some(Token::Modify) => {
+                self.advance(); // MODIFY
+                                // Optional COLUMN keyword
+                if self.peek() == Some(&Token::Column) {
+                    self.advance();
+                }
+                let col_spec = self.parse_column_spec()?;
+                AlterTableOp::ModifyColumn(col_spec)
+            }
+            Some(Token::Change) => {
+                self.advance(); // CHANGE
+                                // Optional COLUMN keyword
+                if self.peek() == Some(&Token::Column) {
+                    self.advance();
+                }
+                let old_name = self.expect_ident()?;
+                let col_spec = self.parse_column_spec()?;
+                AlterTableOp::ChangeColumn(old_name, col_spec)
+            }
+            _ => {
+                return Err("Expected ADD, DROP, MODIFY, or CHANGE after ALTER TABLE <name>".into())
+            }
+        };
+
+        Ok(Statement::AlterTable(AlterTable {
+            table_name,
+            operation,
+        }))
+    }
+
+    fn parse_rename(&mut self) -> Result<Statement, String> {
+        self.advance(); // RENAME
+        self.expect(&Token::Table)?;
+        let old_name = self.expect_ident()?;
+        self.expect(&Token::To)?;
+        let new_name = self.expect_ident()?;
+        Ok(Statement::RenameTable(RenameTable { old_name, new_name }))
     }
 
     fn parse_create_table(&mut self) -> Result<CreateTable, String> {

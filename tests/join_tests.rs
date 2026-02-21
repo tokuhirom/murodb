@@ -437,3 +437,183 @@ fn test_left_join_empty_right() {
         panic!("Expected rows");
     }
 }
+
+#[test]
+fn test_right_join_basic() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_users_orders(&mut pager, &mut catalog);
+
+    // Alice has 2 orders, Bob has 1, Charlie has 0
+    // RIGHT JOIN orders: all orders appear, with matching user
+    let result = execute(
+        "SELECT users.name, orders.product FROM users RIGHT JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].get("users.name"),
+            Some(&Value::Varchar("Alice".into()))
+        );
+        assert_eq!(
+            rows[0].get("orders.product"),
+            Some(&Value::Varchar("Widget".into()))
+        );
+        assert_eq!(
+            rows[1].get("orders.product"),
+            Some(&Value::Varchar("Gadget".into()))
+        );
+        assert_eq!(
+            rows[2].get("users.name"),
+            Some(&Value::Varchar("Bob".into()))
+        );
+    } else {
+        panic!("Expected rows");
+    }
+}
+
+#[test]
+fn test_right_join_unmatched_right_has_null_left() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_users_orders(&mut pager, &mut catalog);
+
+    // Add an order with no matching user (user_id = 999)
+    execute(
+        "INSERT INTO orders VALUES (20, 999, 'Orphan')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    let result = execute(
+        "SELECT users.name, orders.product FROM users RIGHT JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 4);
+        // The orphan order should have NULL user name
+        let orphan_row = rows
+            .iter()
+            .find(|r| r.get("orders.product") == Some(&Value::Varchar("Orphan".into())))
+            .expect("Orphan order should be in results");
+        assert_eq!(orphan_row.get("users.name"), Some(&Value::Null));
+    } else {
+        panic!("Expected rows");
+    }
+}
+
+#[test]
+fn test_right_join_empty_left() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE a (id BIGINT PRIMARY KEY, val VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "CREATE TABLE b (id BIGINT PRIMARY KEY, a_id BIGINT, val VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    // a is empty, b has rows
+    execute("INSERT INTO b VALUES (1, 1, 'x')", &mut pager, &mut catalog).unwrap();
+    execute("INSERT INTO b VALUES (2, 2, 'y')", &mut pager, &mut catalog).unwrap();
+
+    let result = execute(
+        "SELECT a.val, b.val FROM a RIGHT JOIN b ON a.id = b.a_id ORDER BY b.id",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("a.val"), Some(&Value::Null));
+        assert_eq!(rows[0].get("b.val"), Some(&Value::Varchar("x".into())));
+        assert_eq!(rows[1].get("a.val"), Some(&Value::Null));
+        assert_eq!(rows[1].get("b.val"), Some(&Value::Varchar("y".into())));
+    } else {
+        panic!("Expected rows");
+    }
+}
+
+#[test]
+fn test_right_join_with_where() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_users_orders(&mut pager, &mut catalog);
+
+    let result = execute(
+        "SELECT users.name, orders.product FROM users RIGHT JOIN orders ON users.id = orders.user_id WHERE orders.product = 'Widget'",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("users.name"),
+            Some(&Value::Varchar("Alice".into()))
+        );
+        assert_eq!(
+            rows[0].get("orders.product"),
+            Some(&Value::Varchar("Widget".into()))
+        );
+    } else {
+        panic!("Expected rows");
+    }
+}
+
+#[test]
+fn test_right_join_with_alias() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_users_orders(&mut pager, &mut catalog);
+
+    let result = execute(
+        "SELECT u.name, o.product FROM users AS u RIGHT JOIN orders AS o ON u.id = o.user_id ORDER BY o.id",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].get("u.name"), Some(&Value::Varchar("Alice".into())));
+        assert_eq!(
+            rows[0].get("o.product"),
+            Some(&Value::Varchar("Widget".into()))
+        );
+    } else {
+        panic!("Expected rows");
+    }
+}
+
+#[test]
+fn test_right_outer_join() {
+    let (mut pager, mut catalog, _dir) = setup();
+    setup_users_orders(&mut pager, &mut catalog);
+
+    // RIGHT OUTER JOIN should work the same as RIGHT JOIN
+    let result = execute(
+        "SELECT users.name, orders.product FROM users RIGHT OUTER JOIN orders ON users.id = orders.user_id ORDER BY orders.id",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    if let ExecResult::Rows(rows) = result {
+        assert_eq!(rows.len(), 3);
+    } else {
+        panic!("Expected rows");
+    }
+}

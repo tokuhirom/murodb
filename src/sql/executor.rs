@@ -1195,8 +1195,10 @@ fn materialize_subqueries(
             })
         }
         Expr::Exists { subquery, negated } => {
-            // Execute with effective LIMIT 1 — just check if any rows
-            let rows = execute_subquery(subquery, pager, catalog)?;
+            // Inject LIMIT 1 to short-circuit: only need to know if any rows exist
+            let mut limited = subquery.as_ref().clone();
+            limited.limit = Some(1);
+            let rows = execute_subquery(&limited, pager, catalog)?;
             let exists = !rows.is_empty();
             let val = if *negated { !exists } else { exists };
             Ok(Expr::IntLiteral(if val { 1 } else { 0 }))

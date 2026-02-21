@@ -137,8 +137,11 @@ fn test_not_in_subquery_with_nulls() {
     // Insert a NULL val into t2
     execute("INSERT INTO t2 VALUES (5, NULL)", &mut pager, &mut catalog).unwrap();
 
-    // NOT IN with NULLs in the list — SQL standard says this returns unknown for all,
-    // but since we materialize to InList, the behavior follows our InList NULL handling.
+    // SQL standard: NOT IN with NULL in the list returns UNKNOWN for non-matching values.
+    // t1 vals: 10, 20, 30. t2 vals: 10, 20, 40, NULL.
+    // val=10 → found → NOT IN → FALSE
+    // val=20 → found → NOT IN → FALSE
+    // val=30 → not found, but NULL in list → UNKNOWN → filtered out by WHERE
     let result = execute(
         "SELECT id FROM t1 WHERE val NOT IN (SELECT val FROM t2)",
         &mut pager,
@@ -146,9 +149,9 @@ fn test_not_in_subquery_with_nulls() {
     )
     .unwrap();
     let ids = get_ids(result);
-    // val 30 is not in t2, but NULL in the list makes NOT IN return unknown for all non-matches
-    // Behavior depends on InList NULL handling
-    assert!(ids.is_empty() || ids == vec![3]);
+    // No rows should be returned: matching values are excluded, and non-matching
+    // values get UNKNOWN due to NULL in the subquery result set.
+    assert!(ids.is_empty());
 }
 
 // --- EXISTS (SELECT ...) ---

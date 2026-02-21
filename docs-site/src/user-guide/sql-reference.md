@@ -38,6 +38,22 @@ CREATE TABLE users (
 
 -- IF NOT EXISTS
 CREATE TABLE IF NOT EXISTS t (id BIGINT PRIMARY KEY);
+
+-- Composite PRIMARY KEY
+CREATE TABLE orders (
+  user_id INT,
+  order_id INT,
+  amount INT,
+  PRIMARY KEY (user_id, order_id)
+);
+
+-- Composite UNIQUE constraint
+CREATE TABLE t (
+  id BIGINT PRIMARY KEY,
+  a INT,
+  b INT,
+  UNIQUE (a, b)
+);
 ```
 
 ### CREATE INDEX
@@ -47,6 +63,10 @@ CREATE UNIQUE INDEX idx_email ON users(email);
 
 -- IF NOT EXISTS
 CREATE INDEX IF NOT EXISTS idx_name ON users(name);
+
+-- Composite index (multiple columns)
+CREATE INDEX idx_ab ON t(a, b);
+CREATE UNIQUE INDEX idx_ab ON t(a, b);
 ```
 
 ### CREATE FULLTEXT INDEX

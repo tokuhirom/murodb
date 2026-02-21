@@ -63,8 +63,8 @@ MySQL-compatible scalar functions.
 - [ ] ALTER TABLE DROP COLUMN
 - [ ] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
 - [ ] RENAME TABLE
-- [ ] Composite PRIMARY KEY
-- [ ] Composite UNIQUE / composite INDEX
+- [x] Composite PRIMARY KEY
+- [x] Composite UNIQUE / composite INDEX
 
 ## Phase 5 — Advanced Query
 

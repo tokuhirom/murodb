@@ -44,9 +44,16 @@ pub struct RenameTable {
 }
 
 #[derive(Debug, Clone)]
+pub enum TableConstraint {
+    PrimaryKey(Vec<String>),
+    Unique(Option<String>, Vec<String>), // (optional name, columns)
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateTable {
     pub table_name: String,
     pub columns: Vec<ColumnSpec>,
+    pub constraints: Vec<TableConstraint>,
     pub if_not_exists: bool,
 }
 
@@ -66,7 +73,7 @@ pub struct ColumnSpec {
 pub struct CreateIndex {
     pub index_name: String,
     pub table_name: String,
-    pub column_name: String,
+    pub column_names: Vec<String>,
     pub is_unique: bool,
     pub if_not_exists: bool,
 }

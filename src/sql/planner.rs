@@ -11,13 +11,13 @@ use crate::sql::ast::*;
 pub enum Plan {
     PkSeek {
         table_name: String,
-        key_expr: Expr,
+        key_exprs: Vec<(String, Expr)>, // (column_name, value_expr)
     },
     IndexSeek {
         table_name: String,
         index_name: String,
-        column_name: String,
-        key_expr: Expr,
+        column_names: Vec<String>,
+        key_exprs: Vec<Expr>,
     },
     FullScan {
         table_name: String,
@@ -33,8 +33,8 @@ pub enum Plan {
 /// Analyze a WHERE clause and determine the access plan.
 pub fn plan_select(
     table_name: &str,
-    pk_column: Option<&str>,
-    index_columns: &[(String, String)], // (index_name, column_name)
+    pk_columns: &[String],
+    index_columns: &[(String, Vec<String>)], // (index_name, column_names)
     where_clause: &Option<Expr>,
 ) -> Plan {
     if let Some(expr) = where_clause {
@@ -48,25 +48,82 @@ pub fn plan_select(
             };
         }
 
-        // Check for PK equality: WHERE pk_col = value
-        if let Some(pk) = pk_column {
-            if let Some(key_expr) = extract_equality(expr, pk) {
-                return Plan::PkSeek {
-                    table_name: table_name.to_string(),
-                    key_expr,
-                };
+        // Check for PK equality (single or composite)
+        if !pk_columns.is_empty() {
+            let equalities = extract_equalities(expr);
+            if pk_columns.len() == 1 {
+                // Single PK: simple equality
+                if let Some(key_expr) = equalities.iter().find_map(|(col, e)| {
+                    if col == &pk_columns[0] {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                }) {
+                    return Plan::PkSeek {
+                        table_name: table_name.to_string(),
+                        key_exprs: vec![(pk_columns[0].clone(), key_expr)],
+                    };
+                }
+            } else {
+                // Composite PK: need all columns matched
+                let mut key_exprs = Vec::new();
+                let mut all_found = true;
+                for pk_col in pk_columns {
+                    if let Some((_, e)) = equalities.iter().find(|(col, _)| col == pk_col) {
+                        key_exprs.push((pk_col.clone(), e.clone()));
+                    } else {
+                        all_found = false;
+                        break;
+                    }
+                }
+                if all_found {
+                    return Plan::PkSeek {
+                        table_name: table_name.to_string(),
+                        key_exprs,
+                    };
+                }
             }
         }
 
-        // Check for index equality
-        for (idx_name, col_name) in index_columns {
-            if let Some(key_expr) = extract_equality(expr, col_name) {
-                return Plan::IndexSeek {
-                    table_name: table_name.to_string(),
-                    index_name: idx_name.clone(),
-                    column_name: col_name.clone(),
-                    key_expr,
-                };
+        // Check for index equality (single or composite)
+        let equalities = extract_equalities(expr);
+        for (idx_name, col_names) in index_columns {
+            if col_names.len() == 1 {
+                if let Some(key_expr) = equalities.iter().find_map(|(col, e)| {
+                    if col == &col_names[0] {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                }) {
+                    return Plan::IndexSeek {
+                        table_name: table_name.to_string(),
+                        index_name: idx_name.clone(),
+                        column_names: col_names.clone(),
+                        key_exprs: vec![key_expr],
+                    };
+                }
+            } else {
+                // Composite index: need all columns
+                let mut key_exprs = Vec::new();
+                let mut all_found = true;
+                for col_name in col_names {
+                    if let Some((_, e)) = equalities.iter().find(|(col, _)| col == col_name) {
+                        key_exprs.push(e.clone());
+                    } else {
+                        all_found = false;
+                        break;
+                    }
+                }
+                if all_found {
+                    return Plan::IndexSeek {
+                        table_name: table_name.to_string(),
+                        index_name: idx_name.clone(),
+                        column_names: col_names.clone(),
+                        key_exprs,
+                    };
+                }
             }
         }
     }
@@ -113,8 +170,15 @@ fn extract_fts_match(expr: &Expr) -> Option<(String, String, MatchMode)> {
     }
 }
 
-/// Extract equality condition: column = value.
-fn extract_equality(expr: &Expr, column_name: &str) -> Option<Expr> {
+/// Extract all equality conditions from an AND-connected expression.
+/// Returns vec of (column_name, value_expr).
+fn extract_equalities(expr: &Expr) -> Vec<(String, Expr)> {
+    let mut result = Vec::new();
+    collect_equalities(expr, &mut result);
+    result
+}
+
+fn collect_equalities(expr: &Expr, result: &mut Vec<(String, Expr)>) {
     match expr {
         Expr::BinaryOp {
             left,
@@ -122,22 +186,19 @@ fn extract_equality(expr: &Expr, column_name: &str) -> Option<Expr> {
             right,
         } => {
             if let Expr::ColumnRef(ref name) = **left {
-                if name == column_name {
-                    return Some(*right.clone());
-                }
+                result.push((name.clone(), *right.clone()));
+            } else if let Expr::ColumnRef(ref name) = **right {
+                result.push((name.clone(), *left.clone()));
             }
-            if let Expr::ColumnRef(ref name) = **right {
-                if name == column_name {
-                    return Some(*left.clone());
-                }
-            }
-            None
         }
         Expr::BinaryOp {
             left,
             op: BinaryOp::And,
-            ..
-        } => extract_equality(left, column_name),
-        _ => None,
+            right,
+        } => {
+            collect_equalities(left, result);
+            collect_equalities(right, result);
+        }
+        _ => {}
     }
 }

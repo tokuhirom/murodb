@@ -17,7 +17,7 @@ use crate::storage::page_store::PageStore;
 pub struct TableDef {
     pub name: String,
     pub columns: Vec<ColumnDef>,
-    pub pk_column: Option<String>,
+    pub pk_columns: Vec<String>,
     pub data_btree_root: PageId,
     pub next_rowid: i64,
     /// Row format version: 0 = legacy (no prefix), 1 = u16 column count prefix.
@@ -41,15 +41,24 @@ impl TableDef {
             buf.extend_from_slice(&(col_bytes.len() as u16).to_le_bytes());
             buf.extend_from_slice(&col_bytes);
         }
-        // pk_column
-        match &self.pk_column {
-            Some(pk) => {
+        // pk_columns (backward-compatible: 0x00=none, 0x01=single, 0x02=composite)
+        match self.pk_columns.len() {
+            0 => buf.push(0),
+            1 => {
                 buf.push(1);
-                let pk_bytes = pk.as_bytes();
+                let pk_bytes = self.pk_columns[0].as_bytes();
                 buf.extend_from_slice(&(pk_bytes.len() as u16).to_le_bytes());
                 buf.extend_from_slice(pk_bytes);
             }
-            None => buf.push(0),
+            n => {
+                buf.push(2);
+                buf.extend_from_slice(&(n as u16).to_le_bytes());
+                for pk in &self.pk_columns {
+                    let pk_bytes = pk.as_bytes();
+                    buf.extend_from_slice(&(pk_bytes.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(pk_bytes);
+                }
+            }
         }
         // data_btree_root
         buf.extend_from_slice(&self.data_btree_root.to_le_bytes());
@@ -94,23 +103,47 @@ impl TableDef {
             offset += col_bytes_len;
         }
 
-        // pk_column
+        // pk_columns (backward-compatible: 0x00=none, 0x01=single, 0x02=composite)
         if data.len() < offset + 1 {
             return None;
         }
-        let has_pk = data[offset];
+        let pk_tag = data[offset];
         offset += 1;
-        let pk_column = if has_pk == 1 {
-            if data.len() < offset + 2 {
-                return None;
+        let pk_columns = match pk_tag {
+            0 => Vec::new(),
+            1 => {
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                let pk_len =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                let pk = String::from_utf8(data[offset..offset + pk_len].to_vec()).ok()?;
+                offset += pk_len;
+                vec![pk]
             }
-            let pk_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
-            offset += 2;
-            let pk = String::from_utf8(data[offset..offset + pk_len].to_vec()).ok()?;
-            offset += pk_len;
-            Some(pk)
-        } else {
-            None
+            2 => {
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                let count =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                let mut pks = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if data.len() < offset + 2 {
+                        return None;
+                    }
+                    let pk_len =
+                        u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                    offset += 2;
+                    let pk = String::from_utf8(data[offset..offset + pk_len].to_vec()).ok()?;
+                    offset += pk_len;
+                    pks.push(pk);
+                }
+                pks
+            }
+            _ => return None,
         };
 
         // data_btree_root
@@ -135,7 +168,7 @@ impl TableDef {
         Some(TableDef {
             name,
             columns,
-            pk_column,
+            pk_columns,
             data_btree_root,
             next_rowid,
             row_format_version,
@@ -147,9 +180,26 @@ impl TableDef {
         self.columns.iter().position(|c| c.name == name)
     }
 
-    /// Get PK column index.
+    /// Get PK column index (for single-column PK).
     pub fn pk_column_index(&self) -> Option<usize> {
-        self.pk_column.as_ref().and_then(|pk| self.column_index(pk))
+        if self.pk_columns.len() == 1 {
+            self.column_index(&self.pk_columns[0])
+        } else {
+            None
+        }
+    }
+
+    /// Get indices of all PK columns.
+    pub fn pk_column_indices(&self) -> Vec<usize> {
+        self.pk_columns
+            .iter()
+            .filter_map(|pk| self.column_index(pk))
+            .collect()
+    }
+
+    /// Whether this table has a composite (multi-column) primary key.
+    pub fn is_composite_pk(&self) -> bool {
+        self.pk_columns.len() > 1
     }
 }
 
@@ -197,14 +247,14 @@ impl SystemCatalog {
             )));
         }
 
-        // Find PK column; if none, inject a hidden _rowid column
-        let has_pk = columns.iter().any(|c| c.is_primary_key);
-        let (columns, pk_column) = if has_pk {
-            let pk_name = columns
-                .iter()
-                .find(|c| c.is_primary_key)
-                .map(|c| c.name.clone());
-            (columns, pk_name)
+        // Find PK columns; if none, inject a hidden _rowid column
+        let pk_names: Vec<String> = columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.clone())
+            .collect();
+        let (columns, pk_columns) = if !pk_names.is_empty() {
+            (columns, pk_names)
         } else {
             use crate::types::DataType;
             let rowid_col = ColumnDef::new("_rowid", DataType::BigInt)
@@ -212,7 +262,7 @@ impl SystemCatalog {
                 .hidden();
             let mut cols = vec![rowid_col];
             cols.extend(columns);
-            (cols, Some("_rowid".to_string()))
+            (cols, vec!["_rowid".to_string()])
         };
 
         // Allocate a B-tree for the table data
@@ -222,7 +272,7 @@ impl SystemCatalog {
         let table_def = TableDef {
             name: name.to_string(),
             columns,
-            pk_column,
+            pk_columns,
             data_btree_root,
             next_rowid: 0,
             row_format_version: 1,
@@ -426,7 +476,7 @@ mod tests {
                 ColumnDef::new("name", DataType::Varchar(None)),
                 ColumnDef::new("data", DataType::Varbinary(None)),
             ],
-            pk_column: Some("id".to_string()),
+            pk_columns: vec!["id".to_string()],
             data_btree_root: 42,
             next_rowid: 0,
             row_format_version: 1,
@@ -436,7 +486,7 @@ mod tests {
         let table2 = TableDef::deserialize(&bytes).unwrap();
         assert_eq!(table2.name, "users");
         assert_eq!(table2.columns.len(), 3);
-        assert_eq!(table2.pk_column, Some("id".to_string()));
+        assert_eq!(table2.pk_columns, vec!["id".to_string()]);
         assert_eq!(table2.data_btree_root, 42);
         assert_eq!(table2.row_format_version, 1);
     }
@@ -456,7 +506,7 @@ mod tests {
 
         let table_def = catalog.create_table(&mut pager, "posts", columns).unwrap();
         assert_eq!(table_def.name, "posts");
-        assert_eq!(table_def.pk_column, Some("id".to_string()));
+        assert_eq!(table_def.pk_columns, vec!["id".to_string()]);
 
         let retrieved = catalog.get_table(&mut pager, "posts").unwrap().unwrap();
         assert_eq!(retrieved.name, "posts");
@@ -489,7 +539,7 @@ mod tests {
         let idx = IndexDef {
             name: "idx_t_col".to_string(),
             table_name: "t".to_string(),
-            column_name: "col".to_string(),
+            column_names: vec!["col".to_string()],
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: 99,
@@ -498,7 +548,7 @@ mod tests {
         catalog.create_index(&mut pager, idx).unwrap();
 
         let retrieved = catalog.get_index(&mut pager, "idx_t_col").unwrap().unwrap();
-        assert_eq!(retrieved.column_name, "col");
+        assert_eq!(retrieved.column_names, vec!["col".to_string()]);
         assert!(retrieved.is_unique);
 
         let indexes = catalog.get_indexes_for_table(&mut pager, "t").unwrap();

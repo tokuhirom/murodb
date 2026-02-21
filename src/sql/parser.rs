@@ -256,7 +256,55 @@ impl Parser {
         self.expect(&Token::LParen)?;
 
         let mut columns = Vec::new();
+        let mut constraints = Vec::new();
         loop {
+            // Check for table-level constraints before trying to parse a column
+            match self.peek() {
+                Some(Token::PrimaryKey) => {
+                    self.advance(); // PRIMARY KEY
+                    self.expect(&Token::LParen)?;
+                    let cols = self.parse_ident_list()?;
+                    self.expect(&Token::RParen)?;
+                    constraints.push(TableConstraint::PrimaryKey(cols));
+
+                    match self.peek() {
+                        Some(Token::Comma) => {
+                            self.advance();
+                        }
+                        Some(Token::RParen) => {
+                            self.advance();
+                            break;
+                        }
+                        _ => return Err("Expected ',' or ')' after table constraint".into()),
+                    }
+                    continue;
+                }
+                Some(Token::Unique) => {
+                    // Could be UNIQUE(col1, col2) table constraint or column named "unique" (unlikely)
+                    // Peek ahead: UNIQUE followed by LParen means table constraint
+                    if self.tokens.get(self.pos + 1) == Some(&Token::LParen) {
+                        self.advance(); // UNIQUE
+                        self.expect(&Token::LParen)?;
+                        let cols = self.parse_ident_list()?;
+                        self.expect(&Token::RParen)?;
+                        constraints.push(TableConstraint::Unique(None, cols));
+
+                        match self.peek() {
+                            Some(Token::Comma) => {
+                                self.advance();
+                            }
+                            Some(Token::RParen) => {
+                                self.advance();
+                                break;
+                            }
+                            _ => return Err("Expected ',' or ')' after table constraint".into()),
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+
             let col = self.parse_column_spec()?;
             columns.push(col);
 
@@ -275,8 +323,19 @@ impl Parser {
         Ok(CreateTable {
             table_name,
             columns,
+            constraints,
             if_not_exists: false,
         })
+    }
+
+    fn parse_ident_list(&mut self) -> Result<Vec<String>, String> {
+        let mut names = Vec::new();
+        names.push(self.expect_ident()?);
+        while self.peek() == Some(&Token::Comma) {
+            self.advance();
+            names.push(self.expect_ident()?);
+        }
+        Ok(names)
     }
 
     fn parse_column_spec(&mut self) -> Result<ColumnSpec, String> {
@@ -389,13 +448,13 @@ impl Parser {
         self.expect(&Token::On)?;
         let table_name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
-        let column_name = self.expect_ident()?;
+        let column_names = self.parse_ident_list()?;
         self.expect(&Token::RParen)?;
 
         Ok(CreateIndex {
             index_name,
             table_name,
-            column_name,
+            column_names,
             is_unique,
             if_not_exists: false,
         })

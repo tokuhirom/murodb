@@ -140,6 +140,11 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
                 _ => Ok(Value::Integer(0)),
             }
         }
+
+        // Subquery variants should be materialized before eval_expr is called
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => Err(
+            MuroError::Execution("Subquery not materialized before evaluation".into()),
+        ),
     }
 }
 

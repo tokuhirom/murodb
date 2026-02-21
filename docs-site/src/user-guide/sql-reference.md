@@ -520,6 +520,56 @@ SELECT DISTINCT category FROM orders;
 SELECT DISTINCT category, status FROM orders;
 ```
 
+## Subqueries
+
+Uncorrelated subqueries are supported in WHERE clauses and SELECT lists.
+
+### IN / NOT IN (SELECT ...)
+
+```sql
+-- Find users who have placed orders
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders);
+
+-- Find users who have NOT placed orders
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders);
+```
+
+### EXISTS / NOT EXISTS
+
+```sql
+-- Check if any orders exist (uncorrelated)
+SELECT * FROM users WHERE EXISTS (SELECT id FROM orders);
+
+-- Check if no orders exist
+SELECT * FROM users WHERE NOT EXISTS (SELECT id FROM orders WHERE amount > 1000);
+```
+
+### Scalar Subqueries
+
+A scalar subquery returns exactly one column and at most one row. If it returns zero rows, the result is NULL. If it returns more than one row, an error is raised.
+
+```sql
+-- Scalar subquery in SELECT list
+SELECT id, (SELECT MAX(amount) FROM orders) AS max_order FROM users;
+
+-- Scalar subquery in WHERE
+SELECT * FROM users WHERE id = (SELECT MIN(user_id) FROM orders);
+```
+
+### Nested Subqueries
+
+Subqueries can be nested:
+
+```sql
+SELECT * FROM t1 WHERE id IN (
+  SELECT id FROM t2 WHERE EXISTS (SELECT id FROM t3)
+);
+```
+
+**Limitations:**
+- Only uncorrelated subqueries (no outer row references).
+- Subqueries are pre-materialized once per query (not per row).
+
 ## JOIN
 
 ```sql

@@ -57,6 +57,6 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 ## Known Limitations
 
 - Posting list が 4096B ページを超えるとエラー (大量文書の共通bigramで発生しうる)
-- Subquery 未対応
+- Subquery は非相関サブクエリのみ対応 (外部行参照は未対応)
 - ALTER TABLE ADD/DROP PRIMARY KEY 未対応
 - ALTER TABLE はトランザクション非対応 (DDL全般と同様)

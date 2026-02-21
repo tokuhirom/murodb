@@ -68,6 +68,7 @@ pub fn execute_statement(
         Statement::RenameTable(rt) => exec_rename_table(rt, pager, catalog),
         Statement::Insert(ins) => exec_insert(ins, pager, catalog),
         Statement::Select(sel) => exec_select(sel, pager, catalog),
+        Statement::SetQuery(sq) => exec_set_query(sq, pager, catalog),
         Statement::Update(upd) => exec_update(upd, pager, catalog),
         Statement::Delete(del) => exec_delete(del, pager, catalog),
         Statement::ShowTables => exec_show_tables(pager, catalog),
@@ -2065,6 +2066,95 @@ fn build_join_row(
     }
 
     Ok(Row { values: row_values })
+}
+
+fn exec_set_query(
+    sq: &SetQuery,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    // Execute the first SELECT
+    let first_result = exec_select_returning_rows(&sq.left, pager, catalog)?;
+    let col_count = first_result.first().map(|r| r.values.len()).unwrap_or(0);
+    let col_names: Vec<String> = first_result
+        .first()
+        .map(|r| r.values.iter().map(|(n, _)| n.clone()).collect())
+        .unwrap_or_default();
+
+    let mut rows = first_result;
+
+    for (op, sel) in &sq.ops {
+        let sel_rows = exec_select_returning_rows(sel, pager, catalog)?;
+
+        // Validate column count matches
+        if let Some(first_row) = sel_rows.first() {
+            if first_row.values.len() != col_count && col_count > 0 {
+                return Err(MuroError::Execution(format!(
+                    "UNION queries must have the same number of columns (expected {}, got {})",
+                    col_count,
+                    first_row.values.len()
+                )));
+            }
+        }
+
+        // Unify column names to match the first SELECT
+        for mut row in sel_rows {
+            if !col_names.is_empty() {
+                for (i, (name, _)) in row.values.iter_mut().enumerate() {
+                    if i < col_names.len() {
+                        *name = col_names[i].clone();
+                    }
+                }
+            }
+            rows.push(row);
+        }
+
+        // UNION (without ALL) removes duplicates
+        if *op == SetOp::Union {
+            let mut seen = HashSet::new();
+            rows.retain(|row| {
+                let key: Vec<ValueKey> = row
+                    .values
+                    .iter()
+                    .map(|(_, v)| ValueKey(v.clone()))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+    }
+
+    // Apply ORDER BY
+    if let Some(order_items) = &sq.order_by {
+        sort_rows(&mut rows, order_items);
+    }
+
+    // Apply OFFSET
+    if let Some(offset) = sq.offset {
+        let offset = offset as usize;
+        if offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows = rows.into_iter().skip(offset).collect();
+        }
+    }
+
+    // Apply LIMIT
+    if let Some(limit) = sq.limit {
+        rows.truncate(limit as usize);
+    }
+
+    Ok(ExecResult::Rows(rows))
+}
+
+fn exec_select_returning_rows(
+    sel: &Select,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<Vec<Row>> {
+    match exec_select(sel, pager, catalog)? {
+        ExecResult::Rows(rows) => Ok(rows),
+        _ => Err(MuroError::Execution("Expected rows from SELECT".into())),
+    }
 }
 
 fn sort_rows(rows: &mut [Row], order_items: &[OrderByItem]) {

@@ -63,7 +63,7 @@ impl Parser {
         let stmt = match self.peek() {
             Some(Token::Create) => self.parse_create()?,
             Some(Token::Drop) => self.parse_drop()?,
-            Some(Token::Select) => Statement::Select(Box::new(self.parse_select()?)),
+            Some(Token::Select) => self.parse_select_or_union()?,
             Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
@@ -803,6 +803,57 @@ impl Parser {
         })
     }
 
+    /// Parse SELECT, potentially followed by UNION [ALL] chains.
+    fn parse_select_or_union(&mut self) -> Result<Statement, String> {
+        let mut first = self.parse_select()?;
+
+        // Check for UNION
+        if self.peek() != Some(&Token::Union) {
+            return Ok(Statement::Select(Box::new(first)));
+        }
+
+        // Move ORDER BY / LIMIT / OFFSET from first SELECT to SetQuery level
+        // (they belong to the whole UNION, not the individual SELECT)
+        let mut set_order_by = first.order_by.take();
+        let mut set_limit = first.limit.take();
+        let mut set_offset = first.offset.take();
+
+        let mut ops = Vec::new();
+
+        while self.peek() == Some(&Token::Union) {
+            self.advance(); // consume UNION
+            let set_op = if self.peek() == Some(&Token::All) {
+                self.advance();
+                SetOp::UnionAll
+            } else {
+                SetOp::Union
+            };
+
+            let mut sel = self.parse_select()?;
+
+            // If this SELECT has ORDER BY/LIMIT/OFFSET, treat them as final SetQuery-level clauses
+            if sel.order_by.is_some() {
+                set_order_by = sel.order_by.take();
+            }
+            if sel.limit.is_some() {
+                set_limit = sel.limit.take();
+            }
+            if sel.offset.is_some() {
+                set_offset = sel.offset.take();
+            }
+
+            ops.push((set_op, sel));
+        }
+
+        Ok(Statement::SetQuery(Box::new(SetQuery {
+            left: first,
+            ops,
+            order_by: set_order_by,
+            limit: set_limit,
+            offset: set_offset,
+        })))
+    }
+
     /// Check if the next token is a SQL keyword (not a table alias).
     fn is_keyword_ahead(&self) -> bool {
         matches!(
@@ -820,6 +871,7 @@ impl Parser {
                     | Token::Right
                     | Token::Cross
                     | Token::On
+                    | Token::Union
                     | Token::Semicolon
             )
         )

@@ -19,8 +19,24 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    SetQuery(Box<SetQuery>),
     ShowCheckpointStats,
     ShowDatabaseStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOp {
+    Union,
+    UnionAll,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetQuery {
+    pub left: Select,
+    pub ops: Vec<(SetOp, Select)>,
+    pub order_by: Option<Vec<OrderByItem>>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

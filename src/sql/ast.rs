@@ -111,6 +111,7 @@ pub struct Insert {
 pub enum JoinType {
     Inner,
     Left,
+    Right,
     Cross,
 }
 

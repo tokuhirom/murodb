@@ -1379,7 +1379,7 @@ fn scan_table_qualified(
     Ok(result)
 }
 
-/// Make a null row for LEFT JOIN when there's no match on the right side.
+/// Make a null row for LEFT/RIGHT JOIN when there's no match on the other side.
 fn null_row_qualified(qualifier: &str, table_def: &TableDef) -> Vec<(String, Value)> {
     table_def
         .columns
@@ -1449,6 +1449,10 @@ fn exec_select_join(
         base_table_def,
         pager,
     )?;
+
+    // Track accumulated left-side column qualifiers and table defs for RIGHT JOIN null generation
+    let mut left_qualifiers_and_defs: Vec<(String, TableDef)> =
+        vec![(base_qualifier.to_string(), base_table_def.clone())];
 
     // 2. For each JOIN, perform nested loop join
     for join in &sel.joins {
@@ -1520,6 +1524,39 @@ fn exec_select_join(
                     }
                 }
             }
+            JoinType::Right => {
+                // Build a null row for the left side columns from accumulated table defs
+                let null_left: Vec<(String, Value)> = left_qualifiers_and_defs
+                    .iter()
+                    .flat_map(|(q, td)| null_row_qualified(q, td))
+                    .collect();
+
+                for right in &right_rows {
+                    let mut matched = false;
+                    for left in &joined_rows {
+                        let mut combined: Vec<(String, Value)> =
+                            Vec::with_capacity(left.len() + right.len());
+                        combined.extend(left.iter().cloned());
+                        combined.extend(right.iter().cloned());
+
+                        if let Some(on_expr) = &join.on_condition {
+                            let val = eval_join_expr(on_expr, &combined)?;
+                            if is_truthy(&val) {
+                                new_rows.push(combined);
+                                matched = true;
+                            }
+                        } else {
+                            new_rows.push(combined);
+                            matched = true;
+                        }
+                    }
+                    if !matched {
+                        let mut combined: Vec<(String, Value)> = null_left.clone();
+                        combined.extend(right.iter().cloned());
+                        new_rows.push(combined);
+                    }
+                }
+            }
             JoinType::Cross => {
                 for left in &joined_rows {
                     for right in &right_rows {
@@ -1533,6 +1570,7 @@ fn exec_select_join(
             }
         }
 
+        left_qualifiers_and_defs.push((right_qualifier.to_string(), right_table_def));
         joined_rows = new_rows;
     }
 

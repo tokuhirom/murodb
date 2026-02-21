@@ -660,6 +660,16 @@ impl Parser {
                     self.expect(&Token::Join)?;
                     Some(JoinType::Left)
                 }
+                Some(Token::Right) => {
+                    self.advance();
+                    // optional OUTER keyword (not a token, but could be an ident)
+                    if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                    {
+                        self.advance();
+                    }
+                    self.expect(&Token::Join)?;
+                    Some(JoinType::Right)
+                }
                 Some(Token::Cross) => {
                     self.advance();
                     self.expect(&Token::Join)?;

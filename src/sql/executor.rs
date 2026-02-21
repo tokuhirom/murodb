@@ -136,6 +136,24 @@ fn exec_create_table(
         }
     }
 
+    // Collect column-level UNIQUE index names and detect duplicates with table-level
+    let mut all_index_names: Vec<String> = table_level_uniques
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    for col_spec in &ct.columns {
+        if col_spec.is_unique && !col_spec.is_primary_key {
+            let idx_name = format!("auto_unique_{}_{}", ct.table_name, col_spec.name);
+            if all_index_names.contains(&idx_name) {
+                return Err(MuroError::Schema(format!(
+                    "Duplicate UNIQUE constraint on column '{}'",
+                    col_spec.name
+                )));
+            }
+            all_index_names.push(idx_name);
+        }
+    }
+
     // --- Build column definitions ---
 
     let mut columns: Vec<ColumnDef> = ct

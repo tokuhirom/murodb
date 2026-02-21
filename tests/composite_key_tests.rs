@@ -605,6 +605,23 @@ fn test_unique_constraint_with_invalid_column_errors() {
     assert!(err.contains("not found"), "Got: {}", err);
 }
 
+#[test]
+fn test_duplicate_unique_constraint_does_not_leave_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    // Column-level UNIQUE(a) and table-level UNIQUE(a) produce the same auto index name
+    let err = exec_err(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT UNIQUE, UNIQUE (a))",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(err.contains("Duplicate UNIQUE"), "Got: {}", err);
+
+    // Table should NOT exist
+    let rows = get_rows(exec("SHOW TABLES", &mut pager, &mut catalog));
+    assert!(rows.is_empty(), "Table should not have been created");
+}
+
 // --- Bug fix: Non-unique composite index with duplicate values ---
 
 #[test]

@@ -56,6 +56,9 @@ pub enum MuroError {
     #[error("Commit in doubt: WAL durable but data flush failed: {0}")]
     CommitInDoubt(String),
 
+    #[error("Session poisoned: {0}. Database must be reopened to trigger WAL recovery.")]
+    SessionPoisoned(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

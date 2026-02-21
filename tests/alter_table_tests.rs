@@ -1,0 +1,498 @@
+/// Integration tests for Phase 4: ALTER TABLE & RENAME TABLE.
+use murodb::crypto::aead::MasterKey;
+use murodb::schema::catalog::SystemCatalog;
+use murodb::sql::executor::{execute, ExecResult, Row};
+use murodb::storage::pager::Pager;
+use murodb::types::Value;
+use tempfile::TempDir;
+
+fn test_key() -> MasterKey {
+    MasterKey::new([0x42u8; 32])
+}
+
+fn setup() -> (Pager, SystemCatalog, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    (pager, catalog, dir)
+}
+
+fn exec(pager: &mut Pager, catalog: &mut SystemCatalog, sql: &str) {
+    execute(sql, pager, catalog).unwrap();
+}
+
+fn exec_err(pager: &mut Pager, catalog: &mut SystemCatalog, sql: &str) -> String {
+    execute(sql, pager, catalog).unwrap_err().to_string()
+}
+
+fn query_rows(pager: &mut Pager, catalog: &mut SystemCatalog, sql: &str) -> Vec<Row> {
+    match execute(sql, pager, catalog).unwrap() {
+        ExecResult::Rows(rows) => rows,
+        other => panic!("Expected rows, got {:?}", other),
+    }
+}
+
+// ─── ADD COLUMN ────────────────────────────────────────────────
+
+#[test]
+fn test_add_column_nullable() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (2, 'bob')",
+    );
+
+    // Add a new nullable column
+    exec(&mut pager, &mut catalog, "ALTER TABLE t ADD COLUMN age INT");
+
+    // Existing rows should get NULL for the new column
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name, age FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("age"), Some(&Value::Null));
+    assert_eq!(rows[1].get("age"), Some(&Value::Null));
+}
+
+#[test]
+fn test_add_column_with_default() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Add a column with DEFAULT
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN status INT DEFAULT 0",
+    );
+
+    // Existing rows should get the default value
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, name, status FROM t");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("status"), Some(&Value::Integer(0)));
+}
+
+#[test]
+fn test_add_column_then_insert() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN email VARCHAR",
+    );
+
+    // Insert new row with the new column
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, email) VALUES (2, 'bob', 'bob@example.com')",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name, email FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("email"), Some(&Value::Null));
+    assert_eq!(
+        rows[1].get("email"),
+        Some(&Value::Varchar("bob@example.com".into()))
+    );
+}
+
+#[test]
+fn test_add_column_without_column_keyword() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY)",
+    );
+    // ADD without COLUMN keyword should also work
+    exec(&mut pager, &mut catalog, "ALTER TABLE t ADD name VARCHAR");
+
+    let rows = query_rows(&mut pager, &mut catalog, "DESCRIBE t");
+    // Should have id and name columns (plus possibly hidden _rowid)
+    let col_names: Vec<&Value> = rows.iter().map(|r| &r.values[0].1).collect();
+    assert!(col_names.contains(&&Value::Varchar("name".into())));
+}
+
+#[test]
+fn test_add_column_duplicate_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN name VARCHAR",
+    );
+    assert!(err.contains("already exists"), "Error: {}", err);
+}
+
+#[test]
+fn test_add_column_pk_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY)",
+    );
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN id2 BIGINT PRIMARY KEY",
+    );
+    assert!(err.contains("PRIMARY KEY"), "Error: {}", err);
+}
+
+// ─── DROP COLUMN ───────────────────────────────────────────────
+
+#[test]
+fn test_drop_column() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR, age INT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, age) VALUES (1, 'alice', 30)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, age) VALUES (2, 'bob', 25)",
+    );
+
+    exec(&mut pager, &mut catalog, "ALTER TABLE t DROP COLUMN age");
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, name FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alice".into())));
+    assert_eq!(rows[1].get("name"), Some(&Value::Varchar("bob".into())));
+}
+
+#[test]
+fn test_drop_column_pk_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+
+    let err = exec_err(&mut pager, &mut catalog, "ALTER TABLE t DROP COLUMN id");
+    assert!(err.contains("PRIMARY KEY"), "Error: {}", err);
+}
+
+#[test]
+fn test_drop_column_nonexistent_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t DROP COLUMN nonexistent",
+    );
+    assert!(err.contains("not found"), "Error: {}", err);
+}
+
+#[test]
+fn test_drop_column_with_index_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(&mut pager, &mut catalog, "CREATE INDEX idx_name ON t(name)");
+
+    let err = exec_err(&mut pager, &mut catalog, "ALTER TABLE t DROP COLUMN name");
+    assert!(err.contains("index"), "Error: {}", err);
+}
+
+// ─── MODIFY COLUMN ─────────────────────────────────────────────
+
+#[test]
+fn test_modify_column_type_int_to_bigint() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val INT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, val) VALUES (1, 42)",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN val BIGINT",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, val FROM t");
+    assert_eq!(rows[0].get("val"), Some(&Value::Integer(42)));
+}
+
+#[test]
+fn test_modify_column_type_int_to_varchar() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val INT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, val) VALUES (1, 42)",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN val VARCHAR",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, val FROM t");
+    assert_eq!(rows[0].get("val"), Some(&Value::Varchar("42".into())));
+}
+
+#[test]
+fn test_modify_column_metadata_only() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    // Change nullable to NOT NULL (metadata-only, same type)
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t MODIFY COLUMN name VARCHAR NOT NULL",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, name FROM t");
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alice".into())));
+}
+
+// ─── CHANGE COLUMN ─────────────────────────────────────────────
+
+#[test]
+fn test_change_column_rename() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t CHANGE COLUMN name username VARCHAR",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, username FROM t");
+    assert_eq!(
+        rows[0].get("username"),
+        Some(&Value::Varchar("alice".into()))
+    );
+}
+
+#[test]
+fn test_change_column_nonexistent_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t CHANGE COLUMN nonexistent new_name VARCHAR",
+    );
+    assert!(err.contains("not found"), "Error: {}", err);
+}
+
+// ─── RENAME TABLE ──────────────────────────────────────────────
+
+#[test]
+fn test_rename_table() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE old_t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO old_t (id, name) VALUES (1, 'alice')",
+    );
+
+    exec(&mut pager, &mut catalog, "RENAME TABLE old_t TO new_t");
+
+    // Access by new name
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT id, name FROM new_t");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("name"), Some(&Value::Varchar("alice".into())));
+}
+
+#[test]
+fn test_rename_table_old_name_gone() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE old_t (id BIGINT PRIMARY KEY)",
+    );
+
+    exec(&mut pager, &mut catalog, "RENAME TABLE old_t TO new_t");
+
+    // Old name should not be accessible
+    let err = exec_err(&mut pager, &mut catalog, "SELECT * FROM old_t");
+    assert!(err.contains("not found"), "Error: {}", err);
+}
+
+#[test]
+fn test_rename_table_nonexistent_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "RENAME TABLE nonexistent TO new_t",
+    );
+    assert!(err.contains("does not exist"), "Error: {}", err);
+}
+
+#[test]
+fn test_rename_table_target_exists_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t1 (id BIGINT PRIMARY KEY)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t2 (id BIGINT PRIMARY KEY)",
+    );
+
+    let err = exec_err(&mut pager, &mut catalog, "RENAME TABLE t1 TO t2");
+    assert!(err.contains("already exists"), "Error: {}", err);
+}
+
+// ─── ALTER TABLE on non-existent table ─────────────────────────
+
+#[test]
+fn test_alter_table_nonexistent_error() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE nonexistent ADD COLUMN x INT",
+    );
+    assert!(err.contains("not found"), "Error: {}", err);
+}
+
+// ─── SELECT * after ADD COLUMN ─────────────────────────────────
+
+#[test]
+fn test_select_star_after_add_column() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name) VALUES (1, 'alice')",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "ALTER TABLE t ADD COLUMN age INT DEFAULT 25",
+    );
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT * FROM t");
+    assert_eq!(rows.len(), 1);
+    // Should include all 3 columns
+    assert_eq!(rows[0].values.len(), 3);
+    assert_eq!(rows[0].get("age"), Some(&Value::Integer(25)));
+}

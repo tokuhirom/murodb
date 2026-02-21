@@ -65,6 +65,42 @@ DROP TABLE IF EXISTS t;
 DROP INDEX idx_email;
 ```
 
+### ALTER TABLE
+
+```sql
+-- Add a new column (O(1), no row rewrite)
+ALTER TABLE t ADD COLUMN email VARCHAR;
+ALTER TABLE t ADD age INT DEFAULT 0;
+
+-- Drop a column (full table rewrite)
+ALTER TABLE t DROP COLUMN age;
+
+-- Modify column type or constraints (full rewrite if type changes)
+ALTER TABLE t MODIFY COLUMN name VARCHAR(255) NOT NULL;
+ALTER TABLE t MODIFY name TEXT;
+
+-- Rename and optionally change a column (CHANGE COLUMN)
+ALTER TABLE t CHANGE COLUMN name username VARCHAR;
+```
+
+**Performance notes:**
+- `ADD COLUMN` is O(1) — only updates the catalog. Existing rows return the default value (or NULL) for the new column without rewriting data.
+- `DROP COLUMN`, `MODIFY COLUMN` (with type change), and `CHANGE COLUMN` (with type change) perform a full table rewrite.
+- `MODIFY COLUMN` / `CHANGE COLUMN` without a type change is catalog-only (O(1)).
+
+**Limitations:**
+- Cannot add a PRIMARY KEY column via ALTER TABLE.
+- Cannot drop a PRIMARY KEY column.
+- Cannot drop a column that has an index on it (drop the index first).
+
+### RENAME TABLE
+
+```sql
+RENAME TABLE old_name TO new_name;
+```
+
+Renames a table. All indexes are automatically updated. No row data is rewritten.
+
 ### Schema Inspection
 
 ```sql

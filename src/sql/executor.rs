@@ -62,6 +62,8 @@ pub fn execute_statement(
         }
         Statement::DropTable(dt) => exec_drop_table(dt, pager, catalog),
         Statement::DropIndex(di) => exec_drop_index(di, pager, catalog),
+        Statement::AlterTable(at) => exec_alter_table(at, pager, catalog),
+        Statement::RenameTable(rt) => exec_rename_table(rt, pager, catalog),
         Statement::Insert(ins) => exec_insert(ins, pager, catalog),
         Statement::Select(sel) => exec_select(sel, pager, catalog),
         Statement::Update(upd) => exec_update(upd, pager, catalog),
@@ -348,6 +350,334 @@ fn exec_drop_index(
     }
 
     catalog.delete_index(pager, &di.index_name)?;
+    Ok(ExecResult::Ok)
+}
+
+fn exec_alter_table(
+    at: &AlterTable,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let table_def = catalog
+        .get_table(pager, &at.table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", at.table_name)))?;
+
+    match &at.operation {
+        AlterTableOp::AddColumn(col_spec) => {
+            exec_alter_add_column(table_def, col_spec, pager, catalog)
+        }
+        AlterTableOp::DropColumn(col_name) => {
+            exec_alter_drop_column(table_def, col_name, &at.table_name, pager, catalog)
+        }
+        AlterTableOp::ModifyColumn(col_spec) => {
+            exec_alter_modify_column(table_def, col_spec, &at.table_name, pager, catalog)
+        }
+        AlterTableOp::ChangeColumn(old_name, col_spec) => exec_alter_change_column(
+            table_def,
+            old_name,
+            col_spec,
+            &at.table_name,
+            pager,
+            catalog,
+        ),
+    }
+}
+
+fn exec_alter_add_column(
+    mut table_def: TableDef,
+    col_spec: &ColumnSpec,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    // Validate: column doesn't already exist
+    if table_def.column_index(&col_spec.name).is_some() {
+        return Err(MuroError::Schema(format!(
+            "Column '{}' already exists in table '{}'",
+            col_spec.name, table_def.name
+        )));
+    }
+    // Don't allow adding PK column
+    if col_spec.is_primary_key {
+        return Err(MuroError::Schema(
+            "Cannot add a PRIMARY KEY column with ALTER TABLE".into(),
+        ));
+    }
+
+    let mut col = ColumnDef::new(&col_spec.name, col_spec.data_type);
+    if col_spec.is_unique {
+        col = col.unique();
+    }
+    if !col_spec.is_nullable {
+        col = col.not_null();
+    }
+    if col_spec.auto_increment {
+        col = col.with_auto_increment();
+    }
+    if let Some(default_expr) = &col_spec.default_value {
+        col.default_value = ast_expr_to_default(default_expr);
+    }
+    if let Some(check) = &col_spec.check_expr {
+        col.check_expr = Some(expr_to_string(check));
+    }
+
+    table_def.columns.push(col);
+    catalog.update_table(pager, &table_def)?;
+
+    Ok(ExecResult::Ok)
+}
+
+fn exec_alter_drop_column(
+    mut table_def: TableDef,
+    col_name: &str,
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+        MuroError::Schema(format!(
+            "Column '{}' not found in table '{}'",
+            col_name, table_name
+        ))
+    })?;
+
+    // Can't drop PK column
+    if table_def.columns[col_idx].is_primary_key {
+        return Err(MuroError::Schema("Cannot drop PRIMARY KEY column".into()));
+    }
+
+    // Check if any index references this column
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    for idx in &indexes {
+        if idx.column_name == col_name {
+            return Err(MuroError::Schema(format!(
+                "Cannot drop column '{}': index '{}' depends on it",
+                col_name, idx.name
+            )));
+        }
+    }
+
+    // Full table rewrite: scan all rows, remove the dropped column, re-insert
+    let old_columns = table_def.columns.clone();
+    let data_btree = BTree::open(table_def.data_btree_root);
+
+    let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+    data_btree.scan(pager, |k, v| {
+        let row_values = deserialize_row(v, &old_columns)?;
+        entries.push((k.to_vec(), row_values));
+        Ok(true)
+    })?;
+
+    // Create new column list without the dropped column
+    table_def.columns.remove(col_idx);
+
+    // Rewrite all rows
+    // Free old data pages and create a new B-tree
+    let old_pages = data_btree.collect_all_pages(pager)?;
+    for page_id in old_pages {
+        pager.free_page(page_id);
+    }
+    let new_data_btree = BTree::create(pager)?;
+    let mut new_btree = BTree::open(new_data_btree.root_page_id());
+
+    for (key, mut row_values) in entries {
+        row_values.remove(col_idx);
+        let new_data = serialize_row(&row_values, &table_def.columns);
+        new_btree.insert(pager, &key, &new_data)?;
+    }
+
+    table_def.data_btree_root = new_btree.root_page_id();
+    catalog.update_table(pager, &table_def)?;
+
+    Ok(ExecResult::Ok)
+}
+
+fn exec_alter_modify_column(
+    mut table_def: TableDef,
+    col_spec: &ColumnSpec,
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let col_idx = table_def.column_index(&col_spec.name).ok_or_else(|| {
+        MuroError::Schema(format!(
+            "Column '{}' not found in table '{}'",
+            col_spec.name, table_name
+        ))
+    })?;
+
+    let old_col = &table_def.columns[col_idx];
+    let type_changed = old_col.data_type != col_spec.data_type;
+
+    if type_changed {
+        // Full table rewrite with type coercion
+        let old_columns = table_def.columns.clone();
+        let data_btree = BTree::open(table_def.data_btree_root);
+
+        let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+        data_btree.scan(pager, |k, v| {
+            let row_values = deserialize_row(v, &old_columns)?;
+            entries.push((k.to_vec(), row_values));
+            Ok(true)
+        })?;
+
+        // Update column def
+        update_column_def(&mut table_def.columns[col_idx], col_spec);
+
+        // Rewrite with coerced values
+        let old_pages = data_btree.collect_all_pages(pager)?;
+        for page_id in old_pages {
+            pager.free_page(page_id);
+        }
+        let new_data_btree = BTree::create(pager)?;
+        let mut new_btree = BTree::open(new_data_btree.root_page_id());
+
+        for (key, mut row_values) in entries {
+            row_values[col_idx] = coerce_value(&row_values[col_idx], col_spec.data_type)?;
+            let new_data = serialize_row(&row_values, &table_def.columns);
+            new_btree.insert(pager, &key, &new_data)?;
+        }
+
+        table_def.data_btree_root = new_btree.root_page_id();
+    } else {
+        // Metadata-only change
+        update_column_def(&mut table_def.columns[col_idx], col_spec);
+    }
+
+    catalog.update_table(pager, &table_def)?;
+    Ok(ExecResult::Ok)
+}
+
+fn exec_alter_change_column(
+    mut table_def: TableDef,
+    old_name: &str,
+    col_spec: &ColumnSpec,
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let col_idx = table_def.column_index(old_name).ok_or_else(|| {
+        MuroError::Schema(format!(
+            "Column '{}' not found in table '{}'",
+            old_name, table_name
+        ))
+    })?;
+
+    let old_col = &table_def.columns[col_idx];
+    let type_changed = old_col.data_type != col_spec.data_type;
+
+    // Update any indexes referencing the old column name
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    for mut idx in indexes {
+        if idx.column_name == old_name {
+            idx.column_name = col_spec.name.clone();
+            // Re-store the index with updated column name
+            let idx_key = format!("index:{}", idx.name);
+            let idx_serialized = idx.serialize();
+            catalog
+                .catalog_btree_mut()
+                .insert(pager, idx_key.as_bytes(), &idx_serialized)?;
+        }
+    }
+
+    if type_changed {
+        let old_columns = table_def.columns.clone();
+        let data_btree = BTree::open(table_def.data_btree_root);
+
+        let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+        data_btree.scan(pager, |k, v| {
+            let row_values = deserialize_row(v, &old_columns)?;
+            entries.push((k.to_vec(), row_values));
+            Ok(true)
+        })?;
+
+        // Update column def (including name change)
+        update_column_def(&mut table_def.columns[col_idx], col_spec);
+
+        let old_pages = data_btree.collect_all_pages(pager)?;
+        for page_id in old_pages {
+            pager.free_page(page_id);
+        }
+        let new_data_btree = BTree::create(pager)?;
+        let mut new_btree = BTree::open(new_data_btree.root_page_id());
+
+        for (key, mut row_values) in entries {
+            row_values[col_idx] = coerce_value(&row_values[col_idx], col_spec.data_type)?;
+            let new_data = serialize_row(&row_values, &table_def.columns);
+            new_btree.insert(pager, &key, &new_data)?;
+        }
+
+        table_def.data_btree_root = new_btree.root_page_id();
+    } else {
+        update_column_def(&mut table_def.columns[col_idx], col_spec);
+    }
+
+    catalog.update_table(pager, &table_def)?;
+    Ok(ExecResult::Ok)
+}
+
+/// Update a ColumnDef in place from a ColumnSpec.
+fn update_column_def(col: &mut ColumnDef, spec: &ColumnSpec) {
+    col.name = spec.name.clone();
+    col.data_type = spec.data_type;
+    col.is_unique = spec.is_unique;
+    col.is_nullable = spec.is_nullable;
+    col.auto_increment = spec.auto_increment;
+    if let Some(default_expr) = &spec.default_value {
+        col.default_value = ast_expr_to_default(default_expr);
+    } else {
+        col.default_value = None;
+    }
+    if let Some(check) = &spec.check_expr {
+        col.check_expr = Some(expr_to_string(check));
+    } else {
+        col.check_expr = None;
+    }
+}
+
+/// Coerce a value to a target data type.
+fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(n) => match target_type {
+            DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
+                Ok(Value::Integer(*n))
+            }
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
+            DataType::Varbinary(_) => Err(MuroError::Execution(
+                "Cannot coerce integer to VARBINARY".into(),
+            )),
+        },
+        Value::Varchar(s) => match target_type {
+            DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
+                let n: i64 = s.parse().map_err(|_| {
+                    MuroError::Execution(format!("Cannot convert '{}' to integer", s))
+                })?;
+                Ok(Value::Integer(n))
+            }
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(s.clone())),
+            DataType::Varbinary(_) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
+        },
+        Value::Varbinary(b) => match target_type {
+            DataType::Varchar(_) | DataType::Text => {
+                let s = String::from_utf8(b.clone()).map_err(|_| {
+                    MuroError::Execution("Cannot convert VARBINARY to VARCHAR".into())
+                })?;
+                Ok(Value::Varchar(s))
+            }
+            DataType::Varbinary(_) => Ok(Value::Varbinary(b.clone())),
+            _ => Err(MuroError::Execution(
+                "Cannot coerce VARBINARY to integer type".into(),
+            )),
+        },
+    }
+}
+
+fn exec_rename_table(
+    rt: &RenameTable,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    catalog.rename_table(pager, &rt.old_name, &rt.new_name)?;
     Ok(ExecResult::Ok)
 }
 
@@ -1353,6 +1683,10 @@ fn exec_describe(
 pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
 
+    // Stored column count (u16) — allows deserialize_row to handle short rows
+    // after ALTER TABLE ADD COLUMN without rewriting existing data.
+    buf.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+
     // Null bitmap (1 bit per column, packed into bytes)
     let bitmap_bytes = columns.len().div_ceil(8);
     let mut bitmap = vec![0u8; bitmap_bytes];
@@ -1393,7 +1727,14 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
 }
 
 pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>> {
-    let bitmap_bytes = columns.len().div_ceil(8);
+    // Read stored column count from the u16 prefix
+    if data.len() < 2 {
+        return Err(MuroError::InvalidPage);
+    }
+    let stored_col_count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+    let data = &data[2..]; // skip the u16 prefix
+
+    let bitmap_bytes = stored_col_count.div_ceil(8);
     if data.len() < bitmap_bytes {
         return Err(MuroError::InvalidPage);
     }
@@ -1403,6 +1744,12 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
     let mut values = Vec::with_capacity(columns.len());
 
     for (i, col) in columns.iter().enumerate() {
+        // Columns beyond what was stored get default/NULL
+        if i >= stored_col_count {
+            values.push(default_value_for_column(col));
+            continue;
+        }
+
         let is_null = bitmap[i / 8] & (1 << (i % 8)) != 0;
         if is_null {
             values.push(Value::Null);
@@ -1472,6 +1819,15 @@ pub fn deserialize_row(data: &[u8], columns: &[ColumnDef]) -> Result<Vec<Value>>
     }
 
     Ok(values)
+}
+
+/// Get the default value for a newly-added column.
+fn default_value_for_column(col: &ColumnDef) -> Value {
+    match &col.default_value {
+        Some(DefaultValue::Integer(n)) => Value::Integer(*n),
+        Some(DefaultValue::String(s)) => Value::Varchar(s.clone()),
+        Some(DefaultValue::Null) | None => Value::Null,
+    }
 }
 
 /// Encode a Value for use as a B-tree key.

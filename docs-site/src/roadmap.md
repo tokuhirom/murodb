@@ -57,20 +57,20 @@ MySQL-compatible scalar functions.
 - [x] HAVING
 - [x] SELECT DISTINCT
 
-## Phase 4 — Schema Evolution
+## Phase 4 — Schema Evolution ✓
 
-- [ ] ALTER TABLE ADD COLUMN
-- [ ] ALTER TABLE DROP COLUMN
-- [ ] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
-- [ ] RENAME TABLE
+- [x] ALTER TABLE ADD COLUMN
+- [x] ALTER TABLE DROP COLUMN
+- [x] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
+- [x] RENAME TABLE
 - [x] Composite PRIMARY KEY
 - [x] Composite UNIQUE / composite INDEX
 
 ## Phase 5 — Advanced Query
 
-- [ ] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
+- [x] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
 - [ ] UNION / UNION ALL
-- [ ] EXISTS / NOT EXISTS
+- [x] EXISTS / NOT EXISTS
 - [ ] INSERT ... ON DUPLICATE KEY UPDATE
 - [ ] REPLACE INTO
 - [ ] EXPLAIN (query plan display)

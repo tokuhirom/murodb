@@ -231,6 +231,19 @@ pub enum Expr {
     },
     /// Comparison result: expr > 0 (used as a where clause)
     GreaterThanZero(Box<Expr>),
+    /// Subquery: expr [NOT] IN (SELECT ...)
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<Select>,
+        negated: bool,
+    },
+    /// Subquery: [NOT] EXISTS (SELECT ...)
+    Exists {
+        subquery: Box<Select>,
+        negated: bool,
+    },
+    /// Scalar subquery: (SELECT ...)
+    ScalarSubquery(Box<Select>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -931,6 +931,19 @@ impl Parser {
 
     fn parse_not_expr(&mut self) -> Result<Expr, String> {
         if self.peek() == Some(&Token::Not) {
+            // Check for NOT EXISTS
+            if self.tokens.get(self.pos + 1) == Some(&Token::Exists) {
+                self.advance(); // consume NOT
+                self.advance(); // consume EXISTS
+                self.expect(&Token::LParen)?;
+                self.advance(); // consume SELECT
+                let subquery = self.parse_select_body()?;
+                self.expect(&Token::RParen)?;
+                return Ok(Expr::Exists {
+                    subquery: Box::new(subquery),
+                    negated: true,
+                });
+            }
             self.advance();
             let operand = self.parse_comparison()?;
             Ok(Expr::UnaryOp {
@@ -977,12 +990,7 @@ impl Parser {
                 }
                 Some(Token::In) => {
                     self.advance();
-                    let list = self.parse_in_list()?;
-                    return Ok(Expr::InList {
-                        expr: Box::new(left),
-                        list,
-                        negated: true,
-                    });
+                    return self.parse_in_list_or_subquery(left, true);
                 }
                 Some(Token::Between) => {
                     self.advance();
@@ -1009,12 +1017,7 @@ impl Parser {
         // IN
         if self.peek() == Some(&Token::In) {
             self.advance();
-            let list = self.parse_in_list()?;
-            return Ok(Expr::InList {
-                expr: Box::new(left),
-                list,
-                negated: false,
-            });
+            return self.parse_in_list_or_subquery(left, false);
         }
 
         // BETWEEN
@@ -1056,8 +1059,20 @@ impl Parser {
         }
     }
 
-    fn parse_in_list(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_in_list_or_subquery(&mut self, left: Expr, negated: bool) -> Result<Expr, String> {
         self.expect(&Token::LParen)?;
+        // Check if this is a subquery: IN (SELECT ...)
+        if self.peek() == Some(&Token::Select) {
+            self.advance(); // consume SELECT
+            let subquery = self.parse_select_body()?;
+            self.expect(&Token::RParen)?;
+            return Ok(Expr::InSubquery {
+                expr: Box::new(left),
+                subquery: Box::new(subquery),
+                negated,
+            });
+        }
+        // Otherwise parse as a regular value list
         let mut list = Vec::new();
         loop {
             list.push(self.parse_expr()?);
@@ -1068,7 +1083,128 @@ impl Parser {
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(list)
+        Ok(Expr::InList {
+            expr: Box::new(left),
+            list,
+            negated,
+        })
+    }
+
+    /// Parse a SELECT body (everything after the SELECT keyword).
+    /// Used for subqueries where the caller has already consumed SELECT.
+    fn parse_select_body(&mut self) -> Result<Select, String> {
+        let distinct = if self.peek() == Some(&Token::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let columns = self.parse_select_columns()?;
+
+        self.expect(&Token::From)?;
+        let table_name = self.expect_ident()?;
+
+        let table_alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        let where_clause = if self.peek() == Some(&Token::Where) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let group_by = if self.peek() == Some(&Token::Group) {
+            self.advance();
+            self.expect(&Token::By)?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expr()?);
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            Some(exprs)
+        } else {
+            None
+        };
+
+        let having = if self.peek() == Some(&Token::Having) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let order_by = if self.peek() == Some(&Token::Order) {
+            self.advance();
+            self.expect(&Token::By)?;
+            let mut items = Vec::new();
+            loop {
+                let expr = self.parse_expr()?;
+                let descending = if self.peek() == Some(&Token::Desc) {
+                    self.advance();
+                    true
+                } else if self.peek() == Some(&Token::Asc) {
+                    self.advance();
+                    false
+                } else {
+                    false
+                };
+                items.push(OrderByItem { expr, descending });
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            Some(items)
+        } else {
+            None
+        };
+
+        let limit = if self.peek() == Some(&Token::Limit) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Integer(n)) => Some(n as u64),
+                _ => return Err("Expected integer after LIMIT".into()),
+            }
+        } else {
+            None
+        };
+
+        let offset = if self.peek() == Some(&Token::Offset) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Integer(n)) => Some(n as u64),
+                _ => return Err("Expected integer after OFFSET".into()),
+            }
+        } else {
+            None
+        };
+
+        Ok(Select {
+            distinct,
+            columns,
+            table_name,
+            table_alias,
+            joins: Vec::new(),
+            where_clause,
+            group_by,
+            having,
+            order_by,
+            limit,
+            offset,
+        })
     }
 
     fn parse_between_rest(&mut self, left: Expr, negated: bool) -> Result<Expr, String> {
@@ -1172,8 +1308,26 @@ impl Parser {
             Some(Token::FtsSnippet) => self.parse_fts_snippet(),
             Some(Token::Case) => self.parse_case_when(),
             Some(Token::Cast) => self.parse_cast(),
+            Some(Token::Exists) => {
+                self.advance(); // consume EXISTS
+                self.expect(&Token::LParen)?;
+                self.advance(); // consume SELECT
+                let subquery = self.parse_select_body()?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Exists {
+                    subquery: Box::new(subquery),
+                    negated: false,
+                })
+            }
             Some(Token::LParen) => {
                 self.advance();
+                // Check for scalar subquery: (SELECT ...)
+                if self.peek() == Some(&Token::Select) {
+                    self.advance(); // consume SELECT
+                    let subquery = self.parse_select_body()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::ScalarSubquery(Box::new(subquery)));
+                }
                 let expr = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)

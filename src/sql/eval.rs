@@ -56,17 +56,29 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
                 return Ok(Value::Null);
             }
             let mut found = false;
+            let mut has_null = false;
             for item in list {
                 let item_val = eval_expr(item, columns)?;
-                if !item_val.is_null()
-                    && value_cmp(&val, &item_val) == Some(std::cmp::Ordering::Equal)
-                {
+                if item_val.is_null() {
+                    has_null = true;
+                    continue;
+                }
+                if value_cmp(&val, &item_val) == Some(std::cmp::Ordering::Equal) {
                     found = true;
                     break;
                 }
             }
-            let result = if *negated { !found } else { found };
-            Ok(Value::Integer(if result { 1 } else { 0 }))
+            if found {
+                // IN → TRUE, NOT IN → FALSE
+                Ok(Value::Integer(if *negated { 0 } else { 1 }))
+            } else if has_null {
+                // No match but NULL in list → UNKNOWN (NULL)
+                // SQL standard: IN → NULL, NOT IN → NULL
+                Ok(Value::Null)
+            } else {
+                // No match, no NULLs → IN → FALSE, NOT IN → TRUE
+                Ok(Value::Integer(if *negated { 1 } else { 0 }))
+            }
         }
 
         Expr::Between {
@@ -140,6 +152,11 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
                 _ => Ok(Value::Integer(0)),
             }
         }
+
+        // Subquery variants should be materialized before eval_expr is called
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => Err(
+            MuroError::Execution("Subquery not materialized before evaluation".into()),
+        ),
     }
 }
 

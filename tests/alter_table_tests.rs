@@ -958,4 +958,16 @@ fn test_add_column_unique_with_nonnull_default_single_row_ok() {
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("code"), Some(&Value::Varchar("X".into())));
+
+    // Inserting another row with the same default value should fail (index was backfilled)
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t (id, name, code) VALUES (2, 'bob', 'X')",
+    );
+    assert!(
+        err.contains("Duplicate") || err.contains("unique"),
+        "Expected unique violation: {}",
+        err
+    );
 }

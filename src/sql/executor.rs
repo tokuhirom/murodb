@@ -409,31 +409,6 @@ fn exec_alter_add_column(
     // to know how many columns old rows have (short-row tolerance).
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
-    // UNIQUE with non-NULL default on non-empty table: all existing rows would
-    // have the same default value, immediately violating the unique constraint.
-    if col_spec.is_unique && !col_spec.is_primary_key {
-        if let Some(default_expr) = &col_spec.default_value {
-            let has_non_null_default = !matches!(default_expr, crate::sql::ast::Expr::Null);
-            if has_non_null_default {
-                let data_btree = BTree::open(table_def.data_btree_root);
-                let mut row_count = 0u64;
-                data_btree.scan(pager, |_k, _v| {
-                    row_count += 1;
-                    if row_count >= 2 {
-                        return Ok(false); // stop early
-                    }
-                    Ok(true)
-                })?;
-                if row_count >= 2 {
-                    return Err(MuroError::Schema(format!(
-                        "Cannot add UNIQUE column '{}' with non-NULL DEFAULT to a table with {} or more existing rows (all would have the same value)",
-                        col_spec.name, row_count
-                    )));
-                }
-            }
-        }
-    }
-
     // NOT NULL without DEFAULT: error if table has existing rows
     if !col_spec.is_nullable && col_spec.default_value.is_none() {
         let data_btree = BTree::open(table_def.data_btree_root);
@@ -470,16 +445,43 @@ fn exec_alter_add_column(
     table_def.columns.push(col);
     catalog.update_table(pager, &table_def)?;
 
-    // Create unique index if UNIQUE was specified
+    // Create unique index if UNIQUE was specified, and backfill existing rows
     if col_spec.is_unique && !col_spec.is_primary_key {
+        let new_col = table_def.columns.last().unwrap();
+        let default_val = default_value_for_column(new_col);
+
         let idx_btree = BTree::create(pager)?;
+        let mut idx_btree_mut = BTree::open(idx_btree.root_page_id());
+
+        // Backfill: insert default value for all existing rows into the index.
+        // For non-NULL defaults, duplicates are detected during backfill.
+        if !default_val.is_null() {
+            let idx_key = encode_value(&default_val, &new_col.data_type);
+            let data_btree = BTree::open(table_def.data_btree_root);
+            let mut pk_keys: Vec<Vec<u8>> = Vec::new();
+            data_btree.scan(pager, |k, _v| {
+                pk_keys.push(k.to_vec());
+                Ok(true)
+            })?;
+
+            if pk_keys.len() > 1 {
+                return Err(MuroError::Schema(format!(
+                    "Cannot add UNIQUE column '{}' with non-NULL DEFAULT: {} existing rows would all have the same value",
+                    col_spec.name, pk_keys.len()
+                )));
+            }
+            for pk_key in &pk_keys {
+                idx_btree_mut.insert(pager, &idx_key, pk_key)?;
+            }
+        }
+
         let idx_def = IndexDef {
             name: format!("auto_unique_{}_{}", table_def.name, col_spec.name),
             table_name: table_def.name.clone(),
             column_name: col_spec.name.clone(),
             index_type: IndexType::BTree,
             is_unique: true,
-            btree_root: idx_btree.root_page_id(),
+            btree_root: idx_btree_mut.root_page_id(),
         };
         catalog.create_index(pager, idx_def)?;
     }

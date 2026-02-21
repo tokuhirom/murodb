@@ -417,6 +417,53 @@ SELECT CAST(val AS BIGINT) FROM t;
 
 Supported target types: TINYINT, SMALLINT, INT, BIGINT, VARCHAR, TEXT, VARBINARY.
 
+## Aggregation & GROUP BY
+
+### Aggregate Functions
+
+```sql
+SELECT COUNT(*) FROM t;              -- count all rows
+SELECT COUNT(col) FROM t;            -- count non-NULL values
+SELECT COUNT(DISTINCT col) FROM t;   -- count distinct non-NULL values
+SELECT SUM(amount) FROM orders;      -- sum (skips NULLs)
+SELECT AVG(amount) FROM orders;      -- average (integer division, skips NULLs)
+SELECT MIN(amount) FROM orders;      -- minimum (skips NULLs)
+SELECT MAX(amount) FROM orders;      -- maximum (skips NULLs)
+```
+
+**NULL semantics (SQL standard):**
+- `COUNT(*)` counts all rows including NULLs
+- `COUNT(col)` counts non-NULL values only
+- `SUM`, `AVG`, `MIN`, `MAX` skip NULLs; return NULL if all values are NULL
+- On empty tables: `COUNT` returns 0, others return NULL
+
+### GROUP BY
+
+```sql
+SELECT category, COUNT(*) AS cnt FROM orders GROUP BY category;
+SELECT category, status, SUM(amount) FROM orders GROUP BY category, status;
+```
+
+NULLs in GROUP BY columns form their own group.
+
+### HAVING
+
+Filters groups after aggregation (use WHERE to filter rows before aggregation).
+
+```sql
+SELECT category, COUNT(*) AS cnt
+FROM orders
+GROUP BY category
+HAVING COUNT(*) > 2;
+```
+
+### SELECT DISTINCT
+
+```sql
+SELECT DISTINCT category FROM orders;
+SELECT DISTINCT category, status FROM orders;
+```
+
 ## JOIN
 
 ```sql

@@ -114,6 +114,15 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
             eval_cast(&val, target_type)
         }
 
+        Expr::AggregateFunc { .. } => {
+            // Aggregate functions are evaluated by the executor's aggregation pipeline,
+            // not by eval_expr. If we reach here, the aggregate value should have been
+            // substituted by the executor already.
+            Err(MuroError::Execution(
+                "Aggregate function used outside of aggregation context".into(),
+            ))
+        }
+
         Expr::MatchAgainst { .. } => {
             // FTS scoring - actual evaluation happens in the executor
             Ok(Value::Integer(0))

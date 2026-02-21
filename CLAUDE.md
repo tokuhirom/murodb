@@ -59,5 +59,4 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 - Posting list が 4096B ページを超えるとエラー (大量文書の共通bigramで発生しうる)
 - Subquery 未対応
 - Composite PK / Composite UNIQUE 未対応
-- DROP TABLE / ALTER TABLE 未対応
-- GROUP BY / 集約関数 未対応
+- ALTER TABLE 未対応

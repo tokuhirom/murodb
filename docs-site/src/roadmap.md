@@ -49,13 +49,13 @@ MySQL-compatible scalar functions.
 - [x] Type conversion: CAST(expr AS type)
 - [x] CASE WHEN ... THEN ... ELSE ... END
 
-## Phase 3 — Aggregation & Grouping
+## Phase 3 — Aggregation & Grouping ✓
 
-- [ ] COUNT, SUM, AVG, MIN, MAX
-- [ ] COUNT(DISTINCT ...)
-- [ ] GROUP BY
-- [ ] HAVING
-- [ ] SELECT DISTINCT
+- [x] COUNT, SUM, AVG, MIN, MAX
+- [x] COUNT(DISTINCT ...)
+- [x] GROUP BY (single and multiple columns)
+- [x] HAVING
+- [x] SELECT DISTINCT
 
 ## Phase 4 — Schema Evolution
 

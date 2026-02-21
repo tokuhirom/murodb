@@ -235,6 +235,12 @@ impl Session {
         &mut self.pager
     }
 
+    /// Get a mutable reference to the WAL writer.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn wal_mut(&mut self) -> &mut WalWriter {
+        &mut self.wal
+    }
+
     /// Get a reference to the catalog.
     pub fn catalog(&self) -> &SystemCatalog {
         &self.catalog

@@ -410,3 +410,99 @@ fn test_explicit_tx_commit_in_doubt_poisons_session() {
         result
     );
 }
+
+// ── checkpoint_truncate failure tests ──
+
+#[test]
+fn test_checkpoint_truncate_failure_data_survives() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    // Create DB and insert baseline data
+    {
+        let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+    }
+
+    // Reopen, inject checkpoint_truncate failure, commit new data
+    {
+        let db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        let mut session = db.into_session();
+
+        // Inject checkpoint_truncate failure
+        session
+            .wal_mut()
+            .set_inject_checkpoint_truncate_failure(Some(std::io::ErrorKind::Other));
+
+        // This commit should succeed (WAL sync + page writes succeed),
+        // but checkpoint_truncate will fail (WAL not truncated).
+        let result = session.execute("INSERT INTO t VALUES (2, 'bob')");
+        // The commit itself should succeed — checkpoint failure is non-fatal
+        assert!(
+            result.is_ok(),
+            "commit should succeed even if checkpoint_truncate fails: {:?}",
+            result
+        );
+
+        drop(session);
+    }
+
+    // Reopen — WAL recovery replays (idempotently) because WAL wasn't truncated
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        let rows = match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => rows,
+            other => panic!("expected Rows, got: {:?}", other),
+        };
+        assert_eq!(rows.len(), 2, "both rows should be present after recovery");
+    }
+}
+
+#[test]
+fn test_checkpoint_truncate_failure_repeated_open() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    // Create DB with data, then commit with checkpoint_truncate failure
+    {
+        let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'first')").unwrap();
+
+        let mut session = db.into_session();
+        session
+            .wal_mut()
+            .set_inject_checkpoint_truncate_failure(Some(std::io::ErrorKind::Other));
+        session
+            .execute("INSERT INTO t VALUES (2, 'second')")
+            .unwrap();
+        drop(session);
+    }
+
+    // First reopen
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        let rows = match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => rows,
+            other => panic!("expected Rows, got: {:?}", other),
+        };
+        assert_eq!(rows.len(), 2, "first reopen: both rows should be present");
+    }
+
+    // Second reopen — should also see correct data
+    {
+        let mut db = murodb::Database::open(&db_path, &test_key()).unwrap();
+        let rows = match db.execute("SELECT * FROM t").unwrap() {
+            ExecResult::Rows(rows) => rows,
+            other => panic!("expected Rows, got: {:?}", other),
+        };
+        assert_eq!(
+            rows.len(),
+            2,
+            "second reopen: both rows should still be present"
+        );
+    }
+}

@@ -22,6 +22,8 @@ pub struct WalWriter {
     inject_write_failure: Option<std::io::ErrorKind>,
     #[cfg(test)]
     inject_sync_failure: Option<std::io::ErrorKind>,
+    #[cfg(any(test, feature = "test-utils"))]
+    inject_checkpoint_truncate_failure: Option<std::io::ErrorKind>,
 }
 
 impl WalWriter {
@@ -45,6 +47,8 @@ impl WalWriter {
             inject_write_failure: None,
             #[cfg(test)]
             inject_sync_failure: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_checkpoint_truncate_failure: None,
         })
     }
 
@@ -81,6 +85,8 @@ impl WalWriter {
             inject_write_failure: None,
             #[cfg(test)]
             inject_sync_failure: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            inject_checkpoint_truncate_failure: None,
         })
     }
 
@@ -173,6 +179,13 @@ impl WalWriter {
     /// the old WAL may still be present and will be replayed idempotently on
     /// next open.
     pub fn checkpoint_truncate(&mut self) -> Result<()> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(kind) = self.inject_checkpoint_truncate_failure {
+            return Err(MuroError::Io(std::io::Error::new(
+                kind,
+                "injected checkpoint_truncate failure",
+            )));
+        }
         self.file.set_len(WAL_HEADER_SIZE as u64)?;
         self.file.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
         self.file.sync_all()?;
@@ -207,6 +220,11 @@ impl WalWriter {
     #[cfg(test)]
     pub fn set_inject_sync_failure(&mut self, kind: Option<std::io::ErrorKind>) {
         self.inject_sync_failure = kind;
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_inject_checkpoint_truncate_failure(&mut self, kind: Option<std::io::ErrorKind>) {
+        self.inject_checkpoint_truncate_failure = kind;
     }
 }
 

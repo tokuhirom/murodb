@@ -419,6 +419,8 @@ impl Parser {
                 Some(Token::SmallIntType) => Ok(DataType::SmallInt),
                 Some(Token::IntType) => Ok(DataType::Int),
                 Some(Token::BigIntType) => Ok(DataType::BigInt),
+                Some(Token::FloatType) => Ok(DataType::Float),
+                Some(Token::DoubleType) => Ok(DataType::Double),
                 Some(Token::VarcharType) => {
                     let size = self.parse_optional_size()?;
                     Ok(DataType::Varchar(size))
@@ -1368,13 +1370,13 @@ impl Parser {
             self.advance();
             let operand = self.parse_primary()?;
             // Optimize: if it's an integer literal, negate it directly
-            if let Expr::IntLiteral(n) = operand {
-                Ok(Expr::IntLiteral(-n))
-            } else {
-                Ok(Expr::UnaryOp {
+            match operand {
+                Expr::IntLiteral(n) => Ok(Expr::IntLiteral(-n)),
+                Expr::FloatLiteral(n) => Ok(Expr::FloatLiteral(-n)),
+                _ => Ok(Expr::UnaryOp {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
-                })
+                }),
             }
         } else {
             self.parse_primary()
@@ -1386,6 +1388,10 @@ impl Parser {
             Some(Token::Integer(n)) => {
                 self.advance();
                 Ok(Expr::IntLiteral(n))
+            }
+            Some(Token::Float(n)) => {
+                self.advance();
+                Ok(Expr::FloatLiteral(n))
             }
             Some(Token::StringLit(s)) => {
                 self.advance();

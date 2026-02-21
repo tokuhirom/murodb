@@ -45,6 +45,52 @@ pub fn encode_i64(val: i64) -> [u8; 8] {
     unsigned.to_be_bytes()
 }
 
+/// Encode f32 into 4 bytes that preserve sort order under byte comparison.
+pub fn encode_f32(val: f32) -> [u8; 4] {
+    let val = if val == 0.0 { 0.0 } else { val };
+    let bits = val.to_bits();
+    let ordered = if bits & (1u32 << 31) != 0 {
+        !bits
+    } else {
+        bits ^ (1u32 << 31)
+    };
+    ordered.to_be_bytes()
+}
+
+/// Decode f32 from order-preserving encoding.
+pub fn decode_f32(bytes: &[u8; 4]) -> f32 {
+    let ordered = u32::from_be_bytes(*bytes);
+    let bits = if ordered & (1u32 << 31) != 0 {
+        ordered ^ (1u32 << 31)
+    } else {
+        !ordered
+    };
+    f32::from_bits(bits)
+}
+
+/// Encode f64 into 8 bytes that preserve sort order under byte comparison.
+pub fn encode_f64(val: f64) -> [u8; 8] {
+    let val = if val == 0.0 { 0.0 } else { val };
+    let bits = val.to_bits();
+    let ordered = if bits & (1u64 << 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1u64 << 63)
+    };
+    ordered.to_be_bytes()
+}
+
+/// Decode f64 from order-preserving encoding.
+pub fn decode_f64(bytes: &[u8; 8]) -> f64 {
+    let ordered = u64::from_be_bytes(*bytes);
+    let bits = if ordered & (1u64 << 63) != 0 {
+        ordered ^ (1u64 << 63)
+    } else {
+        !ordered
+    };
+    f64::from_bits(bits)
+}
+
 /// Decode i64 from order-preserving encoding.
 pub fn decode_i64(bytes: &[u8; 8]) -> i64 {
     let unsigned = u64::from_be_bytes(*bytes);
@@ -85,7 +131,61 @@ pub fn encode_composite_key(
                     DataType::SmallInt => buf.extend_from_slice(&encode_i16(*n as i16)),
                     DataType::Int => buf.extend_from_slice(&encode_i32(*n as i32)),
                     DataType::BigInt => buf.extend_from_slice(&encode_i64(*n)),
+                    DataType::Float => buf.extend_from_slice(&encode_f32(*n as f32)),
+                    DataType::Double => buf.extend_from_slice(&encode_f64(*n as f64)),
                     _ => buf.extend_from_slice(&encode_i64(*n)),
+                }
+            }
+            Value::Float(n) => {
+                buf.push(0x01);
+                match dt {
+                    DataType::TinyInt => {
+                        if n.is_finite()
+                            && n.fract() == 0.0
+                            && *n >= i8::MIN as f64
+                            && *n <= i8::MAX as f64
+                        {
+                            buf.extend_from_slice(&encode_i8(*n as i8));
+                        } else {
+                            buf.extend_from_slice(&[0xff; 9]);
+                        }
+                    }
+                    DataType::SmallInt => {
+                        if n.is_finite()
+                            && n.fract() == 0.0
+                            && *n >= i16::MIN as f64
+                            && *n <= i16::MAX as f64
+                        {
+                            buf.extend_from_slice(&encode_i16(*n as i16));
+                        } else {
+                            buf.extend_from_slice(&[0xff; 9]);
+                        }
+                    }
+                    DataType::Int => {
+                        if n.is_finite()
+                            && n.fract() == 0.0
+                            && *n >= i32::MIN as f64
+                            && *n <= i32::MAX as f64
+                        {
+                            buf.extend_from_slice(&encode_i32(*n as i32));
+                        } else {
+                            buf.extend_from_slice(&[0xff; 9]);
+                        }
+                    }
+                    DataType::BigInt => {
+                        if n.is_finite()
+                            && n.fract() == 0.0
+                            && *n >= i64::MIN as f64
+                            && *n <= i64::MAX as f64
+                        {
+                            buf.extend_from_slice(&encode_i64(*n as i64));
+                        } else {
+                            buf.extend_from_slice(&[0xff; 9]);
+                        }
+                    }
+                    DataType::Float => buf.extend_from_slice(&encode_f32(*n as f32)),
+                    DataType::Double => buf.extend_from_slice(&encode_f64(*n)),
+                    _ => buf.extend_from_slice(&encode_f64(*n)),
                 }
             }
             Value::Varchar(s) => {
@@ -190,6 +290,25 @@ mod tests {
         for val in [i32::MIN, -1, 0, 1, i32::MAX, 42, -42] {
             assert_eq!(decode_i32(&encode_i32(val)), val);
         }
+    }
+
+    #[test]
+    fn test_float_zero_canonicalization() {
+        assert_eq!(encode_f32(-0.0), encode_f32(0.0));
+        assert_eq!(encode_f64(-0.0), encode_f64(0.0));
+    }
+
+    #[test]
+    fn test_composite_key_integer_literal_for_float_column() {
+        use crate::types::{DataType, Value};
+
+        let vals_int = [&Value::Integer(1), &Value::Integer(7)];
+        let vals_float = [&Value::Float(1.0), &Value::Integer(7)];
+        let dts = [&DataType::Double, &DataType::Int];
+
+        let k1 = encode_composite_key(&vals_int, &dts);
+        let k2 = encode_composite_key(&vals_float, &dts);
+        assert_eq!(k1, k2);
     }
 
     #[test]

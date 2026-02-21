@@ -185,6 +185,7 @@ pub struct Delete {
 #[derive(Debug, Clone)]
 pub enum Expr {
     IntLiteral(i64),
+    FloatLiteral(f64),
     StringLiteral(String),
     BlobLiteral(Vec<u8>),
     Null,

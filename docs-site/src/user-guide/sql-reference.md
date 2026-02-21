@@ -77,6 +77,8 @@ CREATE FULLTEXT INDEX t_body_fts ON t(body)
   OPTIONS (n=2, normalize='nfkc');
 ```
 
+`FULLTEXT` is usable with any primary-key type. Internally, MuroDB maintains a separate FTS `doc_id`.
+
 ### DROP TABLE / DROP INDEX
 
 ```sql

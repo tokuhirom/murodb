@@ -42,10 +42,13 @@ pub enum ExecResult {
 
 const SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
 const SQL_FTS_SCORE_SCALE: f64 = 1_000_000.0;
+const SQL_FTS_NEXT_DOC_ID_KEY: &[u8] = b"__next_doc_id__";
+const SQL_FTS_PK2DOC_PREFIX: &[u8] = b"__pk2doc__";
+const SQL_FTS_DOC2PK_PREFIX: &[u8] = b"__doc2pk__";
 
 #[derive(Clone)]
 struct FtsEvalContext {
-    doc_id: Option<u64>,
+    doc_ids: HashMap<MatchExprKey, u64>,
     score_maps: HashMap<MatchExprKey, HashMap<u64, i64>>,
 }
 
@@ -435,7 +438,6 @@ fn exec_create_fulltext_index(
     })?;
 
     validate_fulltext_parser(fi)?;
-    ensure_fts_supported_pk(&table_def)?;
 
     let col_ty = table_def.columns[col_idx].data_type;
     if !matches!(col_ty, DataType::Varchar(_) | DataType::Text) {
@@ -448,26 +450,38 @@ fn exec_create_fulltext_index(
     let mut fts_index = FtsIndex::create(pager, SQL_FTS_TERM_KEY)?;
     let fts_root = fts_index.root_page_id();
 
-    let data_btree = BTree::open(table_def.data_btree_root);
-    let mut docs: Vec<(u64, String)> = Vec::new();
-    data_btree.scan(pager, |_pk, row| {
-        let values =
-            deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
-        let doc_id = extract_fts_doc_id(&table_def, &values)?;
-        let text = values
-            .get(col_idx)
-            .and_then(value_to_fts_text)
-            .unwrap_or_default();
-        docs.push((doc_id, text));
-        Ok(true)
-    })?;
-    if let Err(e) = fts_index.build_from_docs(pager, &docs) {
-        let fts_btree = BTree::open(fts_root);
-        if let Ok(pages) = fts_btree.collect_all_pages(pager) {
-            for page_id in pages {
-                pager.free_page(page_id);
-            }
+    let build_res: Result<()> = (|| {
+        let data_btree = BTree::open(table_def.data_btree_root);
+        let mut pending = Vec::new();
+        let mut mappings = Vec::new();
+        let mut next_doc_id = 1u64;
+
+        data_btree.scan(pager, |pk_key, row| {
+            let values =
+                deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
+            let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
+                return Ok(true);
+            };
+            let doc_id = next_doc_id;
+            next_doc_id = next_doc_id
+                .checked_add(1)
+                .ok_or_else(|| MuroError::Execution("FULLTEXT doc_id overflow".into()))?;
+            pending.push(FtsPendingOp::Add { doc_id, text });
+            mappings.push((pk_key.to_vec(), doc_id));
+            Ok(true)
+        })?;
+
+        fts_index.apply_pending(pager, &pending)?;
+
+        let mut meta_btree = BTree::open(fts_root);
+        for (pk_key, doc_id) in &mappings {
+            fts_put_doc_mapping(&mut meta_btree, pager, pk_key, *doc_id)?;
         }
+        fts_set_next_doc_id(&mut meta_btree, pager, next_doc_id)?;
+        Ok(())
+    })();
+    if let Err(e) = build_res {
+        free_btree_pages(pager, fts_root);
         return Err(e);
     }
 
@@ -1694,6 +1708,13 @@ fn exec_select(
     );
 
     let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();
+    let mut fts_ctx = build_fts_eval_context(
+        &sel.columns,
+        &sel.where_clause,
+        &table_def.name,
+        &indexes,
+        pager,
+    )?;
 
     if need_aggregation {
         // Aggregation path: collect raw values first
@@ -1709,7 +1730,19 @@ fn exec_select(
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    if matches_where(&sel.where_clause, &table_def, &values)? {
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
                         raw_rows.push(values);
                     }
                 }
@@ -1736,7 +1769,19 @@ fn exec_select(
                             &table_def.columns,
                             table_def.row_format_version,
                         )?;
-                        if matches_where(&sel.where_clause, &table_def, &values)? {
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
                             raw_rows.push(values);
                         }
                     }
@@ -1744,17 +1789,33 @@ fn exec_select(
             }
             Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
-                data_btree.scan(pager, |_k, v| {
+                let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+                data_btree.scan(pager, |pk_key, v| {
                     let values = deserialize_row_versioned(
                         v,
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    if matches_where(&sel.where_clause, &table_def, &values)? {
-                        raw_rows.push(values);
-                    }
+                    entries.push((pk_key.to_vec(), values));
                     Ok(true)
                 })?;
+                for (pk_key, values) in entries {
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
+                        raw_rows.push(values);
+                    }
+                }
             }
             Plan::FtsScan {
                 column,
@@ -1762,17 +1823,17 @@ fn exec_select(
                 mode,
                 ..
             } => {
-                let mut fts_ctx = build_fts_eval_context(
-                    &sel.columns,
-                    &sel.where_clause,
-                    &table_def.name,
-                    &indexes,
-                    pager,
-                )?;
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
-                for values in fts_rows {
-                    fts_ctx.doc_id = extract_fts_doc_id(&table_def, &values).ok();
+                for (_doc_id, values) in fts_rows {
+                    let pk_key = encode_pk_key(&table_def, &values);
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
@@ -1822,8 +1883,21 @@ fn exec_select(
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    let row = build_row(&table_def, &values, &sel.columns)?;
-                    if matches_where(&sel.where_clause, &table_def, &values)? {
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
+                    let row =
+                        build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
                         rows.push(row);
                     }
                 }
@@ -1850,8 +1924,25 @@ fn exec_select(
                             &table_def.columns,
                             table_def.row_format_version,
                         )?;
-                        if matches_where(&sel.where_clause, &table_def, &values)? {
-                            let row = build_row(&table_def, &values, &sel.columns)?;
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
+                            let row = build_row_with_fts(
+                                &table_def,
+                                &values,
+                                &sel.columns,
+                                Some(&fts_ctx),
+                            )?;
                             rows.push(row);
                         }
                     }
@@ -1859,18 +1950,35 @@ fn exec_select(
             }
             Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
-                data_btree.scan(pager, |_k, v| {
+                let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+                data_btree.scan(pager, |pk_key, v| {
                     let values = deserialize_row_versioned(
                         v,
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    if matches_where(&sel.where_clause, &table_def, &values)? {
-                        let row = build_row(&table_def, &values, &sel.columns)?;
-                        rows.push(row);
-                    }
+                    entries.push((pk_key.to_vec(), values));
                     Ok(true)
                 })?;
+                for (pk_key, values) in entries {
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
+                    if matches_where_with_fts(
+                        &sel.where_clause,
+                        &table_def,
+                        &values,
+                        Some(&fts_ctx),
+                    )? {
+                        let row =
+                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                        rows.push(row);
+                    }
+                }
             }
             Plan::FtsScan {
                 column,
@@ -1878,17 +1986,17 @@ fn exec_select(
                 mode,
                 ..
             } => {
-                let mut fts_ctx = build_fts_eval_context(
-                    &sel.columns,
-                    &sel.where_clause,
-                    &table_def.name,
-                    &indexes,
-                    pager,
-                )?;
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
-                for values in fts_rows {
-                    fts_ctx.doc_id = extract_fts_doc_id(&table_def, &values).ok();
+                for (_doc_id, values) in fts_rows {
+                    let pk_key = encode_pk_key(&table_def, &values);
+                    populate_fts_row_doc_ids(
+                        &mut fts_ctx,
+                        &pk_key,
+                        &indexes,
+                        &table_def.name,
+                        pager,
+                    )?;
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
@@ -3320,7 +3428,15 @@ fn insert_into_secondary_indexes(
             let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
                 continue;
             };
-            let doc_id = extract_fts_doc_id(table_def, values)?;
+            let mut meta_btree = BTree::open(idx.btree_root);
+            let doc_id = match fts_get_doc_id(&meta_btree, pager, pk_key)? {
+                Some(id) => id,
+                None => {
+                    let id = fts_allocate_doc_id(&mut meta_btree, pager)?;
+                    fts_put_doc_mapping(&mut meta_btree, pager, pk_key, id)?;
+                    id
+                }
+            };
             let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
             fts.apply_pending(pager, &[FtsPendingOp::Add { doc_id, text }])?;
         }
@@ -3370,9 +3486,12 @@ fn delete_from_secondary_indexes(
             let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
                 continue;
             };
-            let doc_id = extract_fts_doc_id(table_def, values)?;
-            let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
-            fts.apply_pending(pager, &[FtsPendingOp::Remove { doc_id, text }])?;
+            let mut meta_btree = BTree::open(idx.btree_root);
+            if let Some(doc_id) = fts_get_doc_id(&meta_btree, pager, pk_key)? {
+                let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
+                fts.apply_pending(pager, &[FtsPendingOp::Remove { doc_id, text }])?;
+                fts_delete_doc_mapping(&mut meta_btree, pager, pk_key, doc_id)?;
+            }
         }
     }
     Ok(())
@@ -3385,10 +3504,21 @@ fn execute_fts_scan_rows(
     query: &str,
     mode: MatchMode,
     pager: &mut impl PageStore,
-) -> Result<Vec<Vec<Value>>> {
-    ensure_fts_supported_pk(table_def)?;
+) -> Result<Vec<(u64, Vec<Value>)>> {
     let fts = open_fulltext_index(indexes, &table_def.name, column);
     let fts = fts?;
+    let idx = indexes
+        .iter()
+        .find(|i| {
+            i.index_type == IndexType::Fulltext
+                && i.column_names.first().map(|c| c.as_str()) == Some(column)
+        })
+        .ok_or_else(|| {
+            MuroError::Execution(format!(
+                "FULLTEXT index not found for column '{}' on table '{}'",
+                column, table_def.name
+            ))
+        })?;
     let results = match mode {
         MatchMode::NaturalLanguage => query_natural(&fts, pager, query)?,
         MatchMode::Boolean => query_boolean(&fts, pager, query)?,
@@ -3396,22 +3526,37 @@ fn execute_fts_scan_rows(
 
     let data_btree = BTree::open(table_def.data_btree_root);
     let mut rows = Vec::new();
+    let meta_btree = BTree::open(idx.btree_root);
     for r in results {
-        let doc_id_i64 = i64::try_from(r.doc_id).map_err(|_| {
-            MuroError::Execution(format!("FTS doc_id {} is out of BIGINT range", r.doc_id))
-        })?;
-        let pk_key = encode_i64(doc_id_i64).to_vec();
+        let pk_key = if let Some(pk_key) = fts_get_pk_key_by_doc_id(&meta_btree, pager, r.doc_id)? {
+            pk_key
+        } else {
+            // Backward compatibility for legacy BIGINT-pk-based doc_id layouts.
+            let doc_id_i64 = i64::try_from(r.doc_id).map_err(|_| {
+                MuroError::Execution(format!("FTS doc_id {} is out of BIGINT range", r.doc_id))
+            })?;
+            encode_i64(doc_id_i64).to_vec()
+        };
         if let Some(data) = data_btree.search(pager, &pk_key)? {
             let values =
                 deserialize_row_versioned(&data, &table_def.columns, table_def.row_format_version)?;
-            rows.push(values);
+            rows.push((r.doc_id, values));
         }
     }
     Ok(rows)
 }
 
 fn open_fulltext_index(indexes: &[IndexDef], table_name: &str, column: &str) -> Result<FtsIndex> {
-    let idx = indexes
+    let idx = find_fulltext_index(indexes, table_name, column)?;
+    Ok(FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY))
+}
+
+fn find_fulltext_index<'a>(
+    indexes: &'a [IndexDef],
+    table_name: &str,
+    column: &str,
+) -> Result<&'a IndexDef> {
+    indexes
         .iter()
         .find(|i| {
             i.index_type == IndexType::Fulltext
@@ -3422,8 +3567,26 @@ fn open_fulltext_index(indexes: &[IndexDef], table_name: &str, column: &str) -> 
                 "FULLTEXT index not found for column '{}' on table '{}'",
                 column, table_name
             ))
-        })?;
-    Ok(FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY))
+        })
+}
+
+fn populate_fts_row_doc_ids(
+    fts_ctx: &mut FtsEvalContext,
+    pk_key: &[u8],
+    indexes: &[IndexDef],
+    table_name: &str,
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    fts_ctx.doc_ids.clear();
+    let match_keys: Vec<MatchExprKey> = fts_ctx.score_maps.keys().cloned().collect();
+    for key in match_keys {
+        let idx = find_fulltext_index(indexes, table_name, &key.column)?;
+        let meta_btree = BTree::open(idx.btree_root);
+        if let Some(doc_id) = fts_get_doc_id(&meta_btree, pager, pk_key)? {
+            fts_ctx.doc_ids.insert(key, doc_id);
+        }
+    }
+    Ok(())
 }
 
 fn build_fts_eval_context(
@@ -3458,7 +3621,7 @@ fn build_fts_eval_context(
     }
 
     Ok(FtsEvalContext {
-        doc_id: None,
+        doc_ids: HashMap::new(),
         score_maps,
     })
 }
@@ -3540,20 +3703,20 @@ fn materialize_fts_expr(
             query,
             mode,
         } => {
-            let score = match (fts_ctx.and_then(|ctx| ctx.doc_id), fts_ctx) {
-                (Some(doc_id), Some(ctx)) => {
-                    let key = MatchExprKey {
-                        column: column.clone(),
-                        query: query.clone(),
-                        mode: *mode,
-                    };
-                    ctx.score_maps
-                        .get(&key)
-                        .and_then(|scores| scores.get(&doc_id).copied())
-                        .unwrap_or(0)
-                }
-                _ => 0,
+            let key = MatchExprKey {
+                column: column.clone(),
+                query: query.clone(),
+                mode: *mode,
             };
+            let score = fts_ctx
+                .and_then(|ctx| {
+                    ctx.doc_ids.get(&key).and_then(|doc_id| {
+                        ctx.score_maps
+                            .get(&key)
+                            .and_then(|scores| scores.get(doc_id).copied())
+                    })
+                })
+                .unwrap_or(0);
             Expr::IntLiteral(score)
         }
         Expr::FtsSnippet {
@@ -3659,6 +3822,108 @@ fn scale_fts_score(r: &FtsResult) -> i64 {
     (r.score * SQL_FTS_SCORE_SCALE).round() as i64
 }
 
+fn free_btree_pages(pager: &mut impl PageStore, root_page_id: u64) {
+    let btree = BTree::open(root_page_id);
+    if let Ok(pages) = btree.collect_all_pages(pager) {
+        for page_id in pages {
+            pager.free_page(page_id);
+        }
+    }
+}
+
+fn fts_pk_to_doc_key(pk_key: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SQL_FTS_PK2DOC_PREFIX.len() + pk_key.len());
+    key.extend_from_slice(SQL_FTS_PK2DOC_PREFIX);
+    key.extend_from_slice(pk_key);
+    key
+}
+
+fn fts_doc_to_pk_key(doc_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SQL_FTS_DOC2PK_PREFIX.len() + 8);
+    key.extend_from_slice(SQL_FTS_DOC2PK_PREFIX);
+    key.extend_from_slice(&doc_id.to_le_bytes());
+    key
+}
+
+fn fts_get_doc_id(
+    meta_btree: &BTree,
+    pager: &mut impl PageStore,
+    pk_key: &[u8],
+) -> Result<Option<u64>> {
+    let key = fts_pk_to_doc_key(pk_key);
+    match meta_btree.search(pager, &key)? {
+        Some(data) if data.len() >= 8 => {
+            let doc_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
+            Ok(Some(doc_id))
+        }
+        Some(_) => Err(MuroError::Corruption(
+            "invalid FULLTEXT pk->doc mapping payload".into(),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn fts_get_pk_key_by_doc_id(
+    meta_btree: &BTree,
+    pager: &mut impl PageStore,
+    doc_id: u64,
+) -> Result<Option<Vec<u8>>> {
+    let key = fts_doc_to_pk_key(doc_id);
+    meta_btree.search(pager, &key)
+}
+
+fn fts_put_doc_mapping(
+    meta_btree: &mut BTree,
+    pager: &mut impl PageStore,
+    pk_key: &[u8],
+    doc_id: u64,
+) -> Result<()> {
+    let pk2doc_key = fts_pk_to_doc_key(pk_key);
+    meta_btree.insert(pager, &pk2doc_key, &doc_id.to_le_bytes())?;
+    let doc2pk_key = fts_doc_to_pk_key(doc_id);
+    meta_btree.insert(pager, &doc2pk_key, pk_key)?;
+    Ok(())
+}
+
+fn fts_delete_doc_mapping(
+    meta_btree: &mut BTree,
+    pager: &mut impl PageStore,
+    pk_key: &[u8],
+    doc_id: u64,
+) -> Result<()> {
+    let pk2doc_key = fts_pk_to_doc_key(pk_key);
+    meta_btree.delete(pager, &pk2doc_key)?;
+    let doc2pk_key = fts_doc_to_pk_key(doc_id);
+    meta_btree.delete(pager, &doc2pk_key)?;
+    Ok(())
+}
+
+fn fts_set_next_doc_id(
+    meta_btree: &mut BTree,
+    pager: &mut impl PageStore,
+    next_doc_id: u64,
+) -> Result<()> {
+    meta_btree.insert(pager, SQL_FTS_NEXT_DOC_ID_KEY, &next_doc_id.to_le_bytes())?;
+    Ok(())
+}
+
+fn fts_allocate_doc_id(meta_btree: &mut BTree, pager: &mut impl PageStore) -> Result<u64> {
+    let next = match meta_btree.search(pager, SQL_FTS_NEXT_DOC_ID_KEY)? {
+        Some(data) if data.len() >= 8 => u64::from_le_bytes(data[0..8].try_into().unwrap()),
+        Some(_) => {
+            return Err(MuroError::Corruption(
+                "invalid FULLTEXT next_doc_id payload".into(),
+            ));
+        }
+        None => 1,
+    };
+    let new_next = next
+        .checked_add(1)
+        .ok_or_else(|| MuroError::Execution("FULLTEXT doc_id overflow".into()))?;
+    fts_set_next_doc_id(meta_btree, pager, new_next)?;
+    Ok(next)
+}
+
 fn validate_fulltext_parser(fi: &CreateFulltextIndex) -> Result<()> {
     if !fi.parser.eq_ignore_ascii_case("ngram") {
         return Err(MuroError::Execution(format!(
@@ -3679,50 +3944,6 @@ fn validate_fulltext_parser(fi: &CreateFulltextIndex) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn ensure_fts_supported_pk(table_def: &TableDef) -> Result<()> {
-    if table_def.pk_columns.len() != 1 {
-        return Err(MuroError::Execution(
-            "FULLTEXT currently requires a single BIGINT primary key".into(),
-        ));
-    }
-    let pk_col = &table_def.pk_columns[0];
-    let pk_idx = table_def.column_index(pk_col).ok_or_else(|| {
-        MuroError::Execution(format!(
-            "Primary key column '{}' not found in table '{}'",
-            pk_col, table_def.name
-        ))
-    })?;
-    if table_def.columns[pk_idx].data_type != DataType::BigInt {
-        return Err(MuroError::Execution(
-            "FULLTEXT currently requires BIGINT primary key".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn extract_fts_doc_id(table_def: &TableDef, values: &[Value]) -> Result<u64> {
-    ensure_fts_supported_pk(table_def)?;
-    let pk_col = &table_def.pk_columns[0];
-    let pk_idx = table_def.column_index(pk_col).ok_or_else(|| {
-        MuroError::Execution(format!(
-            "Primary key column '{}' not found in table '{}'",
-            pk_col, table_def.name
-        ))
-    })?;
-    let pk = values
-        .get(pk_idx)
-        .ok_or_else(|| MuroError::Execution("Missing primary key value".into()))?;
-    match pk {
-        Value::Integer(n) if *n >= 0 => Ok(*n as u64),
-        Value::Integer(_) => Err(MuroError::Execution(
-            "FULLTEXT requires non-negative BIGINT primary key values".into(),
-        )),
-        _ => Err(MuroError::Execution(
-            "FULLTEXT requires BIGINT primary key values".into(),
-        )),
-    }
 }
 
 fn value_to_fts_text(value: &Value) -> Option<String> {
@@ -3881,42 +4102,6 @@ fn matches_where_with_fts(
             Ok(is_truthy(&result))
         }
     }
-}
-
-fn build_row(
-    table_def: &TableDef,
-    values: &[Value],
-    select_columns: &[SelectColumn],
-) -> Result<Row> {
-    let mut row_values = Vec::new();
-
-    for sel_col in select_columns {
-        match sel_col {
-            SelectColumn::Star => {
-                for (i, col) in table_def.columns.iter().enumerate() {
-                    if col.is_hidden {
-                        continue;
-                    }
-                    let val = values.get(i).cloned().unwrap_or(Value::Null);
-                    row_values.push((col.name.clone(), val));
-                }
-            }
-            SelectColumn::Expr(expr, alias) => {
-                let val = eval_expr(expr, &|name| {
-                    table_def
-                        .column_index(name)
-                        .and_then(|i| values.get(i).cloned())
-                })?;
-                let name = alias.clone().unwrap_or_else(|| match expr {
-                    Expr::ColumnRef(n) => n.clone(),
-                    _ => "?column?".to_string(),
-                });
-                row_values.push((name, val));
-            }
-        }
-    }
-
-    Ok(Row { values: row_values })
 }
 
 fn build_row_with_fts(

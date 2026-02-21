@@ -1,3 +1,4 @@
+use murodb::btree::ops::BTree;
 use murodb::crypto::aead::MasterKey;
 use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult, Row};
@@ -30,6 +31,28 @@ fn query_rows(pager: &mut Pager, catalog: &mut SystemCatalog, sql: &str) -> Vec<
         ExecResult::Rows(rows) => rows,
         _ => panic!("Expected rows"),
     }
+}
+
+fn count_pk2doc_mappings(
+    pager: &mut Pager,
+    catalog: &mut SystemCatalog,
+    index_name: &str,
+) -> usize {
+    let idx = catalog
+        .get_index(pager, index_name)
+        .unwrap()
+        .expect("index not found");
+    let btree = BTree::open(idx.btree_root);
+    let mut count = 0usize;
+    btree
+        .scan(pager, |k, _| {
+            if k.starts_with(b"__pk2doc__") {
+                count += 1;
+            }
+            Ok(true)
+        })
+        .unwrap();
+    count
 }
 
 #[test]
@@ -164,7 +187,7 @@ fn test_sql_fulltext_tracks_update_and_delete() {
 }
 
 #[test]
-fn test_sql_fulltext_create_failure_does_not_leave_broken_metadata() {
+fn test_sql_fulltext_create_failure_allows_retry_with_same_name() {
     let (mut pager, mut catalog, _dir) = setup();
 
     exec(
@@ -172,25 +195,12 @@ fn test_sql_fulltext_create_failure_does_not_leave_broken_metadata() {
         &mut catalog,
         "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
     );
-    exec(
-        &mut pager,
-        &mut catalog,
-        "INSERT INTO t VALUES (-1, 'broken doc id')",
-    );
-
     let err = exec_err(
         &mut pager,
         &mut catalog,
-        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER mecab OPTIONS (n=2, normalize='nfkc')",
     );
-    assert!(err.contains("non-negative BIGINT"));
-
-    exec(&mut pager, &mut catalog, "DELETE FROM t WHERE id = -1");
-    exec(
-        &mut pager,
-        &mut catalog,
-        "INSERT INTO t VALUES (1, '東京タワー')",
-    );
+    assert!(err.contains("Unsupported FULLTEXT parser"));
 
     exec(
         &mut pager,
@@ -240,4 +250,99 @@ fn test_sql_fulltext_multiple_match_terms_are_evaluated() {
     assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
     assert!(matches!(rows[0].get("s1"), Some(Value::Integer(n)) if *n > 0));
     assert!(matches!(rows[0].get("s2"), Some(Value::Integer(n)) if *n > 0));
+}
+
+#[test]
+fn test_sql_fulltext_works_with_non_bigint_primary_key() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id VARCHAR PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES ('a-1', '東京タワーの夜景')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES ('b-2', '京都の寺院')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("id"), Some(&Value::Varchar("a-1".to_string())));
+}
+
+#[test]
+fn test_sql_fulltext_fullscan_or_match_predicate() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (1, '東京タワー')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (2, '京都の寺院')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id FROM t WHERE id = 999 OR MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+}
+
+#[test]
+fn test_sql_fulltext_backfill_skips_null_values() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (1, NULL)");
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (2, '東京タワー')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    );
+
+    assert_eq!(
+        count_pk2doc_mappings(&mut pager, &mut catalog, "ft_body"),
+        1
+    );
 }

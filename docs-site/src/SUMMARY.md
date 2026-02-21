@@ -14,6 +14,7 @@
 - [Full-Text Search](user-guide/full-text-search.md)
 - [Recovery](user-guide/recovery.md)
 - [Alerting & Monitoring](user-guide/alerting.md)
+- [Incident Response Runbook](user-guide/runbook.md)
 
 # Internals
 

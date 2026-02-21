@@ -141,6 +141,41 @@ INSERT INTO t (id, name) VALUES (1, 'Alice');
 INSERT INTO t (id, name) VALUES (1, 'Alice'), (2, 'Bob');
 ```
 
+### INSERT ... ON DUPLICATE KEY UPDATE
+
+If a row with the same PRIMARY KEY already exists, updates the existing row instead of inserting a new one.
+
+```sql
+INSERT INTO t (id, name) VALUES (1, 'Alice')
+  ON DUPLICATE KEY UPDATE name = 'Alice Updated';
+
+-- Expressions can reference existing column values
+INSERT INTO counters (id, cnt) VALUES (1, 1)
+  ON DUPLICATE KEY UPDATE cnt = cnt + 1;
+```
+
+**Affected rows (MySQL-compatible):**
+- New row inserted: 1
+- Existing row updated: 2
+
+**Limitations:**
+- `VALUES()` function is not supported. Use column references to access the existing row's values.
+
+### REPLACE INTO
+
+Inserts a new row. If a row with the same PRIMARY KEY or UNIQUE index value already exists, deletes the old row first, then inserts the new one.
+
+```sql
+REPLACE INTO t (id, name) VALUES (1, 'Alice');
+
+-- Multi-row replace
+REPLACE INTO t (id, name) VALUES (1, 'Alice'), (2, 'Bob');
+```
+
+Unlike `INSERT ... ON DUPLICATE KEY UPDATE`, `REPLACE` deletes and re-inserts the entire row. This means:
+- All columns are replaced with the new values (columns not specified get defaults/NULL).
+- Conflicts on any UNIQUE index (not just PRIMARY KEY) also trigger deletion of the conflicting row.
+
 ### SELECT
 
 ```sql
@@ -579,12 +614,55 @@ SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.t1_id;
 -- LEFT JOIN
 SELECT * FROM t1 LEFT JOIN t2 ON t1.id = t2.t1_id;
 
+-- RIGHT JOIN
+SELECT * FROM t1 RIGHT JOIN t2 ON t1.id = t2.t1_id;
+
 -- CROSS JOIN
 SELECT * FROM t1 CROSS JOIN t2;
 
 -- Table aliases
 SELECT a.id, b.name FROM t1 AS a JOIN t2 AS b ON a.id = b.t1_id;
 ```
+
+## UNION / UNION ALL
+
+Combines results from multiple SELECT statements.
+
+```sql
+-- UNION (removes duplicates)
+SELECT id, name FROM t1 UNION SELECT id, name FROM t2;
+
+-- UNION ALL (keeps duplicates)
+SELECT id, name FROM t1 UNION ALL SELECT id, name FROM t2;
+
+-- With ORDER BY and LIMIT (applies to the whole result)
+SELECT id FROM t1 UNION SELECT id FROM t2 ORDER BY id LIMIT 10;
+```
+
+All SELECT statements in a UNION must return the same number of columns.
+
+## EXPLAIN
+
+Shows the query execution plan for a SELECT statement.
+
+```sql
+EXPLAIN SELECT * FROM t WHERE id = 1;
+```
+
+Output columns:
+
+| Column | Description |
+|--------|-------------|
+| id | Always 1 (single-table queries) |
+| select_type | Always "SIMPLE" |
+| table | Table name |
+| type | Access type: `const` (PK lookup), `ref` (index lookup), `ALL` (full scan), `fulltext` (FTS) |
+| key | Index used (NULL for full scan) |
+| Extra | Additional info: "Using where", "Using index", "Using fulltext" |
+
+**Limitations:**
+- Only SELECT statements are supported.
+- JOIN and subquery queries show only one row (the primary table's plan).
 
 ## Transactions
 

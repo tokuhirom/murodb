@@ -113,11 +113,18 @@ CREATE FULLTEXT INDEX t_body_fts ON t(body)
 ```sql
 INSERT INTO t (id, name) VALUES (1, 'Alice'), (2, 'Bob');
 
+INSERT INTO t (id, name) VALUES (1, 'Alice')
+  ON DUPLICATE KEY UPDATE name = 'Alice Updated';
+
+REPLACE INTO t (id, name) VALUES (1, 'Alice');
+
 SELECT * FROM t WHERE id = 42 ORDER BY id DESC LIMIT 10;
 
 UPDATE t SET name = 'Alicia' WHERE id = 1;
 
 DELETE FROM t WHERE id = 1;
+
+EXPLAIN SELECT * FROM t WHERE id = 1;
 ```
 
 ### Full-Text Search
@@ -225,7 +232,7 @@ LIMIT 10;
 - [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
 - [x] AND, OR logical operators
 - [x] ORDER BY (ASC/DESC, multi-column), LIMIT
-- [x] JOIN (INNER, LEFT, CROSS) with table aliases
+- [x] JOIN (INNER, LEFT, RIGHT, CROSS) with table aliases
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] SHOW TABLES
 - [x] Multi-row INSERT
@@ -259,41 +266,41 @@ Basic operators and DDL to make daily use practical.
 
 MySQL-compatible scalar functions.
 
-- [ ] String: LENGTH, CHAR_LENGTH, CONCAT, SUBSTRING/SUBSTR, UPPER, LOWER
-- [ ] String: TRIM, LTRIM, RTRIM, REPLACE, REVERSE, REPEAT
-- [ ] String: LEFT, RIGHT, LPAD, RPAD, INSTR/LOCATE
-- [ ] String: REGEXP / REGEXP_LIKE
-- [ ] Numeric: ABS, CEIL/CEILING, FLOOR, ROUND, MOD, POWER/POW
-- [ ] NULL handling: COALESCE, IFNULL, NULLIF, IF
-- [ ] Type conversion: CAST(expr AS type)
-- [ ] CASE WHEN ... THEN ... ELSE ... END
+- [x] String: LENGTH, CHAR_LENGTH, CONCAT, SUBSTRING/SUBSTR, UPPER, LOWER
+- [x] String: TRIM, LTRIM, RTRIM, REPLACE, REVERSE, REPEAT
+- [x] String: LEFT, RIGHT, LPAD, RPAD, INSTR/LOCATE
+- [x] String: REGEXP / REGEXP_LIKE
+- [x] Numeric: ABS, CEIL/CEILING, FLOOR, ROUND, MOD, POWER/POW
+- [x] NULL handling: COALESCE, IFNULL, NULLIF, IF
+- [x] Type conversion: CAST(expr AS type)
+- [x] CASE WHEN ... THEN ... ELSE ... END
 
 ### Phase 3 — Aggregation & Grouping
 
-- [ ] COUNT, SUM, AVG, MIN, MAX
-- [ ] COUNT(DISTINCT ...)
-- [ ] GROUP BY
-- [ ] HAVING
-- [ ] SELECT DISTINCT
+- [x] COUNT, SUM, AVG, MIN, MAX
+- [x] COUNT(DISTINCT ...)
+- [x] GROUP BY
+- [x] HAVING
+- [x] SELECT DISTINCT
 
 ### Phase 4 — Schema Evolution
 
-- [ ] ALTER TABLE ADD COLUMN
-- [ ] ALTER TABLE DROP COLUMN
-- [ ] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
-- [ ] RENAME TABLE
-- [ ] Composite PRIMARY KEY
-- [ ] Composite UNIQUE / composite INDEX
+- [x] ALTER TABLE ADD COLUMN
+- [x] ALTER TABLE DROP COLUMN
+- [x] ALTER TABLE MODIFY COLUMN / CHANGE COLUMN
+- [x] RENAME TABLE
+- [x] Composite PRIMARY KEY
+- [x] Composite UNIQUE / composite INDEX
 
 ### Phase 5 — Advanced Query
 
-- [ ] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
-- [ ] UNION / UNION ALL
-- [ ] EXISTS / NOT EXISTS
-- [ ] INSERT ... ON DUPLICATE KEY UPDATE
-- [ ] REPLACE INTO
-- [ ] EXPLAIN (query plan display)
-- [ ] RIGHT JOIN
+- [x] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
+- [x] UNION / UNION ALL
+- [x] EXISTS / NOT EXISTS
+- [x] INSERT ... ON DUPLICATE KEY UPDATE
+- [x] REPLACE INTO
+- [x] EXPLAIN (query plan display)
+- [x] RIGHT JOIN
 
 ### Phase 6 — Types & Storage
 

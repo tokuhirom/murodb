@@ -54,6 +54,10 @@ impl Parser {
             Some(Token::Change) => Ok("change".to_string()),
             Some(Token::Rename) => Ok("rename".to_string()),
             Some(Token::To) => Ok("to".to_string()),
+            Some(Token::Key) => Ok("key".to_string()),
+            Some(Token::Replace) => Ok("replace".to_string()),
+            Some(Token::Duplicate) => Ok("duplicate".to_string()),
+            Some(Token::Explain) => Ok("explain".to_string()),
             Some(t) => Err(format!("Expected identifier, got {:?}", t)),
             None => Err("Expected identifier, got end of input".into()),
         }
@@ -64,7 +68,13 @@ impl Parser {
             Some(Token::Create) => self.parse_create()?,
             Some(Token::Drop) => self.parse_drop()?,
             Some(Token::Select) => self.parse_select_or_union()?,
-            Some(Token::Insert) => Statement::Insert(self.parse_insert()?),
+            Some(Token::Insert) => Statement::Insert(self.parse_insert(false)?),
+            Some(Token::Replace) => Statement::Insert(self.parse_insert(true)?),
+            Some(Token::Explain) => {
+                self.advance(); // EXPLAIN
+                let inner = self.parse()?;
+                return Ok(Statement::Explain(Box::new(inner)));
+            }
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
             Some(Token::Alter) => self.parse_alter()?,
@@ -549,8 +559,8 @@ impl Parser {
         }
     }
 
-    fn parse_insert(&mut self) -> Result<Insert, String> {
-        self.advance(); // INSERT
+    fn parse_insert(&mut self, is_replace: bool) -> Result<Insert, String> {
+        self.advance(); // INSERT or REPLACE
         self.expect(&Token::Into)?;
         let table_name = self.expect_ident()?;
 
@@ -604,10 +614,35 @@ impl Parser {
             }
         }
 
+        // Parse optional ON DUPLICATE KEY UPDATE
+        let on_duplicate_key_update = if !is_replace && self.peek() == Some(&Token::On) {
+            self.advance(); // ON
+            self.expect(&Token::Duplicate)?;
+            self.expect(&Token::Key)?;
+            self.expect(&Token::Update)?;
+            let mut assignments = Vec::new();
+            loop {
+                let col = self.expect_ident()?;
+                self.expect(&Token::Eq)?;
+                let val = self.parse_expr()?;
+                assignments.push((col, val));
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            Some(assignments)
+        } else {
+            None
+        };
+
         Ok(Insert {
             table_name,
             columns,
             values,
+            on_duplicate_key_update,
+            is_replace,
         })
     }
 
@@ -1429,12 +1464,13 @@ impl Parser {
                     Ok(Expr::ColumnRef(name))
                 }
             }
-            // Handle keyword-named functions: IF, LEFT, RIGHT, etc.
-            Some(Token::If) | Some(Token::Left) | Some(Token::Right) => {
+            // Handle keyword-named functions: IF, LEFT, RIGHT, REPLACE, etc.
+            Some(Token::If) | Some(Token::Left) | Some(Token::Right) | Some(Token::Replace) => {
                 let name = match self.peek() {
                     Some(Token::If) => "IF",
                     Some(Token::Left) => "LEFT",
                     Some(Token::Right) => "RIGHT",
+                    Some(Token::Replace) => "REPLACE",
                     _ => unreachable!(),
                 };
                 // Only treat as function if followed by '('

@@ -20,6 +20,7 @@ pub enum Statement {
     Commit,
     Rollback,
     SetQuery(Box<SetQuery>),
+    Explain(Box<Statement>),
     ShowCheckpointStats,
     ShowDatabaseStats,
 }
@@ -121,6 +122,8 @@ pub struct Insert {
     pub table_name: String,
     pub columns: Option<Vec<String>>,
     pub values: Vec<Vec<Expr>>,
+    pub on_duplicate_key_update: Option<Vec<(String, Expr)>>,
+    pub is_replace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

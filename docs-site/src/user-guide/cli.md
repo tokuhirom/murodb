@@ -14,6 +14,7 @@ murodb <database-file> [options]
 | `--create` | Create a new database |
 | `--password <PW>` | Password (prompts if omitted) |
 | `--recovery-mode <strict\|permissive>` | WAL recovery policy for open |
+| `--format <text\|json>` | Output format for query results |
 
 ## Examples
 
@@ -33,7 +34,63 @@ murodb mydb.db
 # Open with permissive recovery mode
 murodb mydb.db --recovery-mode permissive
 
+# JSON output for machine processing
+murodb mydb.db --format json -e "SELECT * FROM t"
+
 ```
+
+## JSON output
+
+When using `--format json`, results are emitted as a single JSON object per statement.
+
+### Result envelope
+
+- `type` - One of `rows`, `rows_affected`, `ok`, or `error`
+- `columns` - Column names in result order (only for `rows`)
+- `rows` - Array of row arrays in column order (only for `rows`)
+- `row_count` - Number of rows (only for `rows`)
+- `rows_affected` - Number of rows affected (only for `rows_affected`)
+- `message` - Error message string (only for `error`)
+
+Example:
+
+```json
+{"type":"rows","columns":["id","name"],"rows":[[1,"alice"]],"row_count":1}
+```
+
+### Types
+
+#### INTEGER
+
+Numbers are emitted as JSON numbers.
+
+#### FLOAT
+
+Finite values are emitted as JSON numbers. Non-finite values are emitted as JSON strings.
+
+#### DATE
+
+`YYYY-MM-DD`
+
+#### DATETIME
+
+ISO 8601 `YYYY-MM-DDTHH:MM:SS`
+
+#### TIMESTAMP
+
+ISO 8601 `YYYY-MM-DDTHH:MM:SS`
+
+#### VARCHAR
+
+JSON strings with standard escaping.
+
+#### VARBINARY
+
+Base64 string (standard alphabet with `=` padding), for example `q80=`.
+
+#### NULL
+
+`null`
 
 ## WAL inspection
 

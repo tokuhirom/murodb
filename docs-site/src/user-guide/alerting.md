@@ -8,7 +8,15 @@ MuroDB exposes internal health metrics via the `SHOW DATABASE STATS` SQL command
 SHOW DATABASE STATS;
 ```
 
-Returns a table with columns: `stat_name` and `stat_value`.
+Returns a key-value table with columns: `stat` and `value`.
+
+Related command:
+
+```sql
+SHOW CHECKPOINT STATS;
+```
+
+This returns the checkpoint-only subset for backward compatibility.
 
 ## Key Metrics
 
@@ -37,7 +45,7 @@ Indicates checkpoint truncation failures. The WAL file is not being truncated af
 ```
 IF failed_checkpoints > 0 THEN ALERT
   severity: WARNING
-  message: "Checkpoint failures detected. WAL may be growing. Monitor wal_file_size_bytes."
+  message: "Checkpoint failures detected. WAL may be growing. Monitor WAL file size on disk."
 ```
 
 ### freelist_sanitize_count
@@ -48,13 +56,28 @@ Number of times the freelist was sanitized during page allocation to remove inva
 
 **Action**: If the count is consistently non-zero across sessions, investigate potential freelist corruption. A one-time occurrence after crash recovery is normal.
 
-### wal_file_size_bytes
+### freelist_out_of_range_total / freelist_duplicates_total
 
-**Alert threshold**: Application-specific (e.g., `> 10MB`)
+**Alert threshold**: `> 0` (informational)
 
-Current WAL file size. Under normal operation, the WAL is truncated after each commit. Persistent growth indicates checkpoint failures.
+Breakdown counters for freelist sanitization events:
 
-**Action**: If WAL grows beyond expected bounds, check `failed_checkpoints`. Consider restarting the process to trigger recovery and WAL truncation.
+- `freelist_out_of_range_total`: removed page IDs outside valid page range
+- `freelist_duplicates_total`: removed duplicate page IDs
+
+**Action**: non-zero values are expected only when sanitization occurred. If values continue increasing across clean restarts, investigate possible on-disk corruption.
+
+## WAL Size Monitoring
+
+`wal_file_size_bytes` is not currently exposed via `SHOW DATABASE STATS`.
+
+Track WAL size at the file level and correlate with `failed_checkpoints`:
+
+```bash
+ls -lh mydb.wal
+```
+
+Persistent growth together with `failed_checkpoints > 0` indicates checkpoint truncate failures.
 
 ## Monitoring Patterns
 
@@ -70,7 +93,7 @@ fn check_health(db: &mut Database) {
         // Parse result and check thresholds
         // Alert on commit_in_doubt_count > 0
         // Alert on failed_checkpoints > 0
-        // Track wal_file_size_bytes trend
+        // Track WAL file size via filesystem metrics
     }
 }
 ```
@@ -101,4 +124,5 @@ if !report.skipped.is_empty() {
 | `commit_in_doubt_count` | `> 0` | Critical | Session poisoned; reopen required |
 | `failed_checkpoints` | `> 0` | Warning | WAL growing; checkpoint failing |
 | `freelist_sanitize_count` | `> 0` | Info | Freelist self-healed |
-| `wal_file_size_bytes` | App-specific | Warning | WAL not being truncated |
+| `freelist_out_of_range_total` | `> 0` | Info | Invalid freelist entries removed (range) |
+| `freelist_duplicates_total` | `> 0` | Info | Invalid freelist entries removed (duplicates) |

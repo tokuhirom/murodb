@@ -54,7 +54,7 @@ This design ensures that a durable commit is never lost, even if the process cra
 
 ## Checkpoint Truncate Failure
 
-If `checkpoint_truncate()` fails (step 9), the WAL retains committed records. On next open, recovery replays them idempotently. The data file already has the correct state (from steps 7-8), so replay simply overwrites pages with identical content. WAL growth is the only concern - monitoring `wal_file_size_bytes` alerts operators to checkpoint failures.
+If `checkpoint_truncate()` fails (step 9), the WAL retains committed records. On next open, recovery replays them idempotently. The data file already has the correct state (from steps 7-8), so replay simply overwrites pages with identical content. WAL growth is the only concern; monitor WAL file size on disk and `failed_checkpoints` via `SHOW DATABASE STATS`.
 
 ## Idempotent Recovery
 

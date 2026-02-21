@@ -12,6 +12,9 @@ CREATE FULLTEXT INDEX t_body_fts ON t(body)
 
 `WITH PARSER` / `OPTIONS` syntax is available so parser variants can be expanded in future releases.
 
+FTS uses an internal `doc_id` mapping, so it works with non-`BIGINT` primary keys too.
+If a table has no explicit primary key, MuroDB's hidden `_rowid` is used.
+
 ## Query semantics
 
 ### NATURAL LANGUAGE MODE

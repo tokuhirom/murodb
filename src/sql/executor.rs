@@ -68,6 +68,7 @@ pub fn execute_statement(
         Statement::RenameTable(rt) => exec_rename_table(rt, pager, catalog),
         Statement::Insert(ins) => exec_insert(ins, pager, catalog),
         Statement::Select(sel) => exec_select(sel, pager, catalog),
+        Statement::Explain(inner) => exec_explain(inner, pager, catalog),
         Statement::SetQuery(sq) => exec_set_query(sq, pager, catalog),
         Statement::Update(upd) => exec_update(upd, pager, catalog),
         Statement::Delete(del) => exec_delete(del, pager, catalog),
@@ -1110,15 +1111,124 @@ fn exec_insert(
 
         let pk_key = encode_pk_key(&table_def, &values);
 
-        // Check PK uniqueness
-        if data_btree.search(pager, &pk_key)?.is_some() {
-            return Err(MuroError::UniqueViolation(
-                "Duplicate primary key".to_string(),
-            ));
+        // Detect conflicts: PK first, then unique indexes
+        let pk_duplicate = data_btree.search(pager, &pk_key)?.is_some();
+        // For ON DUPLICATE KEY UPDATE / REPLACE, also check unique index conflicts
+        let unique_conflict_pk = if !pk_duplicate {
+            find_unique_index_conflict(&table_def, &indexes, &values, pager)?
+        } else {
+            None
+        };
+        let has_conflict = pk_duplicate || unique_conflict_pk.is_some();
+        // The PK key of the conflicting row (same as pk_key for PK conflict,
+        // or the existing row's PK for unique index conflict)
+        let conflict_pk_key = if pk_duplicate {
+            Some(pk_key.clone())
+        } else {
+            unique_conflict_pk
+        };
+
+        if has_conflict {
+            let conflict_pk = conflict_pk_key.unwrap();
+            if ins.is_replace {
+                // REPLACE INTO: delete the conflicting row, then insert new one
+                let existing_data = data_btree.search(pager, &conflict_pk)?.unwrap();
+                let existing_values = deserialize_row_versioned(
+                    &existing_data,
+                    &table_def.columns,
+                    table_def.row_format_version,
+                )?;
+                delete_from_secondary_indexes(
+                    &table_def,
+                    &indexes,
+                    &existing_values,
+                    &conflict_pk,
+                    pager,
+                )?;
+                data_btree.delete(pager, &conflict_pk)?;
+                data_btree = BTree::open(data_btree.root_page_id());
+            } else if let Some(ref assignments) = ins.on_duplicate_key_update {
+                // ON DUPLICATE KEY UPDATE: read original, apply updates, write back
+                let existing_data = data_btree.search(pager, &conflict_pk)?.unwrap();
+                let original_values = deserialize_row_versioned(
+                    &existing_data,
+                    &table_def.columns,
+                    table_def.row_format_version,
+                )?;
+                let mut updated_values = original_values.clone();
+
+                // Apply update assignments (expressions can reference current row values)
+                for (col_name, expr) in assignments {
+                    let col_idx = table_def.column_index(col_name).ok_or_else(|| {
+                        MuroError::Execution(format!("Unknown column: {}", col_name))
+                    })?;
+                    let val = eval_expr(expr, &|name| {
+                        table_def
+                            .column_index(name)
+                            .and_then(|idx| updated_values.get(idx).cloned())
+                    })?;
+                    updated_values[col_idx] = val;
+                }
+
+                // Check unique constraints on updated values (excluding self)
+                // Must be done BEFORE deleting indexes to avoid inconsistency on error
+                check_unique_index_constraints_excluding(
+                    &table_def,
+                    &indexes,
+                    &updated_values,
+                    &conflict_pk,
+                    pager,
+                )?;
+
+                // Delete old secondary index entries using original values
+                delete_from_secondary_indexes(
+                    &table_def,
+                    &indexes,
+                    &original_values,
+                    &conflict_pk,
+                    pager,
+                )?;
+
+                // Update the data row (delete + insert)
+                let row_data = serialize_row(&updated_values, &table_def.columns);
+                data_btree.delete(pager, &conflict_pk)?;
+                data_btree = BTree::open(data_btree.root_page_id());
+                data_btree.insert(pager, &conflict_pk, &row_data)?;
+
+                // Insert new secondary index entries with updated values
+                insert_into_secondary_indexes(
+                    &table_def,
+                    &indexes,
+                    &updated_values,
+                    &conflict_pk,
+                    pager,
+                )?;
+
+                // Update table_def
+                table_def.data_btree_root = data_btree.root_page_id();
+                catalog.update_table(pager, &table_def)?;
+
+                // MySQL reports 2 affected rows for ON DUPLICATE KEY UPDATE
+                rows_inserted += 2;
+                continue;
+            } else if pk_duplicate {
+                return Err(MuroError::UniqueViolation(
+                    "Duplicate primary key".to_string(),
+                ));
+            } else {
+                return Err(MuroError::UniqueViolation(
+                    "Duplicate value in unique index".to_string(),
+                ));
+            }
         }
 
-        // Check unique index constraints
-        check_unique_index_constraints(&table_def, &indexes, &values, pager)?;
+        // For REPLACE: also delete rows conflicting on other unique indexes
+        // (handles case where PK is new but unique index conflicts with a different row)
+        if ins.is_replace {
+            replace_delete_unique_conflicts(&table_def, &indexes, &values, pager, &mut data_btree)?;
+        } else {
+            check_unique_index_constraints(&table_def, &indexes, &values, pager)?;
+        }
 
         // Serialize row and insert into data B-tree
         let row_data = serialize_row(&values, &table_def.columns);
@@ -2077,6 +2187,90 @@ fn select_col_count(sel: &Select) -> Option<usize> {
     }
 }
 
+fn exec_explain(
+    stmt: &Statement,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let sel = match stmt {
+        Statement::Select(sel) => sel,
+        _ => {
+            return Err(MuroError::Execution(
+                "EXPLAIN is only supported for SELECT statements".into(),
+            ));
+        }
+    };
+
+    let table_def = catalog
+        .get_table(pager, &sel.table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", sel.table_name)))?;
+
+    let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
+    let index_columns: Vec<(String, Vec<String>)> = indexes
+        .iter()
+        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .collect();
+
+    let plan = plan_select(
+        &sel.table_name,
+        &table_def.pk_columns,
+        &index_columns,
+        &sel.where_clause,
+    );
+
+    let (access_type, key_name, extra) = match &plan {
+        Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
+        Plan::IndexSeek { index_name, .. } => (
+            "ref",
+            index_name.clone(),
+            "Using where; Using index".to_string(),
+        ),
+        Plan::FullScan { .. } => {
+            let extra = if sel.where_clause.is_some() {
+                "Using where"
+            } else {
+                ""
+            };
+            ("ALL", String::new(), extra.to_string())
+        }
+        Plan::FtsScan { column, .. } => (
+            "fulltext",
+            format!("fts_{}", column),
+            "Using where; Using fulltext".to_string(),
+        ),
+    };
+
+    let row = Row {
+        values: vec![
+            ("id".to_string(), Value::Integer(1)),
+            (
+                "select_type".to_string(),
+                Value::Varchar("SIMPLE".to_string()),
+            ),
+            ("table".to_string(), Value::Varchar(sel.table_name.clone())),
+            ("type".to_string(), Value::Varchar(access_type.to_string())),
+            (
+                "key".to_string(),
+                if key_name.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Varchar(key_name)
+                },
+            ),
+            (
+                "Extra".to_string(),
+                if extra.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Varchar(extra)
+                },
+            ),
+        ],
+    };
+
+    Ok(ExecResult::Rows(vec![row]))
+}
+
 fn exec_set_query(
     sq: &SetQuery,
     pager: &mut impl PageStore,
@@ -2797,6 +2991,130 @@ fn check_unique_index_constraints(
                         "Duplicate value in unique column(s) '{}'",
                         idx.column_names.join(", ")
                     )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Find the first unique index conflict for the given values.
+/// Returns the PK key of the conflicting row, or None if no conflict.
+fn find_unique_index_conflict(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    pager: &mut impl PageStore,
+) -> Result<Option<Vec<u8>>> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                    return Ok(Some(existing_pk_key));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Check unique index constraints for updated values, excluding the row identified by `excluded_pk`.
+/// This prevents false positives when the row's own index entry is still present.
+fn check_unique_index_constraints_excluding(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    excluded_pk: &[u8],
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                    // Skip if the conflicting entry belongs to the row we're updating
+                    if existing_pk_key != excluded_pk {
+                        return Err(MuroError::UniqueViolation(format!(
+                            "Duplicate value in unique column(s) '{}'",
+                            idx.column_names.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// For REPLACE INTO: delete rows that conflict on any unique index.
+/// MySQL's REPLACE deletes ALL conflicting rows (PK + all unique indexes).
+fn replace_delete_unique_conflicts(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    new_values: &[Value],
+    pager: &mut impl PageStore,
+    data_btree: &mut BTree,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded = encode_index_key_from_row(
+                new_values,
+                &col_indices,
+                &table_def.columns,
+                is_composite,
+            );
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                    // Found a conflicting row via this unique index — delete it
+                    if let Some(existing_data) = data_btree.search(pager, &existing_pk_key)? {
+                        let existing_values = deserialize_row_versioned(
+                            &existing_data,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
+                        delete_from_secondary_indexes(
+                            table_def,
+                            indexes,
+                            &existing_values,
+                            &existing_pk_key,
+                            pager,
+                        )?;
+                        data_btree.delete(pager, &existing_pk_key)?;
+                        *data_btree = BTree::open(data_btree.root_page_id());
+                    }
                 }
             }
         }

@@ -66,15 +66,15 @@ MySQL-compatible scalar functions.
 - [x] Composite PRIMARY KEY
 - [x] Composite UNIQUE / composite INDEX
 
-## Phase 5 — Advanced Query
+## Phase 5 — Advanced Query ✓
 
 - [x] Subqueries (WHERE col IN (SELECT ...), scalar subquery)
-- [ ] UNION / UNION ALL
+- [x] UNION / UNION ALL
 - [x] EXISTS / NOT EXISTS
-- [ ] INSERT ... ON DUPLICATE KEY UPDATE
-- [ ] REPLACE INTO
-- [ ] EXPLAIN (query plan display)
-- [ ] RIGHT JOIN
+- [x] INSERT ... ON DUPLICATE KEY UPDATE
+- [x] REPLACE INTO
+- [x] EXPLAIN (query plan display)
+- [x] RIGHT JOIN
 
 ## Phase 6 — Types & Storage
 

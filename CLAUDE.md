@@ -54,6 +54,33 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 | `fts/` | tokenizer.rs, postings.rs, index.rs, query.rs, scoring.rs, snippet.rs | 全文検索 |
 | `concurrency/` | mod.rs | 並行性制御 |
 
+## Documentation
+
+ドキュメントは以下の構成。機能追加時には全て更新を検討すること。
+
+- **`README.md`** — プロジェクト概要、簡易リファレンス、ロードマップ
+- **`docs-site/`** — mdBook ベースのドキュメントサイト (ユーザーズマニュアル + 内部構造解説)
+  - User Guide (ユーザーズマニュアル):
+    - `src/user-guide/sql-reference.md` — SQL 構文リファレンス (型、DDL、DML、関数、集約、JOIN等)
+    - `src/user-guide/cli.md` — CLI オプション
+    - `src/user-guide/full-text-search.md` — 全文検索ガイド
+    - `src/user-guide/recovery.md` — リカバリ手順
+  - Internals (内部構造解説):
+    - `src/internals/architecture.md` — アーキテクチャ概要
+    - `src/internals/storage.md` — ストレージエンジン
+    - `src/internals/btree.md` — B-tree 実装
+    - `src/internals/wal.md` — WAL・クラッシュリカバリ設計
+    - `src/internals/fts-internals.md` — 全文検索エンジン内部
+    - `src/internals/format-migration.md` — フォーマットマイグレーション
+  - `src/roadmap.md` — ロードマップ
+- **`docs/`** — 旧技術ドキュメント (crash-resilience, format-migration)
+
+機能追加時の更新チェックリスト:
+1. `docs-site/src/user-guide/sql-reference.md` に新構文のドキュメントを追加
+2. `docs-site/src/roadmap.md` の該当項目を `[x]` に更新
+3. `README.md` の SQL Surface セクションと Roadmap も同期更新
+4. 内部構造に影響する変更 (WAL、ストレージ、B-tree等) は `docs-site/src/internals/` に追記・新規作成
+
 ## Git Workflow
 
 main ブランチに直接コミットしないこと。必ずフィーチャーブランチを作成し、PR 経由でマージする。
@@ -77,3 +104,5 @@ subagent には「あなたはDB/SQLの専門家です」というペルソナ�
 - Subquery は非相関サブクエリのみ対応 (外部行参照は未対応)
 - ALTER TABLE ADD/DROP PRIMARY KEY 未対応
 - ALTER TABLE はトランザクション非対応 (DDL全般と同様)
+- ON DUPLICATE KEY UPDATE で VALUES() 関数は未対応 (INSERT値の参照不可)
+- EXPLAIN は SELECT のみ対応、JOIN/サブクエリ含む場合は1行のみ出力

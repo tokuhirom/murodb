@@ -96,6 +96,9 @@ impl ColumnDef {
             DataType::Text => 7,
             DataType::Float => 8,
             DataType::Double => 9,
+            DataType::Date => 10,
+            DataType::DateTime => 11,
+            DataType::Timestamp => 12,
         });
         // flags
         let mut flags: u8 = 0;
@@ -205,6 +208,9 @@ impl ColumnDef {
             7 => DataType::Text,
             8 => DataType::Float,
             9 => DataType::Double,
+            10 => DataType::Date,
+            11 => DataType::DateTime,
+            12 => DataType::Timestamp,
             _ => return None,
         };
 
@@ -320,6 +326,9 @@ mod tests {
             DataType::BigInt,
             DataType::Float,
             DataType::Double,
+            DataType::Date,
+            DataType::DateTime,
+            DataType::Timestamp,
             DataType::Varchar(None),
             DataType::Varchar(Some(100)),
             DataType::Varbinary(None),

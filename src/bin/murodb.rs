@@ -151,6 +151,9 @@ fn format_value(val: &Value) -> String {
     match val {
         Value::Integer(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
+        Value::Date(n) => murodb::types::format_date(*n),
+        Value::DateTime(n) => murodb::types::format_datetime(*n),
+        Value::Timestamp(n) => murodb::types::format_datetime(*n),
         Value::Varchar(s) => s.clone(),
         Value::Varbinary(b) => format!("0x{}", hex_encode(b)),
         Value::Null => "NULL".to_string(),

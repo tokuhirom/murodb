@@ -401,7 +401,15 @@ impl Parser {
                 self.expect(&Token::Stats)?;
                 Ok(Statement::ShowCheckpointStats)
             }
-            _ => Err("Expected TABLES, CREATE TABLE, or CHECKPOINT STATS after SHOW".into()),
+            Some(Token::Database) => {
+                self.advance(); // DATABASE
+                self.expect(&Token::Stats)?;
+                Ok(Statement::ShowDatabaseStats)
+            }
+            _ => Err(
+                "Expected TABLES, CREATE TABLE, CHECKPOINT STATS, or DATABASE STATS after SHOW"
+                    .into(),
+            ),
         }
     }
 

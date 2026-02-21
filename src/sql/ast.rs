@@ -18,6 +18,7 @@ pub enum Statement {
     Commit,
     Rollback,
     ShowCheckpointStats,
+    ShowDatabaseStats,
 }
 
 #[derive(Debug, Clone)]

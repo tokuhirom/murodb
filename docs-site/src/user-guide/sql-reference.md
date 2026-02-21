@@ -77,12 +77,17 @@ CREATE FULLTEXT INDEX t_body_fts ON t(body)
   OPTIONS (n=2, normalize='nfkc');
 ```
 
+**Current status:**
+- `CREATE FULLTEXT INDEX` syntax is parsed, but SQL-engine integration is not complete in the current release.
+- See [Full-Text Search](full-text-search.md) for the currently supported Rust API workflow.
+
 ### DROP TABLE / DROP INDEX
 
 ```sql
 DROP TABLE t;
 DROP TABLE IF EXISTS t;
 DROP INDEX idx_email;
+DROP INDEX IF EXISTS idx_email;
 ```
 
 ### ALTER TABLE
@@ -129,6 +134,15 @@ SHOW CREATE TABLE t;
 DESCRIBE t;
 DESC t;
 ```
+
+### Operational Inspection
+
+```sql
+SHOW CHECKPOINT STATS;
+SHOW DATABASE STATS;
+```
+
+Both commands return two columns: `stat` and `value`.
 
 ## DML (Data Manipulation Language)
 

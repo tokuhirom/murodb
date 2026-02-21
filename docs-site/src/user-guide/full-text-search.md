@@ -1,67 +1,55 @@
 # Full-Text Search
 
-MuroDB provides MySQL-compatible full-text search with bigram tokenization.
+MuroDB has an internal FTS engine (bigram + BM25 + boolean query parser), but the SQL DDL path is still being integrated.
 
-## Creating a fulltext index
+## Current status
 
-```sql
-CREATE FULLTEXT INDEX t_body_fts ON t(body)
-  WITH PARSER ngram
-  OPTIONS (n=2, normalize='nfkc');
+- SQL syntax for `CREATE FULLTEXT INDEX` is parsed.
+- In the current release, executing `CREATE FULLTEXT INDEX ...` through SQL returns an execution error (integration in progress).
+- FTS is currently usable through the Rust API in `murodb::fts`.
+
+## Rust API workflow
+
+```rust
+use murodb::fts::index::{FtsIndex, FtsPendingOp};
+use murodb::fts::query::{query_boolean, query_natural};
+
+let mut idx = FtsIndex::create(&mut pager, term_key)?;
+
+idx.apply_pending(&mut pager, &[
+    FtsPendingOp::Add { doc_id: 1, text: "東京タワーの夜景".into() },
+    FtsPendingOp::Add { doc_id: 2, text: "京都の金閣寺".into() },
+])?;
+
+let natural = query_natural(&idx, &mut pager, "東京タワー")?;
+let boolean = query_boolean(&idx, &mut pager, "\"東京タワー\" +夜景 -混雑")?;
 ```
 
-## NATURAL LANGUAGE MODE
+## Query semantics
 
-BM25-based relevance ranking.
+### NATURAL mode
 
-```sql
-SELECT id, MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) AS score
-FROM t
-WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0
-ORDER BY score DESC
-LIMIT 20;
-```
+- BM25-based relevance ranking.
 
-## BOOLEAN MODE
+### BOOLEAN mode
 
-Supports `+term` (required), `-term` (excluded), and `"phrase"` (exact phrase) operators.
-
-```sql
-SELECT id
-FROM t
-WHERE MATCH(body) AGAINST('"東京タワー" +夜景 -混雑' IN BOOLEAN MODE) > 0;
-```
-
-### Boolean operators
+Supports `+term` (required), `-term` (excluded), and `"phrase"` (exact phrase).
 
 | Operator | Meaning | Example |
 |---|---|---|
 | `+term` | Term must be present | `+東京` |
 | `-term` | Term must not be present | `-混雑` |
 | `"phrase"` | Exact phrase match | `"東京タワー"` |
-| `term` | Term is optional (contributes to score) | `夜景` |
+| `term` | Optional (score contribution) | `夜景` |
 
-## Snippet with highlight
+## Snippet helper
 
-Use `fts_snippet()` to generate highlighted excerpts.
+Use `murodb::fts::snippet::fts_snippet()` for highlighted excerpts.
 
-```sql
-SELECT id,
-  fts_snippet(body, '"東京タワー"', '<mark>', '</mark>', 30) AS snippet
-FROM t
-WHERE MATCH(body) AGAINST('"東京タワー"' IN BOOLEAN MODE) > 0
-LIMIT 10;
+```rust
+use murodb::fts::snippet::fts_snippet;
+let s = fts_snippet("東京タワーの夜景がきれい", "\"東京タワー\" +夜景", "<mark>", "</mark>", 30);
 ```
-
-### fts_snippet() parameters
-
-| Parameter | Description |
-|---|---|
-| column | The column to extract snippet from |
-| query | The search query (same as AGAINST) |
-| open tag | Opening highlight tag (e.g., `<mark>`) |
-| close tag | Closing highlight tag (e.g., `</mark>`) |
-| max length | Maximum snippet length in characters |
 
 ## Internal design
 

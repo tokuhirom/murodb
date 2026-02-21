@@ -10,7 +10,8 @@ Before taking any corrective action, collect the current state:
 SHOW DATABASE STATS;
 ```
 
-Note the values of `commit_in_doubt_count`, `failed_checkpoints`, `freelist_sanitize_count`, and `wal_file_size_bytes`. Check the WAL file size on disk as well:
+Note the values of `commit_in_doubt_count`, `failed_checkpoints`, `freelist_sanitize_count`, `freelist_out_of_range_total`, and `freelist_duplicates_total`.
+`SHOW DATABASE STATS` does not include WAL size, so check WAL file size on disk as well:
 
 ```bash
 ls -lh mydb.wal
@@ -40,7 +41,7 @@ murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
 
 ## Scenario: Checkpoint Failures / WAL Growth
 
-**Symptom**: `failed_checkpoints > 0`, `wal_file_size_bytes` growing over time.
+**Symptom**: `failed_checkpoints > 0`, and WAL file size is growing over time.
 
 **What happened**: After committing, MuroDB truncates the WAL via a checkpoint. If truncation fails, the WAL keeps growing. The database remains correct (WAL replay is idempotent), but recovery time increases.
 
@@ -48,7 +49,7 @@ murodb mydb.db --inspect-wal mydb.wal --recovery-mode permissive --format json
 
 1. Check disk I/O health and available space.
 2. If the WAL is very large but the database is otherwise healthy, restart the process. Recovery on startup will replay and then truncate the WAL.
-3. Monitor `wal_file_size_bytes` after restart to confirm the WAL was truncated.
+3. Monitor WAL file size on disk after restart to confirm the WAL was truncated.
 
 ## Scenario: Freelist Corruption Suspected
 

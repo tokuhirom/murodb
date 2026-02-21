@@ -61,5 +61,3 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 - Composite PK / Composite UNIQUE 未対応
 - DROP TABLE / ALTER TABLE 未対応
 - GROUP BY / 集約関数 未対応
-- LIKE / IN / BETWEEN 未対応
-- スカラー関数 (LENGTH, CONCAT 等) 未対応

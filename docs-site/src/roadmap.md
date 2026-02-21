@@ -36,18 +36,18 @@
 - [x] BOOLEAN type (alias for TINYINT)
 - [x] CHECK constraint
 
-## Phase 2 — Built-in Functions
+## Phase 2 — Built-in Functions ✓
 
 MySQL-compatible scalar functions.
 
-- [ ] String: LENGTH, CHAR_LENGTH, CONCAT, SUBSTRING/SUBSTR, UPPER, LOWER
-- [ ] String: TRIM, LTRIM, RTRIM, REPLACE, REVERSE, REPEAT
-- [ ] String: LEFT, RIGHT, LPAD, RPAD, INSTR/LOCATE
-- [ ] String: REGEXP / REGEXP_LIKE
-- [ ] Numeric: ABS, CEIL/CEILING, FLOOR, ROUND, MOD, POWER/POW
-- [ ] NULL handling: COALESCE, IFNULL, NULLIF, IF
-- [ ] Type conversion: CAST(expr AS type)
-- [ ] CASE WHEN ... THEN ... ELSE ... END
+- [x] String: LENGTH, CHAR_LENGTH, CONCAT, SUBSTRING/SUBSTR, UPPER, LOWER
+- [x] String: TRIM, LTRIM, RTRIM, REPLACE, REVERSE, REPEAT
+- [x] String: LEFT, RIGHT, LPAD, RPAD, INSTR/LOCATE
+- [x] String: REGEXP / REGEXP_LIKE
+- [x] Numeric: ABS, CEIL/CEILING, FLOOR, ROUND, MOD, POWER/POW
+- [x] NULL handling: COALESCE, IFNULL, NULLIF, IF
+- [x] Type conversion: CAST(expr AS type)
+- [x] CASE WHEN ... THEN ... ELSE ... END
 
 ## Phase 3 — Aggregation & Grouping
 

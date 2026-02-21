@@ -17,6 +17,7 @@ fs4 = "0.12"
 lru = "0.16"
 parking_lot = "0.12"
 rand = "0.8"
+regex = "1"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }

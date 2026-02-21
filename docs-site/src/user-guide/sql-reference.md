@@ -173,6 +173,250 @@ SELECT id, (a + b) / 2 AS average FROM t;
 -- Supported: +, -, *, /, %
 ```
 
+## Built-in Functions
+
+### String Functions
+
+#### LENGTH(s)
+
+Returns the byte length of a string.
+
+```sql
+SELECT LENGTH('hello');       -- 5
+SELECT LENGTH('héllo');       -- 6 (é is 2 bytes in UTF-8)
+```
+
+#### CHAR_LENGTH(s) / CHARACTER_LENGTH(s)
+
+Returns the character count of a string.
+
+```sql
+SELECT CHAR_LENGTH('hello');  -- 5
+SELECT CHAR_LENGTH('héllo');  -- 5
+```
+
+#### CONCAT(s1, s2, ...)
+
+Concatenates two or more strings. Returns NULL if any argument is NULL.
+
+```sql
+SELECT CONCAT('hello', ' ', 'world');  -- 'hello world'
+SELECT CONCAT('a', NULL);              -- NULL
+```
+
+#### SUBSTRING(s, pos [, len]) / SUBSTR(s, pos [, len])
+
+Returns a substring starting at position `pos` (1-based). Optional `len` limits the length.
+
+```sql
+SELECT SUBSTRING('hello world', 7);     -- 'world'
+SELECT SUBSTRING('hello world', 1, 5);  -- 'hello'
+SELECT SUBSTRING('hello', -3);          -- 'llo'
+```
+
+#### UPPER(s) / LOWER(s)
+
+Converts a string to upper or lower case.
+
+```sql
+SELECT UPPER('hello');  -- 'HELLO'
+SELECT LOWER('HELLO');  -- 'hello'
+```
+
+#### TRIM(s) / LTRIM(s) / RTRIM(s)
+
+Removes whitespace from both ends, the left end, or the right end.
+
+```sql
+SELECT TRIM('  hello  ');   -- 'hello'
+SELECT LTRIM('  hello  ');  -- 'hello  '
+SELECT RTRIM('  hello  ');  -- '  hello'
+```
+
+#### REPLACE(s, from, to)
+
+Replaces all occurrences of `from` with `to` in `s`.
+
+```sql
+SELECT REPLACE('hello world', 'world', 'rust');  -- 'hello rust'
+```
+
+#### REVERSE(s)
+
+Reverses a string.
+
+```sql
+SELECT REVERSE('hello');  -- 'olleh'
+```
+
+#### REPEAT(s, n)
+
+Repeats a string `n` times.
+
+```sql
+SELECT REPEAT('ab', 3);  -- 'ababab'
+```
+
+#### LEFT(s, n) / RIGHT(s, n)
+
+Returns the leftmost or rightmost `n` characters.
+
+```sql
+SELECT LEFT('hello', 3);   -- 'hel'
+SELECT RIGHT('hello', 3);  -- 'llo'
+```
+
+#### LPAD(s, len, pad) / RPAD(s, len, pad)
+
+Pads a string to length `len` using `pad` characters on the left or right.
+
+```sql
+SELECT LPAD('hi', 5, '*');  -- '***hi'
+SELECT RPAD('hi', 5, '*');  -- 'hi***'
+```
+
+#### INSTR(s, sub)
+
+Returns the position (1-based) of the first occurrence of `sub` in `s`. Returns 0 if not found.
+
+```sql
+SELECT INSTR('hello world', 'world');  -- 7
+SELECT INSTR('hello', 'xyz');          -- 0
+```
+
+#### LOCATE(sub, s [, pos])
+
+Returns the position (1-based) of `sub` in `s`, starting the search at `pos`.
+
+```sql
+SELECT LOCATE('hello', 'hello hello');     -- 1
+SELECT LOCATE('hello', 'hello hello', 2);  -- 7
+```
+
+### REGEXP
+
+#### REGEXP / REGEXP_LIKE(s, pattern)
+
+Tests whether a string matches a regular expression. Can be used as an operator or function.
+
+```sql
+-- Operator syntax
+SELECT * FROM t WHERE name REGEXP '[0-9]+';
+
+-- Function syntax
+SELECT REGEXP_LIKE(name, '^hello') FROM t;
+```
+
+### Numeric Functions
+
+#### ABS(n)
+
+Returns the absolute value.
+
+```sql
+SELECT ABS(-42);  -- 42
+```
+
+#### CEIL(n) / CEILING(n) / FLOOR(n)
+
+Returns the ceiling or floor. (Identity for integer types.)
+
+```sql
+SELECT CEIL(42);   -- 42
+SELECT FLOOR(42);  -- 42
+```
+
+#### ROUND(n [, decimals])
+
+Rounds a number. (Identity for integer types.)
+
+```sql
+SELECT ROUND(42);  -- 42
+```
+
+#### MOD(a, b)
+
+Returns the modulo (same as `%` operator).
+
+```sql
+SELECT MOD(10, 3);  -- 1
+```
+
+#### POWER(base, exp) / POW(base, exp)
+
+Returns `base` raised to the power of `exp`.
+
+```sql
+SELECT POWER(2, 10);  -- 1024
+```
+
+### NULL Handling & Conditional
+
+#### COALESCE(a, b, ...)
+
+Returns the first non-NULL argument.
+
+```sql
+SELECT COALESCE(NULL, NULL, 'fallback');  -- 'fallback'
+```
+
+#### IFNULL(a, b)
+
+Returns `a` if not NULL, otherwise `b`.
+
+```sql
+SELECT IFNULL(NULL, 'default');  -- 'default'
+SELECT IFNULL('value', 'default');  -- 'value'
+```
+
+#### NULLIF(a, b)
+
+Returns NULL if `a = b`, otherwise returns `a`.
+
+```sql
+SELECT NULLIF(0, 0);  -- NULL
+SELECT NULLIF(5, 0);  -- 5
+```
+
+#### IF(cond, then, else)
+
+Returns `then` if `cond` is truthy, otherwise `else`.
+
+```sql
+SELECT IF(1, 'yes', 'no');  -- 'yes'
+SELECT IF(0, 'yes', 'no');  -- 'no'
+```
+
+### CASE WHEN
+
+```sql
+-- Searched CASE
+SELECT CASE
+  WHEN val < 10 THEN 'low'
+  WHEN val < 20 THEN 'mid'
+  ELSE 'high'
+END FROM t;
+
+-- Simple CASE
+SELECT CASE status
+  WHEN 1 THEN 'active'
+  WHEN 2 THEN 'inactive'
+  ELSE 'unknown'
+END FROM t;
+```
+
+### CAST
+
+Converts a value to a different data type.
+
+```sql
+SELECT CAST('42' AS INT);      -- 42
+SELECT CAST(42 AS VARCHAR);    -- '42'
+SELECT CAST(val AS BIGINT) FROM t;
+```
+
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, VARCHAR, TEXT, VARBINARY.
+
 ## JOIN
 
 ```sql

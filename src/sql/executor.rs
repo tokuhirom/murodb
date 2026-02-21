@@ -1111,13 +1111,28 @@ fn exec_insert(
 
         let pk_key = encode_pk_key(&table_def, &values);
 
-        // Check PK uniqueness
+        // Detect conflicts: PK first, then unique indexes
         let pk_duplicate = data_btree.search(pager, &pk_key)?.is_some();
+        // For ON DUPLICATE KEY UPDATE / REPLACE, also check unique index conflicts
+        let unique_conflict_pk = if !pk_duplicate {
+            find_unique_index_conflict(&table_def, &indexes, &values, pager)?
+        } else {
+            None
+        };
+        let has_conflict = pk_duplicate || unique_conflict_pk.is_some();
+        // The PK key of the conflicting row (same as pk_key for PK conflict,
+        // or the existing row's PK for unique index conflict)
+        let conflict_pk_key = if pk_duplicate {
+            Some(pk_key.clone())
+        } else {
+            unique_conflict_pk
+        };
 
-        if pk_duplicate {
+        if has_conflict {
+            let conflict_pk = conflict_pk_key.unwrap();
             if ins.is_replace {
-                // REPLACE INTO: delete existing row, then insert new one
-                let existing_data = data_btree.search(pager, &pk_key)?.unwrap();
+                // REPLACE INTO: delete the conflicting row, then insert new one
+                let existing_data = data_btree.search(pager, &conflict_pk)?.unwrap();
                 let existing_values = deserialize_row_versioned(
                     &existing_data,
                     &table_def.columns,
@@ -1127,15 +1142,14 @@ fn exec_insert(
                     &table_def,
                     &indexes,
                     &existing_values,
-                    &pk_key,
+                    &conflict_pk,
                     pager,
                 )?;
-                data_btree.delete(pager, &pk_key)?;
-                // Re-open btree after delete (root may have changed)
+                data_btree.delete(pager, &conflict_pk)?;
                 data_btree = BTree::open(data_btree.root_page_id());
             } else if let Some(ref assignments) = ins.on_duplicate_key_update {
                 // ON DUPLICATE KEY UPDATE: read original, apply updates, write back
-                let existing_data = data_btree.search(pager, &pk_key)?.unwrap();
+                let existing_data = data_btree.search(pager, &conflict_pk)?.unwrap();
                 let original_values = deserialize_row_versioned(
                     &existing_data,
                     &table_def.columns,
@@ -1156,27 +1170,37 @@ fn exec_insert(
                     updated_values[col_idx] = val;
                 }
 
+                // Check unique constraints on updated values (excluding self)
+                // Must be done BEFORE deleting indexes to avoid inconsistency on error
+                check_unique_index_constraints_excluding(
+                    &table_def,
+                    &indexes,
+                    &updated_values,
+                    &conflict_pk,
+                    pager,
+                )?;
+
                 // Delete old secondary index entries using original values
                 delete_from_secondary_indexes(
                     &table_def,
                     &indexes,
                     &original_values,
-                    &pk_key,
+                    &conflict_pk,
                     pager,
                 )?;
 
                 // Update the data row (delete + insert)
                 let row_data = serialize_row(&updated_values, &table_def.columns);
-                data_btree.delete(pager, &pk_key)?;
+                data_btree.delete(pager, &conflict_pk)?;
                 data_btree = BTree::open(data_btree.root_page_id());
-                data_btree.insert(pager, &pk_key, &row_data)?;
+                data_btree.insert(pager, &conflict_pk, &row_data)?;
 
                 // Insert new secondary index entries with updated values
                 insert_into_secondary_indexes(
                     &table_def,
                     &indexes,
                     &updated_values,
-                    &pk_key,
+                    &conflict_pk,
                     pager,
                 )?;
 
@@ -1187,15 +1211,19 @@ fn exec_insert(
                 // MySQL reports 2 affected rows for ON DUPLICATE KEY UPDATE
                 rows_inserted += 2;
                 continue;
-            } else {
+            } else if pk_duplicate {
                 return Err(MuroError::UniqueViolation(
                     "Duplicate primary key".to_string(),
+                ));
+            } else {
+                return Err(MuroError::UniqueViolation(
+                    "Duplicate value in unique index".to_string(),
                 ));
             }
         }
 
-        // For REPLACE: delete rows conflicting on unique indexes
-        // For regular INSERT: check unique index constraints and error on conflict
+        // For REPLACE: also delete rows conflicting on other unique indexes
+        // (handles case where PK is new but unique index conflicts with a different row)
         if ins.is_replace {
             replace_delete_unique_conflicts(&table_def, &indexes, &values, pager, &mut data_btree)?;
         } else {
@@ -2963,6 +2991,77 @@ fn check_unique_index_constraints(
                         "Duplicate value in unique column(s) '{}'",
                         idx.column_names.join(", ")
                     )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Find the first unique index conflict for the given values.
+/// Returns the PK key of the conflicting row, or None if no conflict.
+fn find_unique_index_conflict(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    pager: &mut impl PageStore,
+) -> Result<Option<Vec<u8>>> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                    return Ok(Some(existing_pk_key));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Check unique index constraints for updated values, excluding the row identified by `excluded_pk`.
+/// This prevents false positives when the row's own index entry is still present.
+fn check_unique_index_constraints_excluding(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    values: &[Value],
+    excluded_pk: &[u8],
+    pager: &mut impl PageStore,
+) -> Result<()> {
+    for idx in indexes {
+        if idx.is_unique {
+            let col_indices: Vec<usize> = idx
+                .column_names
+                .iter()
+                .filter_map(|cn| table_def.column_index(cn))
+                .collect();
+            if col_indices.len() != idx.column_names.len() {
+                continue;
+            }
+            let is_composite = idx.column_names.len() > 1;
+            let encoded =
+                encode_index_key_from_row(values, &col_indices, &table_def.columns, is_composite);
+            if let Some(idx_key) = encoded {
+                let idx_btree = BTree::open(idx.btree_root);
+                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                    // Skip if the conflicting entry belongs to the row we're updating
+                    if existing_pk_key != excluded_pk {
+                        return Err(MuroError::UniqueViolation(format!(
+                            "Duplicate value in unique column(s) '{}'",
+                            idx.column_names.join(", ")
+                        )));
+                    }
                 }
             }
         }

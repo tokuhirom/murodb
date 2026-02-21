@@ -274,3 +274,138 @@ fn test_replace_into_unique_index_conflict() {
     assert_eq!(rows[0][0], Value::Integer(2));
     assert_eq!(rows[0][1], Value::Varchar("alice@example.com".to_string()));
 }
+
+// ---- ON DUPLICATE KEY UPDATE with unique index conflict ----
+
+#[test]
+fn test_on_duplicate_key_update_unique_index_conflict() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "CREATE UNIQUE INDEX idx_email ON t(email)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "INSERT INTO t (id, email, name) VALUES (1, 'alice@example.com', 'Alice')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    // Insert with different PK but same unique email → should trigger ON DUPLICATE KEY UPDATE
+    let n = affected_rows(
+        "INSERT INTO t (id, email, name) VALUES (2, 'alice@example.com', 'Bob') ON DUPLICATE KEY UPDATE name = 'Updated'",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(n, 2); // MySQL convention: 2 for update
+
+    let rows = query_rows(
+        "SELECT id, email, name FROM t ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+    // The original row (id=1) should be updated, not a new row inserted
+    assert_eq!(rows[0][0], Value::Integer(1));
+    assert_eq!(rows[0][1], Value::Varchar("alice@example.com".to_string()));
+    assert_eq!(rows[0][2], Value::Varchar("Updated".to_string()));
+}
+
+#[test]
+fn test_on_duplicate_key_update_revalidates_unique_constraints() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "CREATE UNIQUE INDEX idx_email ON t(email)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "INSERT INTO t (id, email, name) VALUES (1, 'alice@example.com', 'Alice')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "INSERT INTO t (id, email, name) VALUES (2, 'bob@example.com', 'Bob')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    // Try to update id=1's email to bob's email → should fail with unique violation
+    let result = execute(
+        "INSERT INTO t (id, email, name) VALUES (1, 'alice@example.com', 'X') ON DUPLICATE KEY UPDATE email = 'bob@example.com'",
+        &mut pager,
+        &mut catalog,
+    );
+    assert!(
+        result.is_err(),
+        "Should fail due to unique constraint violation"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("Duplicate") || err_msg.contains("unique"),
+        "Error should mention unique violation: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_on_duplicate_key_update_same_unique_value_ok() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, email VARCHAR, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "CREATE UNIQUE INDEX idx_email ON t(email)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute(
+        "INSERT INTO t (id, email, name) VALUES (1, 'alice@example.com', 'Alice')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    // Update name but keep email the same → should succeed (not a false unique violation)
+    let n = affected_rows(
+        "INSERT INTO t (id, email, name) VALUES (1, 'alice@example.com', 'X') ON DUPLICATE KEY UPDATE name = 'Alicia'",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(n, 2);
+
+    let rows = query_rows("SELECT id, email, name FROM t", &mut pager, &mut catalog);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][2], Value::Varchar("Alicia".to_string()));
+}

@@ -92,15 +92,22 @@ impl Session {
 
     /// Execute a SQL string, handling BEGIN/COMMIT/ROLLBACK at the session level.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
-        self.check_poisoned()?;
         let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
+
+        // Stats queries are always allowed, even on poisoned sessions,
+        // so operators can inspect counters after CommitInDoubt.
+        match &stmt {
+            Statement::ShowCheckpointStats => return self.handle_show_checkpoint_stats(),
+            Statement::ShowDatabaseStats => return self.handle_show_database_stats(),
+            _ => {}
+        }
+
+        self.check_poisoned()?;
 
         match &stmt {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
-            Statement::ShowCheckpointStats => self.handle_show_checkpoint_stats(),
-            Statement::ShowDatabaseStats => self.handle_show_database_stats(),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
@@ -805,21 +812,37 @@ mod tests {
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta().unwrap();
         let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
-        let session = Session::new(pager, catalog, wal);
+        let mut session = Session::new(pager, catalog, wal);
 
         assert_eq!(session.database_stats().commit_in_doubt_count, 0);
 
-        // CommitInDoubt is triggered by post-WAL-sync failures which are hard
-        // to inject directly. Instead, verify the counter is zero initially
-        // and that the session exposes it through database_stats().
+        // Set up a table first (needs a working pager)
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+
+        // Inject write_page failure so next commit triggers CommitInDoubt
+        session
+            .pager_mut()
+            .set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
+
+        let result = session.execute("INSERT INTO t VALUES (1)");
+        assert!(
+            matches!(&result, Err(MuroError::CommitInDoubt(_))),
+            "expected CommitInDoubt, got: {:?}",
+            result
+        );
+
+        // Counter must have been incremented
+        assert_eq!(session.database_stats().commit_in_doubt_count, 1);
         assert!(session
             .database_stats()
             .last_commit_in_doubt_error
-            .is_none());
+            .is_some());
         assert!(session
             .database_stats()
             .last_commit_in_doubt_timestamp_ms
-            .is_none());
+            .is_some());
     }
 
     #[test]
@@ -859,5 +882,56 @@ mod tests {
         assert_eq!(session.database_stats().freelist_sanitize_count, 0);
         assert_eq!(session.database_stats().freelist_out_of_range_total, 0);
         assert_eq!(session.database_stats().freelist_duplicates_total, 0);
+    }
+
+    #[test]
+    fn test_stats_readable_on_poisoned_session() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+
+        // Poison the session via CommitInDoubt
+        session
+            .pager_mut()
+            .set_inject_write_page_failure(Some(std::io::ErrorKind::Other));
+        let result = session.execute("INSERT INTO t VALUES (1)");
+        assert!(matches!(&result, Err(MuroError::CommitInDoubt(_))));
+
+        // Regular queries must be rejected
+        let result = session.execute("SELECT * FROM t");
+        assert!(matches!(&result, Err(MuroError::SessionPoisoned(_))));
+
+        // SHOW DATABASE STATS must still work on poisoned session
+        match session.execute("SHOW DATABASE STATS").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 10);
+                // commit_in_doubt_count should be 1
+                assert_eq!(
+                    rows[4].get("stat"),
+                    Some(&Value::Varchar("commit_in_doubt_count".to_string()))
+                );
+                assert_eq!(rows[4].get("value"), Some(&Value::Varchar("1".to_string())));
+            }
+            _ => panic!("Expected rows from SHOW DATABASE STATS"),
+        }
+
+        // SHOW CHECKPOINT STATS must also work on poisoned session
+        match session.execute("SHOW CHECKPOINT STATS").unwrap() {
+            ExecResult::Rows(rows) => {
+                assert_eq!(rows.len(), 4);
+            }
+            _ => panic!("Expected rows from SHOW CHECKPOINT STATS"),
+        }
     }
 }

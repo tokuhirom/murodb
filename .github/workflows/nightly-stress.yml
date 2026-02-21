@@ -43,3 +43,33 @@ jobs:
           name: crash-stress-artifacts
           path: /tmp/crash_stress_artifacts/
           retention-days: 30
+
+      - name: Open GitHub issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SEED="${{ github.event.inputs.seed || 'random' }}"
+          ITERATIONS="${{ github.event.inputs.iterations || '200' }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh issue create \
+            --title "Nightly crash-stress failure ($(date -u +%Y-%m-%d))" \
+            --label "bug,crash-resilience" \
+            --body "$(cat <<EOF
+          ## Nightly crash-stress test failed
+
+          **Run**: ${RUN_URL}
+          **Seed**: \`${SEED}\`
+          **Iterations**: ${ITERATIONS}
+
+          ### Repro command
+
+          \`\`\`bash
+          cargo test --test crash_stress -- --harness --iterations ${ITERATIONS} --seed ${SEED}
+          \`\`\`
+
+          ### Artifacts
+
+          Download from the [workflow run](${RUN_URL}) (retained 30 days).
+          EOF
+          )"

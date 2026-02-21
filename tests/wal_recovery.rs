@@ -461,7 +461,7 @@ fn test_freelist_persisted_across_reopen() {
 
         // Get page count before inserting more data
         let pager = db.flush().ok();
-        drop(pager);
+        let _ = pager;
 
         // Insert more rows — they should reuse freed pages, not grow the file
         for i in 100..120 {

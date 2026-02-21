@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process;
 
+use base64::Engine;
 use clap::{Parser, ValueEnum};
 use murodb::sql::executor::ExecResult;
 use murodb::types::Value;
@@ -11,6 +12,12 @@ use murodb::Database;
 enum RecoveryModeArg {
     Strict,
     Permissive,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum OutputFormatArg {
+    Text,
+    Json,
 }
 
 impl From<RecoveryModeArg> for RecoveryMode {
@@ -43,6 +50,10 @@ struct Cli {
     /// WAL recovery behavior when opening existing DB
     #[arg(long, value_enum, default_value = "strict")]
     recovery_mode: RecoveryModeArg,
+
+    /// Output format for query results
+    #[arg(long, value_enum, default_value = "text")]
+    format: OutputFormatArg,
 }
 
 fn get_password(cli_password: &Option<String>) -> String {
@@ -125,6 +136,100 @@ fn format_rows(result: &ExecResult) -> String {
     }
 }
 
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn format_value_json(val: &Value) -> String {
+    match val {
+        Value::Integer(n) => n.to_string(),
+        Value::Float(n) => {
+            if n.is_finite() {
+                n.to_string()
+            } else {
+                format!("\"{}\"", json_escape(&n.to_string()))
+            }
+        }
+        Value::Date(n) => format!("\"{}\"", json_escape(&murodb::types::format_date(*n))),
+        Value::DateTime(n) => format!("\"{}\"", json_escape(&format_datetime_iso8601(*n))),
+        Value::Timestamp(n) => format!("\"{}\"", json_escape(&format_datetime_iso8601(*n))),
+        Value::Varchar(s) => format!("\"{}\"", json_escape(s)),
+        Value::Varbinary(b) => format!("\"{}\"", base64_encode(b)),
+        Value::Null => "null".to_string(),
+    }
+}
+
+fn format_datetime_iso8601(packed: i64) -> String {
+    let s = murodb::types::format_datetime(packed);
+    let mut out = String::with_capacity(s.len() + 1);
+    if let Some((date, time)) = s.split_once(' ') {
+        out.push_str(date);
+        out.push('T');
+        out.push_str(time);
+    } else {
+        out.push_str(&s);
+    }
+    out
+}
+
+fn format_rows_json(result: &ExecResult) -> String {
+    match result {
+        ExecResult::Rows(rows) => {
+            let columns: Vec<&str> = rows
+                .first()
+                .map(|row| row.values.iter().map(|(name, _)| name.as_str()).collect())
+                .unwrap_or_else(Vec::new);
+            let columns_json = columns
+                .iter()
+                .map(|name| format!("\"{}\"", json_escape(name)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let rows_json = rows
+                .iter()
+                .map(|row| {
+                    let values = row
+                        .values
+                        .iter()
+                        .map(|(_, val)| format_value_json(val))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("[{}]", values)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"type\":\"rows\",\"columns\":[{}],\"rows\":[{}],\"row_count\":{}}}",
+                columns_json,
+                rows_json,
+                rows.len()
+            )
+        }
+        ExecResult::RowsAffected(n) => {
+            format!("{{\"type\":\"rows_affected\",\"rows_affected\":{}}}", n)
+        }
+        ExecResult::Ok => "{\"type\":\"ok\"}".to_string(),
+    }
+}
+
+fn format_error_json(msg: &str) -> String {
+    format!(
+        "{{\"type\":\"error\",\"message\":\"{}\"}}",
+        json_escape(msg)
+    )
+}
+
 fn format_value(val: &Value) -> String {
     match val {
         Value::Integer(n) => n.to_string(),
@@ -142,14 +247,24 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn execute_sql(db: &mut Database, sql: &str) {
+fn base64_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg) {
     match db.execute(sql) {
-        Ok(result) => println!("{}", format_rows(&result)),
-        Err(e) => eprintln!("ERROR: {}", e),
+        Ok(result) => match format {
+            OutputFormatArg::Text => println!("{}", format_rows(&result)),
+            OutputFormatArg::Json => println!("{}", format_rows_json(&result)),
+        },
+        Err(e) => match format {
+            OutputFormatArg::Text => eprintln!("ERROR: {}", e),
+            OutputFormatArg::Json => println!("{}", format_error_json(&e.to_string())),
+        },
     }
 }
 
-fn run_repl(db: &mut Database) {
+fn run_repl(db: &mut Database, format: &OutputFormatArg) {
     let mut rl = rustyline::DefaultEditor::new().unwrap_or_else(|e| {
         eprintln!("ERROR: Failed to initialize REPL: {}", e);
         process::exit(1);
@@ -182,7 +297,7 @@ fn run_repl(db: &mut Database) {
                 if buffer.trim_end().ends_with(';') {
                     let sql = buffer.trim().to_string();
                     let _ = rl.add_history_entry(&sql);
-                    execute_sql(db, &sql);
+                    execute_sql(db, &sql, format);
                     buffer.clear();
                 }
             }
@@ -265,12 +380,70 @@ fn main() {
     };
 
     if let Some(sql) = &cli.execute {
-        execute_sql(&mut db, sql);
+        execute_sql(&mut db, sql, &cli.format);
         if let Err(e) = db.flush() {
             eprintln!("ERROR: Failed to flush database: {}", e);
             process::exit(1);
         }
     } else {
-        run_repl(&mut db);
+        run_repl(&mut db, &cli.format);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use murodb::sql::executor::Row;
+
+    #[test]
+    fn format_rows_json_empty() {
+        let result = ExecResult::Rows(Vec::new());
+        let json = format_rows_json(&result);
+        assert_eq!(
+            json,
+            "{\"type\":\"rows\",\"columns\":[],\"rows\":[],\"row_count\":0}"
+        );
+    }
+
+    #[test]
+    fn format_rows_json_values() {
+        let rows = vec![Row {
+            values: vec![
+                ("id".to_string(), Value::Integer(1)),
+                ("name".to_string(), Value::Varchar("al\"ice".to_string())),
+                ("blob".to_string(), Value::Varbinary(vec![0xab, 0xcd])),
+                ("note".to_string(), Value::Null),
+                ("created_at".to_string(), Value::DateTime(20240203112233)),
+            ],
+        }];
+        let result = ExecResult::Rows(rows);
+        let json = format_rows_json(&result);
+        assert_eq!(
+            json,
+            "{\"type\":\"rows\",\"columns\":[\"id\",\"name\",\"blob\",\"note\",\"created_at\"],\"rows\":[[1,\"al\\\"ice\",\"q80=\",null,\"2024-02-03T11:22:33\"]],\"row_count\":1}"
+        );
+    }
+
+    #[test]
+    fn format_rows_json_rows_affected() {
+        let result = ExecResult::RowsAffected(7);
+        let json = format_rows_json(&result);
+        assert_eq!(json, "{\"type\":\"rows_affected\",\"rows_affected\":7}");
+    }
+
+    #[test]
+    fn format_rows_json_ok() {
+        let result = ExecResult::Ok;
+        let json = format_rows_json(&result);
+        assert_eq!(json, "{\"type\":\"ok\"}");
+    }
+
+    #[test]
+    fn format_error_json_escapes() {
+        let json = format_error_json("bad \"sql\"\nline");
+        assert_eq!(
+            json,
+            "{\"type\":\"error\",\"message\":\"bad \\\"sql\\\"\\nline\"}"
+        );
     }
 }

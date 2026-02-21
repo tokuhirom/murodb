@@ -39,6 +39,7 @@ jobs:
           sudo mount -o loop /tmp/xfs.img /mnt/xfs-test
           sudo chmod 777 /mnt/xfs-test
           echo "CRASH_STRESS_ARTIFACT_DIR=/mnt/xfs-test/artifacts" >> "$GITHUB_ENV"
+          echo "TMPDIR=/mnt/xfs-test" >> "$GITHUB_ENV"
 
       - name: Run crash stress test
         run: |

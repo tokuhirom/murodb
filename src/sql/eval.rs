@@ -8,6 +8,7 @@ use crate::types::{DataType, Value};
 pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result<Value> {
     match expr {
         Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
+        Expr::FloatLiteral(n) => Ok(Value::Float(*n)),
         Expr::StringLiteral(s) => Ok(Value::Varchar(s.clone())),
         Expr::BlobLiteral(b) => Ok(Value::Varbinary(b.clone())),
         Expr::Null => Ok(Value::Null),
@@ -149,6 +150,7 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
             let val = eval_expr(inner, columns)?;
             match val {
                 Value::Integer(n) => Ok(Value::Integer(if n > 0 { 1 } else { 0 })),
+                Value::Float(n) => Ok(Value::Integer(if n > 0.0 { 1 } else { 0 })),
                 _ => Ok(Value::Integer(0)),
             }
         }
@@ -171,6 +173,7 @@ fn eval_unary_op(op: UnaryOp, val: &Value) -> Result<Value> {
         }
         UnaryOp::Neg => match val {
             Value::Integer(n) => Ok(Value::Integer(-n)),
+            Value::Float(n) => Ok(Value::Float(-n)),
             Value::Null => Ok(Value::Null),
             _ => Err(MuroError::Execution(
                 "Cannot negate non-numeric value".into(),
@@ -280,6 +283,30 @@ fn eval_arithmetic(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
     }
+    if let (Some(a), Some(b)) = (left.as_f64(), right.as_f64()) {
+        if matches!(left, Value::Float(_)) || matches!(right, Value::Float(_)) {
+            let result = match op {
+                BinaryOp::Add => a + b,
+                BinaryOp::Sub => a - b,
+                BinaryOp::Mul => a * b,
+                BinaryOp::Div => {
+                    if b == 0.0 {
+                        return Err(MuroError::Execution("Division by zero".into()));
+                    }
+                    a / b
+                }
+                BinaryOp::Mod => {
+                    if b == 0.0 {
+                        return Err(MuroError::Execution("Division by zero".into()));
+                    }
+                    a % b
+                }
+                _ => unreachable!(),
+            };
+            return Ok(Value::Float(result));
+        }
+    }
+
     match (left, right) {
         (Value::Integer(a), Value::Integer(b)) => {
             let result = match op {
@@ -692,6 +719,7 @@ fn eval_function_call(
             }
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n.abs())),
+                Value::Float(n) => Ok(Value::Float(n.abs())),
                 _ => Err(MuroError::Execution("ABS requires numeric argument".into())),
             }
         }
@@ -704,6 +732,7 @@ fn eval_function_call(
             // Integer type: CEIL is identity
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n)),
+                Value::Float(n) => Ok(Value::Float(n.ceil())),
                 _ => Err(MuroError::Execution(
                     "CEIL requires numeric argument".into(),
                 )),
@@ -717,6 +746,7 @@ fn eval_function_call(
             }
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n)),
+                Value::Float(n) => Ok(Value::Float(n.floor())),
                 _ => Err(MuroError::Execution(
                     "FLOOR requires numeric argument".into(),
                 )),
@@ -735,6 +765,17 @@ fn eval_function_call(
             // Integer-only: ROUND is identity
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n)),
+                Value::Float(n) => {
+                    let scale = if args.len() == 2 {
+                        eval_expr(&args[1], columns)?.as_i64().ok_or_else(|| {
+                            MuroError::Execution("ROUND scale must be integer".into())
+                        })?
+                    } else {
+                        0
+                    };
+                    let factor = 10f64.powi(scale as i32);
+                    Ok(Value::Float((n * factor).round() / factor))
+                }
                 _ => Err(MuroError::Execution(
                     "ROUND requires numeric argument".into(),
                 )),
@@ -754,8 +795,16 @@ fn eval_function_call(
                     }
                     Ok(Value::Integer(a % b))
                 }
+                (a, b) if a.as_f64().is_some() && b.as_f64().is_some() => {
+                    let a = a.as_f64().unwrap();
+                    let b = b.as_f64().unwrap();
+                    if b == 0.0 {
+                        return Err(MuroError::Execution("Division by zero".into()));
+                    }
+                    Ok(Value::Float(a % b))
+                }
                 _ => Err(MuroError::Execution(
-                    "MOD requires integer arguments".into(),
+                    "MOD requires numeric arguments".into(),
                 )),
             }
         }
@@ -778,8 +827,11 @@ fn eval_function_call(
                         Ok(Value::Integer(result))
                     }
                 }
+                (base, exp) if base.as_f64().is_some() && exp.as_f64().is_some() => Ok(
+                    Value::Float(base.as_f64().unwrap().powf(exp.as_f64().unwrap())),
+                ),
                 _ => Err(MuroError::Execution(
-                    "POWER requires integer arguments".into(),
+                    "POWER requires numeric arguments".into(),
                 )),
             }
         }
@@ -854,12 +906,32 @@ fn eval_case_when(
 }
 
 fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
+    const I64_UPPER_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0; // 2^63
+
+    fn float_to_i64_checked(n: f64) -> Result<i64> {
+        if !n.is_finite() {
+            return Err(MuroError::Execution(format!(
+                "Cannot cast non-finite float '{}' to integer",
+                n
+            )));
+        }
+        if !(I64_MIN_F64..I64_UPPER_EXCLUSIVE_F64).contains(&n) {
+            return Err(MuroError::Execution(format!(
+                "Float '{}' out of range for integer cast",
+                n
+            )));
+        }
+        Ok(n as i64)
+    }
+
     if val.is_null() {
         return Ok(Value::Null);
     }
     match target_type {
         DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => match val {
             Value::Integer(n) => Ok(Value::Integer(*n)),
+            Value::Float(n) => Ok(Value::Integer(float_to_i64_checked(*n)?)),
             Value::Varchar(s) => {
                 let n: i64 = s
                     .trim()
@@ -869,6 +941,21 @@ fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
             }
             _ => Err(MuroError::Execution(format!(
                 "Cannot cast {:?} to integer",
+                val
+            ))),
+        },
+        DataType::Float | DataType::Double => match val {
+            Value::Integer(n) => Ok(Value::Float(*n as f64)),
+            Value::Float(n) => Ok(Value::Float(*n)),
+            Value::Varchar(s) => {
+                let n: f64 = s
+                    .trim()
+                    .parse()
+                    .map_err(|_| MuroError::Execution(format!("Cannot cast '{}' to float", s)))?;
+                Ok(Value::Float(n))
+            }
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to float",
                 val
             ))),
         },
@@ -928,8 +1015,40 @@ fn like_match_inner(s: &[char], p: &[char]) -> bool {
 }
 
 fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+        if f.is_nan() {
+            return None;
+        }
+        if f >= i64::MAX as f64 {
+            return Some(std::cmp::Ordering::Less);
+        }
+        if f < i64::MIN as f64 {
+            return Some(std::cmp::Ordering::Greater);
+        }
+
+        let t = f.trunc() as i64;
+        if i < t {
+            return Some(std::cmp::Ordering::Less);
+        }
+        if i > t {
+            return Some(std::cmp::Ordering::Greater);
+        }
+
+        let frac = f.fract();
+        if frac > 0.0 {
+            Some(std::cmp::Ordering::Less)
+        } else if frac < 0.0 {
+            Some(std::cmp::Ordering::Greater)
+        } else {
+            Some(std::cmp::Ordering::Equal)
+        }
+    }
+
     match (a, b) {
         (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        (Value::Integer(a), Value::Float(b)) => cmp_i64_f64(*a, *b),
+        (Value::Float(a), Value::Integer(b)) => cmp_i64_f64(*b, *a).map(|o| o.reverse()),
         (Value::Varchar(a), Value::Varchar(b)) => Some(a.cmp(b)),
         (Value::Varbinary(a), Value::Varbinary(b)) => Some(a.cmp(b)),
         _ => None,
@@ -939,6 +1058,7 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 pub fn is_truthy(val: &Value) -> bool {
     match val {
         Value::Integer(n) => *n != 0,
+        Value::Float(n) => *n != 0.0,
         Value::Varchar(s) => !s.is_empty(),
         Value::Varbinary(b) => !b.is_empty(),
         Value::Null => false,
@@ -984,6 +1104,30 @@ mod tests {
             right: Box::new(Expr::IntLiteral(10)),
         };
         assert_eq!(eval_expr(&expr, &lookup).unwrap(), Value::Integer(0));
+    }
+
+    #[test]
+    fn test_cast_non_finite_float_to_integer_is_error() {
+        let err = eval_cast(&Value::Float(f64::NAN), &DataType::BigInt).unwrap_err();
+        assert!(format!("{err}").contains("non-finite"));
+    }
+
+    #[test]
+    fn test_cast_out_of_range_float_to_integer_is_error() {
+        let err = eval_cast(
+            &Value::Float(9_223_372_036_854_775_808.0),
+            &DataType::BigInt,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("out of range"));
+    }
+
+    #[test]
+    fn test_value_cmp_large_int_vs_float_not_equal() {
+        let i = Value::Integer(9_007_199_254_740_993);
+        let f = Value::Float(9_007_199_254_740_992.0);
+        assert_eq!(value_cmp(&i, &f), Some(std::cmp::Ordering::Greater));
+        assert_eq!(value_cmp(&f, &i), Some(std::cmp::Ordering::Less));
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub struct ColumnDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DefaultValue {
     Integer(i64),
+    Float(f64),
     String(String),
     Null,
 }
@@ -93,6 +94,8 @@ impl ColumnDef {
             DataType::SmallInt => 5,
             DataType::Int => 6,
             DataType::Text => 7,
+            DataType::Float => 8,
+            DataType::Double => 9,
         });
         // flags
         let mut flags: u8 = 0;
@@ -125,6 +128,10 @@ impl ColumnDef {
             Some(DefaultValue::Null) => buf.push(1),
             Some(DefaultValue::Integer(n)) => {
                 buf.push(2);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            Some(DefaultValue::Float(n)) => {
+                buf.push(4);
                 buf.extend_from_slice(&n.to_le_bytes());
             }
             Some(DefaultValue::String(s)) => {
@@ -196,6 +203,8 @@ impl ColumnDef {
             5 => DataType::SmallInt,
             6 => DataType::Int,
             7 => DataType::Text,
+            8 => DataType::Float,
+            9 => DataType::Double,
             _ => return None,
         };
 
@@ -229,6 +238,14 @@ impl ColumnDef {
                     let s = String::from_utf8(data[consumed..consumed + slen].to_vec()).ok()?;
                     consumed += slen;
                     Some(DefaultValue::String(s))
+                }
+                4 => {
+                    if data.len() < consumed + 8 {
+                        return None;
+                    }
+                    let n = f64::from_le_bytes(data[consumed..consumed + 8].try_into().unwrap());
+                    consumed += 8;
+                    Some(DefaultValue::Float(n))
                 }
                 _ => return None,
             }
@@ -301,6 +318,8 @@ mod tests {
             DataType::SmallInt,
             DataType::Int,
             DataType::BigInt,
+            DataType::Float,
+            DataType::Double,
             DataType::Varchar(None),
             DataType::Varchar(Some(100)),
             DataType::Varbinary(None),

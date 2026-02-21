@@ -102,6 +102,8 @@ pub enum Token {
     SmallIntType,  // "SMALLINT"
     IntType,       // "INT" / "INTEGER"
     BigIntType,    // "BIGINT"
+    FloatType,     // "FLOAT"
+    DoubleType,    // "DOUBLE"
     VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
     TextType,      // "TEXT"
@@ -112,6 +114,7 @@ pub enum Token {
 
     // Literals
     Integer(i64),
+    Float(f64),
     StringLit(String),
 
     // Identifiers
@@ -236,6 +239,34 @@ fn lex_string_literal(input: &str) -> IResult<&str, Token> {
 }
 
 fn lex_number(input: &str) -> IResult<&str, Token> {
+    let mut int_end = 0usize;
+    for c in input.chars() {
+        if c.is_ascii_digit() {
+            int_end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    if int_end > 0 && input[int_end..].starts_with('.') {
+        let frac_start = int_end + 1;
+        let mut frac_end = frac_start;
+        for c in input[frac_start..].chars() {
+            if c.is_ascii_digit() {
+                frac_end += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if frac_end > frac_start {
+            let float_text = &input[..frac_end];
+            let num: f64 = float_text.parse().map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Float))
+            })?;
+            return Ok((&input[frac_end..], Token::Float(num)));
+        }
+    }
+
     let (input, digits) = digit1(input)?;
 
     let num: i64 = digits.parse().map_err(|_| {
@@ -362,6 +393,8 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "SMALLINT" => Token::SmallIntType,
         "INT" | "INTEGER" => Token::IntType,
         "BIGINT" => Token::BigIntType,
+        "FLOAT" => Token::FloatType,
+        "DOUBLE" => Token::DoubleType,
         "VARCHAR" => Token::VarcharType,
         "VARBINARY" => Token::VarbinaryType,
         "TEXT" => Token::TextType,

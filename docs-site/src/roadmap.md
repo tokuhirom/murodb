@@ -78,7 +78,7 @@ MySQL-compatible scalar functions.
 
 ## Phase 6 — Types & Storage
 
-- [ ] FLOAT / DOUBLE
+- [x] FLOAT / DOUBLE
 - [ ] DATE, DATETIME, TIMESTAMP
 - [ ] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
 - [ ] BLOB

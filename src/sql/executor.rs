@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::btree::key_encoding::{
-    encode_composite_key, encode_i16, encode_i32, encode_i64, encode_i8,
+    encode_composite_key, encode_f32, encode_f64, encode_i16, encode_i32, encode_i64, encode_i8,
 };
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
@@ -270,6 +270,7 @@ fn exec_create_table(
 fn ast_expr_to_default(expr: &Expr) -> Option<DefaultValue> {
     match expr {
         Expr::IntLiteral(n) => Some(DefaultValue::Integer(*n)),
+        Expr::FloatLiteral(n) => Some(DefaultValue::Float(*n)),
         Expr::StringLiteral(s) => Some(DefaultValue::String(s.clone())),
         Expr::Null => Some(DefaultValue::Null),
         _ => None,
@@ -280,6 +281,7 @@ fn ast_expr_to_default(expr: &Expr) -> Option<DefaultValue> {
 fn expr_to_string(expr: &Expr) -> String {
     match expr {
         Expr::IntLiteral(n) => n.to_string(),
+        Expr::FloatLiteral(n) => n.to_string(),
         Expr::StringLiteral(s) => format!("'{}'", s),
         Expr::Null => "NULL".to_string(),
         Expr::ColumnRef(name) => name.clone(),
@@ -1041,15 +1043,66 @@ fn update_column_def(col: &mut ColumnDef, spec: &ColumnSpec) {
 
 /// Coerce a value to a target data type.
 fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
+    const I64_UPPER_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0; // 2^63
+
+    fn float_to_i64_checked(n: f64) -> Result<i64> {
+        if !n.is_finite() {
+            return Err(MuroError::Execution(format!(
+                "Cannot convert non-finite float '{}' to integer",
+                n
+            )));
+        }
+        if !(I64_MIN_F64..I64_UPPER_EXCLUSIVE_F64).contains(&n) {
+            return Err(MuroError::Execution(format!(
+                "Float '{}' out of range for integer conversion",
+                n
+            )));
+        }
+        Ok(n as i64)
+    }
+
+    fn validate_float_for_target(n: f64, target_type: DataType) -> Result<f64> {
+        if !n.is_finite() {
+            return Err(MuroError::Execution(format!(
+                "Cannot convert non-finite float '{}' to {}",
+                n, target_type
+            )));
+        }
+        if target_type == DataType::Float && (n < f32::MIN as f64 || n > f32::MAX as f64) {
+            return Err(MuroError::Execution(format!(
+                "Float '{}' out of range for FLOAT",
+                n
+            )));
+        }
+        Ok(n)
+    }
+
     match value {
         Value::Null => Ok(Value::Null),
         Value::Integer(n) => match target_type {
             DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
                 Ok(Value::Integer(*n))
             }
+            DataType::Float | DataType::Double => Ok(Value::Float(validate_float_for_target(
+                *n as f64,
+                target_type,
+            )?)),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
             DataType::Varbinary(_) => Err(MuroError::Execution(
                 "Cannot coerce integer to VARBINARY".into(),
+            )),
+        },
+        Value::Float(n) => match target_type {
+            DataType::Float | DataType::Double => {
+                Ok(Value::Float(validate_float_for_target(*n, target_type)?))
+            }
+            DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
+                Ok(Value::Integer(float_to_i64_checked(*n)?))
+            }
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
+            DataType::Varbinary(_) => Err(MuroError::Execution(
+                "Cannot coerce floating-point value to VARBINARY".into(),
             )),
         },
         Value::Varchar(s) => match target_type {
@@ -1058,6 +1111,12 @@ fn coerce_value(value: &Value, target_type: DataType) -> Result<Value> {
                     MuroError::Execution(format!("Cannot convert '{}' to integer", s))
                 })?;
                 Ok(Value::Integer(n))
+            }
+            DataType::Float | DataType::Double => {
+                let n: f64 = s.parse().map_err(|_| {
+                    MuroError::Execution(format!("Cannot convert '{}' to float", s))
+                })?;
+                Ok(Value::Float(validate_float_for_target(n, target_type)?))
             }
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(s.clone())),
             DataType::Varbinary(_) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
@@ -1146,6 +1205,7 @@ fn exec_insert(
                 if let Some(default) = &col.default_value {
                     values[i] = match default {
                         DefaultValue::Integer(n) => Value::Integer(*n),
+                        DefaultValue::Float(n) => Value::Float(*n),
                         DefaultValue::String(s) => Value::Varchar(s.clone()),
                         DefaultValue::Null => Value::Null,
                     };
@@ -1172,6 +1232,13 @@ fn exec_insert(
                     "Column '{}' cannot be NULL",
                     col.name
                 )));
+            }
+        }
+
+        // Coerce values to declared column types before validation/serialization.
+        for (i, col) in table_def.columns.iter().enumerate() {
+            if !values[i].is_null() {
+                values[i] = coerce_value(&values[i], col.data_type)?;
             }
         }
 
@@ -1351,6 +1418,7 @@ fn exec_insert(
 fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::IntLiteral(*n),
+        Value::Float(n) => Expr::FloatLiteral(*n),
         Value::Varchar(s) => Expr::StringLiteral(s.clone()),
         Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
         Value::Null => Expr::Null,
@@ -2710,6 +2778,20 @@ fn exec_update(
             new_values[col_idx] = new_val;
         }
 
+        // Coerce values to declared column types before index update/serialization.
+        for (i, col) in table_def.columns.iter().enumerate() {
+            if !new_values[i].is_null() {
+                new_values[i] = coerce_value(&new_values[i], col.data_type)?;
+            }
+        }
+
+        // Validate all values against their column types
+        for (i, val) in new_values.iter().enumerate() {
+            if !val.is_null() {
+                validate_value(val, &table_def.columns[i].data_type)?;
+            }
+        }
+
         // Check unique constraints on new values
         check_unique_index_constraints(&table_def, &indexes, &new_values, pager)?;
 
@@ -2821,6 +2903,7 @@ fn exec_show_create_table(
         if let Some(default) = &col.default_value {
             match default {
                 DefaultValue::Integer(n) => sql.push_str(&format!(" DEFAULT {}", n)),
+                DefaultValue::Float(n) => sql.push_str(&format!(" DEFAULT {}", n)),
                 DefaultValue::String(s) => sql.push_str(&format!(" DEFAULT '{}'", s)),
                 DefaultValue::Null => sql.push_str(" DEFAULT NULL"),
             }
@@ -2875,6 +2958,7 @@ fn exec_describe(
         };
         let default_str = match &col.default_value {
             Some(DefaultValue::Integer(n)) => n.to_string(),
+            Some(DefaultValue::Float(n)) => n.to_string(),
             Some(DefaultValue::String(s)) => s.clone(),
             Some(DefaultValue::Null) => "NULL".to_string(),
             None => "NULL".to_string(),
@@ -2934,7 +3018,36 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::SmallInt => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
                 DataType::Int => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
                 DataType::BigInt => buf.extend_from_slice(&n.to_le_bytes()),
-                _ => buf.extend_from_slice(&n.to_le_bytes()),
+                DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
+                DataType::Double => buf.extend_from_slice(&(*n as f64).to_le_bytes()),
+                DataType::Varchar(_) | DataType::Text => {
+                    let bytes = n.to_string().as_bytes().to_vec();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&bytes);
+                }
+                DataType::Varbinary(_) => {
+                    let b = n.to_le_bytes();
+                    buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&b);
+                }
+            },
+            Value::Float(n) => match columns[i].data_type {
+                DataType::TinyInt => buf.extend_from_slice(&(*n as i8).to_le_bytes()),
+                DataType::SmallInt => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
+                DataType::Int => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
+                DataType::BigInt => buf.extend_from_slice(&(*n as i64).to_le_bytes()),
+                DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
+                DataType::Double => buf.extend_from_slice(&n.to_le_bytes()),
+                DataType::Varchar(_) | DataType::Text => {
+                    let bytes = n.to_string().as_bytes().to_vec();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&bytes);
+                }
+                DataType::Varbinary(_) => {
+                    let b = n.to_le_bytes();
+                    buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&b);
+                }
             },
             Value::Varchar(s) => {
                 let bytes = s.as_bytes();
@@ -3031,6 +3144,22 @@ pub fn deserialize_row_versioned(
                 values.push(Value::Integer(n));
                 offset += 8;
             }
+            DataType::Float => {
+                if offset + 4 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                values.push(Value::Float(n as f64));
+                offset += 4;
+            }
+            DataType::Double => {
+                if offset + 8 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let n = f64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                values.push(Value::Float(n));
+                offset += 8;
+            }
             DataType::Varchar(_) | DataType::Text => {
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
@@ -3067,6 +3196,7 @@ pub fn deserialize_row_versioned(
 fn default_value_for_column(col: &ColumnDef) -> Value {
     match &col.default_value {
         Some(DefaultValue::Integer(n)) => Value::Integer(*n),
+        Some(DefaultValue::Float(n)) => Value::Float(*n),
         Some(DefaultValue::String(s)) => Value::Varchar(s.clone()),
         Some(DefaultValue::Null) | None => Value::Null,
     }
@@ -3075,12 +3205,66 @@ fn default_value_for_column(col: &ColumnDef) -> Value {
 /// Encode a Value for use as a B-tree key.
 /// For integer types, the encoding width depends on the DataType.
 pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
+    const I64_UPPER_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0; // 2^63
+
+    fn float_as_integral_i64(n: f64) -> Option<i64> {
+        if !n.is_finite()
+            || n.fract() != 0.0
+            || !(I64_MIN_F64..I64_UPPER_EXCLUSIVE_F64).contains(&n)
+        {
+            None
+        } else {
+            Some(n as i64)
+        }
+    }
+
+    fn impossible_int_seek_key() -> Vec<u8> {
+        // Integer keys are fixed-width 1/2/4/8 bytes in this engine.
+        // A 9-byte key cannot match any integer key.
+        vec![0xff; 9]
+    }
+
     match (value, data_type) {
         (Value::Integer(n), DataType::TinyInt) => encode_i8(*n as i8).to_vec(),
         (Value::Integer(n), DataType::SmallInt) => encode_i16(*n as i16).to_vec(),
         (Value::Integer(n), DataType::Int) => encode_i32(*n as i32).to_vec(),
         (Value::Integer(n), DataType::BigInt) => encode_i64(*n).to_vec(),
+        (Value::Integer(n), DataType::Float) => encode_f32(*n as f32).to_vec(),
+        (Value::Integer(n), DataType::Double) => encode_f64(*n as f64).to_vec(),
         (Value::Integer(n), _) => encode_i64(*n).to_vec(),
+        (Value::Float(n), DataType::TinyInt) => {
+            float_as_integral_i64(*n).map_or_else(impossible_int_seek_key, |v| {
+                if (i8::MIN as i64..=i8::MAX as i64).contains(&v) {
+                    encode_i8(v as i8).to_vec()
+                } else {
+                    impossible_int_seek_key()
+                }
+            })
+        }
+        (Value::Float(n), DataType::SmallInt) => {
+            float_as_integral_i64(*n).map_or_else(impossible_int_seek_key, |v| {
+                if (i16::MIN as i64..=i16::MAX as i64).contains(&v) {
+                    encode_i16(v as i16).to_vec()
+                } else {
+                    impossible_int_seek_key()
+                }
+            })
+        }
+        (Value::Float(n), DataType::Int) => {
+            float_as_integral_i64(*n).map_or_else(impossible_int_seek_key, |v| {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&v) {
+                    encode_i32(v as i32).to_vec()
+                } else {
+                    impossible_int_seek_key()
+                }
+            })
+        }
+        (Value::Float(n), DataType::BigInt) => float_as_integral_i64(*n)
+            .map_or_else(impossible_int_seek_key, |v| encode_i64(v).to_vec()),
+        (Value::Float(n), DataType::Float) => encode_f32(*n as f32).to_vec(),
+        (Value::Float(n), DataType::Double) => encode_f64(*n).to_vec(),
+        (Value::Float(n), _) => encode_f64(*n).to_vec(),
         (Value::Varchar(s), _) => s.as_bytes().to_vec(),
         (Value::Varbinary(b), _) => b.clone(),
         (Value::Null, _) => Vec::new(),
@@ -3951,6 +4135,7 @@ fn value_to_fts_text(value: &Value) -> Option<String> {
         Value::Varchar(s) => Some(s.clone()),
         Value::Null => None,
         Value::Integer(n) => Some(n.to_string()),
+        Value::Float(n) => Some(n.to_string()),
         Value::Varbinary(_) => None,
     }
 }
@@ -3978,6 +4163,15 @@ fn validate_value(value: &Value, data_type: &DataType) -> Result<()> {
                 i32::MAX
             )))
         }
+        (Value::Float(n), DataType::Float) if !n.is_finite() => {
+            Err(MuroError::Execution("FLOAT must be a finite value".into()))
+        }
+        (Value::Float(n), DataType::Double) if !n.is_finite() => {
+            Err(MuroError::Execution("DOUBLE must be a finite value".into()))
+        }
+        (Value::Float(n), DataType::Float) if *n < f32::MIN as f64 || *n > f32::MAX as f64 => Err(
+            MuroError::Execution(format!("Value {} out of range for FLOAT", n)),
+        ),
         (Value::Varchar(s), DataType::Varchar(Some(max))) if s.len() as u32 > *max => {
             Err(MuroError::Execution(format!(
                 "String length {} exceeds VARCHAR({})",
@@ -4217,12 +4411,27 @@ fn expr_contains_aggregate(expr: &Expr) -> bool {
 
 /// Accumulator for aggregate functions.
 enum Accumulator {
-    Count { count: i64 },
-    CountDistinct { values: HashSet<ValueKey> },
-    Sum { total: Option<i64> },
-    Min { val: Option<Value> },
-    Max { val: Option<Value> },
-    Avg { sum: i64, count: i64 },
+    Count {
+        count: i64,
+    },
+    CountDistinct {
+        values: HashSet<ValueKey>,
+    },
+    Sum {
+        total: Option<Value>,
+    },
+    Min {
+        val: Option<Value>,
+    },
+    Max {
+        val: Option<Value>,
+    },
+    Avg {
+        int_sum: i128,
+        float_sum: f64,
+        count: i64,
+        has_float: bool,
+    },
 }
 
 impl Accumulator {
@@ -4235,7 +4444,12 @@ impl Accumulator {
             "SUM" => Accumulator::Sum { total: None },
             "MIN" => Accumulator::Min { val: None },
             "MAX" => Accumulator::Max { val: None },
-            "AVG" => Accumulator::Avg { sum: 0, count: 0 },
+            "AVG" => Accumulator::Avg {
+                int_sum: 0,
+                float_sum: 0.0,
+                count: 0,
+                has_float: false,
+            },
             _ => Accumulator::Count { count: 0 },
         }
     }
@@ -4253,12 +4467,25 @@ impl Accumulator {
                     values.insert(ValueKey(val.clone()));
                 }
             }
-            Accumulator::Sum { total } => {
-                if let Value::Integer(n) = val {
-                    *total = Some(total.unwrap_or(0) + n);
+            Accumulator::Sum { total } => match val {
+                Value::Integer(n) => {
+                    *total = Some(match total.take() {
+                        None => Value::Integer(*n),
+                        Some(Value::Integer(cur)) => Value::Integer(cur + *n),
+                        Some(Value::Float(cur)) => Value::Float(cur + (*n as f64)),
+                        Some(other) => other,
+                    });
                 }
-                // Skip NULLs and non-integer values
-            }
+                Value::Float(n) => {
+                    *total = Some(match total.take() {
+                        None => Value::Float(*n),
+                        Some(Value::Integer(cur)) => Value::Float((cur as f64) + *n),
+                        Some(Value::Float(cur)) => Value::Float(cur + *n),
+                        Some(other) => other,
+                    });
+                }
+                _ => {}
+            },
             Accumulator::Min { val: current } => {
                 if val.is_null() {
                     return;
@@ -4285,12 +4512,24 @@ impl Accumulator {
                     }
                 }
             }
-            Accumulator::Avg { sum, count } => {
-                if let Value::Integer(n) = val {
-                    *sum += n;
+            Accumulator::Avg {
+                int_sum,
+                float_sum,
+                count,
+                has_float,
+            } => match val {
+                Value::Integer(n) => {
+                    *int_sum += *n as i128;
+                    *float_sum += *n as f64;
                     *count += 1;
                 }
-            }
+                Value::Float(n) => {
+                    *float_sum += *n;
+                    *count += 1;
+                    *has_float = true;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -4304,17 +4543,22 @@ impl Accumulator {
         match self {
             Accumulator::Count { count } => Value::Integer(*count),
             Accumulator::CountDistinct { values } => Value::Integer(values.len() as i64),
-            Accumulator::Sum { total } => match total {
-                Some(n) => Value::Integer(*n),
-                None => Value::Null,
-            },
+            Accumulator::Sum { total } => total.clone().unwrap_or(Value::Null),
             Accumulator::Min { val } => val.clone().unwrap_or(Value::Null),
             Accumulator::Max { val } => val.clone().unwrap_or(Value::Null),
-            Accumulator::Avg { sum, count } => {
+            Accumulator::Avg {
+                int_sum,
+                float_sum,
+                count,
+                has_float,
+            } => {
                 if *count == 0 {
                     Value::Null
+                } else if *has_float {
+                    Value::Float(*float_sum / (*count as f64))
                 } else {
-                    Value::Integer(*sum / *count)
+                    let avg = *int_sum / (*count as i128);
+                    Value::Integer(avg as i64)
                 }
             }
         }
@@ -4441,6 +4685,7 @@ fn substitute_aggregates(expr: &Expr, aggs: &[AggregateInfo], agg_values: &[Valu
             if let Some(idx) = find_aggregate_index(aggs, name, arg, *distinct) {
                 match &agg_values[idx] {
                     Value::Integer(n) => Expr::IntLiteral(*n),
+                    Value::Float(n) => Expr::FloatLiteral(*n),
                     Value::Varchar(s) => Expr::StringLiteral(s.clone()),
                     Value::Null => Expr::Null,
                     Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
@@ -4739,8 +4984,42 @@ fn execute_aggregation_join(
 }
 
 fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
+    fn cmp_i64_f64(i: i64, f: f64) -> std::cmp::Ordering {
+        if f.is_nan() {
+            return std::cmp::Ordering::Equal;
+        }
+        if f >= i64::MAX as f64 {
+            return std::cmp::Ordering::Less;
+        }
+        if f < i64::MIN as f64 {
+            return std::cmp::Ordering::Greater;
+        }
+
+        let t = f.trunc() as i64;
+        if i < t {
+            return std::cmp::Ordering::Less;
+        }
+        if i > t {
+            return std::cmp::Ordering::Greater;
+        }
+
+        let frac = f.fract();
+        if frac > 0.0 {
+            std::cmp::Ordering::Less
+        } else if frac < 0.0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+
     match (a, b) {
         (Some(Value::Integer(a)), Some(Value::Integer(b))) => a.cmp(b),
+        (Some(Value::Float(a)), Some(Value::Float(b))) => {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Some(Value::Integer(a)), Some(Value::Float(b))) => cmp_i64_f64(*a, *b),
+        (Some(Value::Float(a)), Some(Value::Integer(b))) => cmp_i64_f64(*b, *a).reverse(),
         (Some(Value::Varchar(a)), Some(Value::Varchar(b))) => a.cmp(b),
         (Some(Value::Null), _) | (None, _) => std::cmp::Ordering::Less,
         (_, Some(Value::Null)) | (_, None) => std::cmp::Ordering::Greater,
@@ -4799,6 +5078,14 @@ mod tests {
         } else {
             panic!("Expected rows");
         }
+    }
+
+    #[test]
+    fn test_cmp_values_large_int_vs_float_ordering() {
+        let i = Value::Integer(9_007_199_254_740_993);
+        let f = Value::Float(9_007_199_254_740_992.0);
+        assert_eq!(cmp_values(Some(&i), Some(&f)), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_values(Some(&f), Some(&i)), std::cmp::Ordering::Less);
     }
 
     #[test]

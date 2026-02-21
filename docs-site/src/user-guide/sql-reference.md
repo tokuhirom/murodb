@@ -518,7 +518,7 @@ SELECT CAST(42 AS VARCHAR);    -- '42'
 SELECT CAST(val AS BIGINT) FROM t;
 ```
 
-Supported target types: TINYINT, SMALLINT, INT, BIGINT, VARCHAR, TEXT, VARBINARY.
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, VARCHAR, TEXT, VARBINARY.
 
 ## Aggregation & GROUP BY
 
@@ -529,7 +529,7 @@ SELECT COUNT(*) FROM t;              -- count all rows
 SELECT COUNT(col) FROM t;            -- count non-NULL values
 SELECT COUNT(DISTINCT col) FROM t;   -- count distinct non-NULL values
 SELECT SUM(amount) FROM orders;      -- sum (skips NULLs)
-SELECT AVG(amount) FROM orders;      -- average (integer division, skips NULLs)
+SELECT AVG(amount) FROM orders;      -- average (integer for integer inputs, float otherwise)
 SELECT MIN(amount) FROM orders;      -- minimum (skips NULLs)
 SELECT MAX(amount) FROM orders;      -- maximum (skips NULLs)
 ```

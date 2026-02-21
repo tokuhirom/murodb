@@ -54,6 +54,10 @@ crypto/ (AES-256-GCM-SIV, Argon2 KDF, HMAC-SHA256)
 | `fts/` | tokenizer.rs, postings.rs, index.rs, query.rs, scoring.rs, snippet.rs | 全文検索 |
 | `concurrency/` | mod.rs | 並行性制御 |
 
+## Git Workflow
+
+main ブランチに直接コミットしないこと。必ずフィーチャーブランチを作成し、PR 経由でマージする。
+
 ## Pre-commit Review Rule
 
 コミット前に必ず、DB/SQL専門家のsubagent (subagent_type=general-purpose) を起動してレビューを実施すること。

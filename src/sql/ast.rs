@@ -179,6 +179,19 @@ pub enum Expr {
         post_tag: String,
         context_chars: usize,
     },
+    FunctionCall {
+        name: String,
+        args: Vec<Expr>,
+    },
+    CaseWhen {
+        operand: Option<Box<Expr>>,
+        when_clauses: Vec<(Expr, Expr)>,
+        else_clause: Option<Box<Expr>>,
+    },
+    Cast {
+        expr: Box<Expr>,
+        target_type: DataType,
+    },
     /// Comparison result: expr > 0 (used as a where clause)
     GreaterThanZero(Box<Expr>),
 }

@@ -1,7 +1,7 @@
 /// Expression evaluator for WHERE clauses.
 use crate::error::{MuroError, Result};
 use crate::sql::ast::{BinaryOp, Expr, UnaryOp};
-use crate::types::Value;
+use crate::types::{DataType, Value};
 
 /// Evaluate an expression given a row's column values.
 /// `columns` maps column name -> Value.
@@ -99,6 +99,19 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
             let is_null = val.is_null();
             let result = if *negated { !is_null } else { is_null };
             Ok(Value::Integer(if result { 1 } else { 0 }))
+        }
+
+        Expr::FunctionCall { name, args } => eval_function_call(name, args, columns),
+
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => eval_case_when(operand, when_clauses, else_clause, columns),
+
+        Expr::Cast { expr, target_type } => {
+            let val = eval_expr(expr, columns)?;
+            eval_cast(&val, target_type)
         }
 
         Expr::MatchAgainst { .. } => {
@@ -272,6 +285,576 @@ fn eval_arithmetic(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
         _ => Err(MuroError::Execution(
             "Arithmetic operations require integer operands".into(),
         )),
+    }
+}
+
+fn eval_function_call(
+    name: &str,
+    args: &[Expr],
+    columns: &dyn Fn(&str) -> Option<Value>,
+) -> Result<Value> {
+    match name {
+        // NULL handling & conditional (these have special NULL semantics)
+        "COALESCE" => {
+            for arg in args {
+                let val = eval_expr(arg, columns)?;
+                if !val.is_null() {
+                    return Ok(val);
+                }
+            }
+            Ok(Value::Null)
+        }
+        "IFNULL" => {
+            check_args(name, args, 2)?;
+            let a = eval_expr(&args[0], columns)?;
+            if !a.is_null() {
+                Ok(a)
+            } else {
+                eval_expr(&args[1], columns)
+            }
+        }
+        "NULLIF" => {
+            check_args(name, args, 2)?;
+            let a = eval_expr(&args[0], columns)?;
+            let b = eval_expr(&args[1], columns)?;
+            if !a.is_null() && !b.is_null() && value_cmp(&a, &b) == Some(std::cmp::Ordering::Equal)
+            {
+                Ok(Value::Null)
+            } else {
+                Ok(a)
+            }
+        }
+        "IF" => {
+            check_args(name, args, 3)?;
+            let cond = eval_expr(&args[0], columns)?;
+            if is_truthy(&cond) {
+                eval_expr(&args[1], columns)
+            } else {
+                eval_expr(&args[2], columns)
+            }
+        }
+
+        // String functions (basic)
+        "LENGTH" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            match &val {
+                Value::Varchar(s) => Ok(Value::Integer(s.len() as i64)),
+                Value::Varbinary(b) => Ok(Value::Integer(b.len() as i64)),
+                _ => Ok(Value::Null),
+            }
+        }
+        "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            match &val {
+                Value::Varchar(s) => Ok(Value::Integer(s.chars().count() as i64)),
+                _ => Ok(Value::Null),
+            }
+        }
+        "CONCAT" => {
+            if args.is_empty() {
+                return Err(MuroError::Execution(
+                    "CONCAT requires at least 1 argument".into(),
+                ));
+            }
+            let mut result = String::new();
+            for arg in args {
+                let val = eval_expr(arg, columns)?;
+                if val.is_null() {
+                    return Ok(Value::Null);
+                }
+                result.push_str(&val.to_string());
+            }
+            Ok(Value::Varchar(result))
+        }
+        "SUBSTRING" | "SUBSTR" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(MuroError::Execution(format!(
+                    "{} requires 2 or 3 arguments",
+                    name
+                )));
+            }
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let pos = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("SUBSTRING pos must be integer".into()))?;
+            let chars: Vec<char> = s.chars().collect();
+            // MySQL 1-based, pos can be negative
+            let start = if pos > 0 {
+                (pos - 1) as usize
+            } else if pos < 0 {
+                let from_end = (-pos) as usize;
+                if from_end > chars.len() {
+                    0
+                } else {
+                    chars.len() - from_end
+                }
+            } else {
+                return Ok(Value::Varchar(String::new()));
+            };
+            if start >= chars.len() {
+                return Ok(Value::Varchar(String::new()));
+            }
+            let len = if args.len() == 3 {
+                vals[2]
+                    .as_i64()
+                    .ok_or_else(|| MuroError::Execution("SUBSTRING len must be integer".into()))?;
+                let l = vals[2].as_i64().unwrap();
+                if l < 0 {
+                    return Ok(Value::Varchar(String::new()));
+                }
+                l as usize
+            } else {
+                chars.len() - start
+            };
+            let end = (start + len).min(chars.len());
+            Ok(Value::Varchar(chars[start..end].iter().collect()))
+        }
+        "UPPER" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().to_uppercase()))
+        }
+        "LOWER" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().to_lowercase()))
+        }
+
+        // String functions (extended)
+        "TRIM" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().trim().to_string()))
+        }
+        "LTRIM" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().trim_start().to_string()))
+        }
+        "RTRIM" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().trim_end().to_string()))
+        }
+        "REPLACE" => {
+            check_args(name, args, 3)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let from = vals[1].to_string();
+            let to = vals[2].to_string();
+            Ok(Value::Varchar(s.replace(&from, &to)))
+        }
+        "REVERSE" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Varchar(val.to_string().chars().rev().collect()))
+        }
+        "REPEAT" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let n = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("REPEAT count must be integer".into()))?;
+            if n < 0 {
+                return Ok(Value::Varchar(String::new()));
+            }
+            Ok(Value::Varchar(s.repeat(n as usize)))
+        }
+        "LEFT" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let n = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("LEFT count must be integer".into()))?;
+            if n < 0 {
+                return Ok(Value::Varchar(String::new()));
+            }
+            Ok(Value::Varchar(s.chars().take(n as usize).collect()))
+        }
+        "RIGHT" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let n = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("RIGHT count must be integer".into()))?;
+            if n < 0 {
+                return Ok(Value::Varchar(String::new()));
+            }
+            let chars: Vec<char> = s.chars().collect();
+            let skip = chars.len().saturating_sub(n as usize);
+            Ok(Value::Varchar(chars[skip..].iter().collect()))
+        }
+        "LPAD" => {
+            check_args(name, args, 3)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let len = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("LPAD len must be integer".into()))?
+                as usize;
+            let pad = vals[2].to_string();
+            if s.chars().count() >= len {
+                Ok(Value::Varchar(s.chars().take(len).collect()))
+            } else if pad.is_empty() {
+                Ok(Value::Varchar(s))
+            } else {
+                let need = len - s.chars().count();
+                let pad_chars: Vec<char> = pad.chars().collect();
+                let mut prefix = String::new();
+                for i in 0..need {
+                    prefix.push(pad_chars[i % pad_chars.len()]);
+                }
+                prefix.push_str(&s);
+                Ok(Value::Varchar(prefix))
+            }
+        }
+        "RPAD" => {
+            check_args(name, args, 3)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let len = vals[1]
+                .as_i64()
+                .ok_or_else(|| MuroError::Execution("RPAD len must be integer".into()))?
+                as usize;
+            let pad = vals[2].to_string();
+            if s.chars().count() >= len {
+                Ok(Value::Varchar(s.chars().take(len).collect()))
+            } else if pad.is_empty() {
+                Ok(Value::Varchar(s))
+            } else {
+                let need = len - s.chars().count();
+                let pad_chars: Vec<char> = pad.chars().collect();
+                let mut result = s;
+                for i in 0..need {
+                    result.push(pad_chars[i % pad_chars.len()]);
+                }
+                Ok(Value::Varchar(result))
+            }
+        }
+        "INSTR" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let sub = vals[1].to_string();
+            match s.find(&sub) {
+                Some(byte_pos) => {
+                    let char_pos = s[..byte_pos].chars().count() + 1; // 1-based
+                    Ok(Value::Integer(char_pos as i64))
+                }
+                None => Ok(Value::Integer(0)),
+            }
+        }
+        "LOCATE" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(MuroError::Execution(
+                    "LOCATE requires 2 or 3 arguments".into(),
+                ));
+            }
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let sub = vals[0].to_string();
+            let s = vals[1].to_string();
+            let start_pos = if args.len() == 3 {
+                vals[2]
+                    .as_i64()
+                    .ok_or_else(|| MuroError::Execution("LOCATE pos must be integer".into()))?
+                    as usize
+            } else {
+                1
+            };
+            // Convert char position to byte position for searching
+            let chars: Vec<char> = s.chars().collect();
+            if start_pos < 1 || start_pos > chars.len() + 1 {
+                return Ok(Value::Integer(0));
+            }
+            let byte_offset: usize = chars[..start_pos - 1].iter().map(|c| c.len_utf8()).sum();
+            match s[byte_offset..].find(&sub) {
+                Some(byte_pos) => {
+                    let char_pos = s[..byte_offset + byte_pos].chars().count() + 1;
+                    Ok(Value::Integer(char_pos as i64))
+                }
+                None => Ok(Value::Integer(0)),
+            }
+        }
+
+        // REGEXP
+        "REGEXP" | "REGEXP_LIKE" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let s = vals[0].to_string();
+            let pattern = vals[1].to_string();
+            let re = regex::Regex::new(&pattern)
+                .map_err(|e| MuroError::Execution(format!("Invalid regex: {}", e)))?;
+            Ok(Value::Integer(if re.is_match(&s) { 1 } else { 0 }))
+        }
+
+        // Numeric functions
+        "ABS" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            match val {
+                Value::Integer(n) => Ok(Value::Integer(n.abs())),
+                _ => Err(MuroError::Execution("ABS requires numeric argument".into())),
+            }
+        }
+        "CEIL" | "CEILING" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            // Integer type: CEIL is identity
+            match val {
+                Value::Integer(n) => Ok(Value::Integer(n)),
+                _ => Err(MuroError::Execution(
+                    "CEIL requires numeric argument".into(),
+                )),
+            }
+        }
+        "FLOOR" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            match val {
+                Value::Integer(n) => Ok(Value::Integer(n)),
+                _ => Err(MuroError::Execution(
+                    "FLOOR requires numeric argument".into(),
+                )),
+            }
+        }
+        "ROUND" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(MuroError::Execution(
+                    "ROUND requires 1 or 2 arguments".into(),
+                ));
+            }
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            // Integer-only: ROUND is identity
+            match val {
+                Value::Integer(n) => Ok(Value::Integer(n)),
+                _ => Err(MuroError::Execution(
+                    "ROUND requires numeric argument".into(),
+                )),
+            }
+        }
+        "MOD" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            match (&vals[0], &vals[1]) {
+                (Value::Integer(a), Value::Integer(b)) => {
+                    if *b == 0 {
+                        return Err(MuroError::Execution("Division by zero".into()));
+                    }
+                    Ok(Value::Integer(a % b))
+                }
+                _ => Err(MuroError::Execution(
+                    "MOD requires integer arguments".into(),
+                )),
+            }
+        }
+        "POWER" | "POW" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            match (&vals[0], &vals[1]) {
+                (Value::Integer(base), Value::Integer(exp)) => {
+                    if *exp < 0 {
+                        // Integer power with negative exponent → 0 (truncation)
+                        Ok(Value::Integer(0))
+                    } else {
+                        let result = base.checked_pow(*exp as u32).ok_or_else(|| {
+                            MuroError::Execution("Integer overflow in POWER".into())
+                        })?;
+                        Ok(Value::Integer(result))
+                    }
+                }
+                _ => Err(MuroError::Execution(
+                    "POWER requires integer arguments".into(),
+                )),
+            }
+        }
+
+        _ => Err(MuroError::Execution(format!("Unknown function: {}", name))),
+    }
+}
+
+fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<()> {
+    if args.len() != expected {
+        Err(MuroError::Execution(format!(
+            "{} requires {} argument(s), got {}",
+            name,
+            expected,
+            args.len()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Evaluate all args and return None if any is NULL.
+fn eval_args_null_check(
+    args: &[Expr],
+    columns: &dyn Fn(&str) -> Option<Value>,
+) -> Result<Option<Vec<Value>>> {
+    let mut vals = Vec::with_capacity(args.len());
+    for arg in args {
+        let val = eval_expr(arg, columns)?;
+        if val.is_null() {
+            return Ok(None);
+        }
+        vals.push(val);
+    }
+    Ok(Some(vals))
+}
+
+fn eval_case_when(
+    operand: &Option<Box<Expr>>,
+    when_clauses: &[(Expr, Expr)],
+    else_clause: &Option<Box<Expr>>,
+    columns: &dyn Fn(&str) -> Option<Value>,
+) -> Result<Value> {
+    match operand {
+        Some(op_expr) => {
+            // Simple CASE: CASE expr WHEN val THEN result ...
+            let op_val = eval_expr(op_expr, columns)?;
+            for (when_expr, then_expr) in when_clauses {
+                let when_val = eval_expr(when_expr, columns)?;
+                if !op_val.is_null()
+                    && !when_val.is_null()
+                    && value_cmp(&op_val, &when_val) == Some(std::cmp::Ordering::Equal)
+                {
+                    return eval_expr(then_expr, columns);
+                }
+            }
+        }
+        None => {
+            // Searched CASE: CASE WHEN condition THEN result ...
+            for (cond_expr, then_expr) in when_clauses {
+                let cond_val = eval_expr(cond_expr, columns)?;
+                if is_truthy(&cond_val) {
+                    return eval_expr(then_expr, columns);
+                }
+            }
+        }
+    }
+    match else_clause {
+        Some(else_expr) => eval_expr(else_expr, columns),
+        None => Ok(Value::Null),
+    }
+}
+
+fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
+    if val.is_null() {
+        return Ok(Value::Null);
+    }
+    match target_type {
+        DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => match val {
+            Value::Integer(n) => Ok(Value::Integer(*n)),
+            Value::Varchar(s) => {
+                let n: i64 = s
+                    .trim()
+                    .parse()
+                    .map_err(|_| MuroError::Execution(format!("Cannot cast '{}' to integer", s)))?;
+                Ok(Value::Integer(n))
+            }
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to integer",
+                val
+            ))),
+        },
+        DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(val.to_string())),
+        DataType::Varbinary(_) => match val {
+            Value::Varbinary(b) => Ok(Value::Varbinary(b.clone())),
+            Value::Varchar(s) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to varbinary",
+                val
+            ))),
+        },
     }
 }
 

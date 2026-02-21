@@ -848,6 +848,16 @@ impl Parser {
             return self.parse_between_rest(left, false);
         }
 
+        // REGEXP
+        if self.peek() == Some(&Token::Regexp) {
+            self.advance();
+            let pattern = self.parse_additive()?;
+            return Ok(Expr::FunctionCall {
+                name: "REGEXP".to_string(),
+                args: vec![left, pattern],
+            });
+        }
+
         let op = match self.peek() {
             Some(Token::Eq) => Some(BinaryOp::Eq),
             Some(Token::Ne) => Some(BinaryOp::Ne),
@@ -983,6 +993,8 @@ impl Parser {
             }
             Some(Token::Match) => self.parse_match_against(),
             Some(Token::FtsSnippet) => self.parse_fts_snippet(),
+            Some(Token::Case) => self.parse_case_when(),
+            Some(Token::Cast) => self.parse_cast(),
             Some(Token::LParen) => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -991,13 +1003,30 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                // Check for table.column qualified name
-                if self.peek() == Some(&Token::Dot) {
+                // Check for function call: ident followed by '('
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance(); // consume '('
+                    let mut args = Vec::new();
+                    if self.peek() != Some(&Token::RParen) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::FunctionCall {
+                        name: name.to_uppercase(),
+                        args,
+                    })
+                } else if self.peek() == Some(&Token::Dot) {
                     self.advance(); // consume '.'
                                     // After dot: could be Ident or Star
                     if self.peek() == Some(&Token::Star) {
                         self.advance();
-                        // table.* — encode as special ColumnRef
                         Ok(Expr::ColumnRef(format!("{}.*", name)))
                     } else {
                         let col = self.expect_ident()?;
@@ -1007,9 +1036,88 @@ impl Parser {
                     Ok(Expr::ColumnRef(name))
                 }
             }
+            // Handle keyword-named functions: IF, LEFT, RIGHT, etc.
+            Some(Token::If) | Some(Token::Left) | Some(Token::Right) => {
+                let name = match self.peek() {
+                    Some(Token::If) => "IF",
+                    Some(Token::Left) => "LEFT",
+                    Some(Token::Right) => "RIGHT",
+                    _ => unreachable!(),
+                };
+                // Only treat as function if followed by '('
+                if self.tokens.get(self.pos + 1) == Some(&Token::LParen) {
+                    let name = name.to_string();
+                    self.advance(); // consume keyword
+                    self.advance(); // consume '('
+                    let mut args = Vec::new();
+                    if self.peek() != Some(&Token::RParen) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::FunctionCall { name, args })
+                } else {
+                    Err(format!("Unexpected token in expression: {:?}", self.peek()))
+                }
+            }
             Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
             None => Err("Unexpected end of input in expression".into()),
         }
+    }
+
+    fn parse_case_when(&mut self) -> Result<Expr, String> {
+        self.advance(); // consume CASE
+
+        // Check for simple CASE (CASE expr WHEN val THEN ...) vs searched CASE (CASE WHEN cond THEN ...)
+        let operand = if self.peek() != Some(&Token::When) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+
+        let mut when_clauses = Vec::new();
+        while self.peek() == Some(&Token::When) {
+            self.advance(); // WHEN
+            let condition = self.parse_expr()?;
+            self.expect(&Token::Then)?;
+            let result = self.parse_expr()?;
+            when_clauses.push((condition, result));
+        }
+
+        let else_clause = if self.peek() == Some(&Token::Else) {
+            self.advance();
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+
+        self.expect(&Token::End)?;
+
+        Ok(Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        })
+    }
+
+    fn parse_cast(&mut self) -> Result<Expr, String> {
+        self.advance(); // consume CAST
+        self.expect(&Token::LParen)?;
+        let expr = self.parse_expr()?;
+        // expect AS keyword
+        self.expect(&Token::As)?;
+        let target_type = self.parse_data_type()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Cast {
+            expr: Box::new(expr),
+            target_type,
+        })
     }
 
     fn parse_match_against(&mut self) -> Result<Expr, String> {

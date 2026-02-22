@@ -4,6 +4,8 @@ use crate::types::DataType;
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
+    /// Optional collation name for textual columns.
+    pub collation: Option<String>,
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_nullable: bool,
@@ -30,6 +32,7 @@ impl ColumnDef {
         ColumnDef {
             name: name.to_string(),
             data_type,
+            collation: None,
             is_primary_key: false,
             is_unique: false,
             is_nullable: true,
@@ -76,9 +79,15 @@ impl ColumnDef {
         self
     }
 
+    pub fn with_collation(mut self, collation: &str) -> Self {
+        self.collation = Some(collation.to_string());
+        self
+    }
+
     /// Serialize column definition to bytes.
     /// Format: [name_len(u16)][name][type_byte][flags][optional_size(u32)]
     ///         [default_tag(u8)][default_data...][check_len(u16)][check_str...]
+    ///         [collation_len(u16)][collation...]
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         // name length + name
@@ -151,6 +160,15 @@ impl ColumnDef {
                 let expr_bytes = expr.as_bytes();
                 buf.extend_from_slice(&(expr_bytes.len() as u16).to_le_bytes());
                 buf.extend_from_slice(expr_bytes);
+            }
+        }
+        // collation (optional tail extension)
+        match &self.collation {
+            None => buf.extend_from_slice(&0u16.to_le_bytes()),
+            Some(name) => {
+                let b = name.as_bytes();
+                buf.extend_from_slice(&(b.len() as u16).to_le_bytes());
+                buf.extend_from_slice(b);
             }
         }
         buf
@@ -278,9 +296,29 @@ impl ColumnDef {
             None
         };
 
+        // collation (optional tail extension for backward compatibility)
+        let collation = if data.len() >= consumed + 2 {
+            let col_len =
+                u16::from_le_bytes(data[consumed..consumed + 2].try_into().unwrap()) as usize;
+            consumed += 2;
+            if col_len > 0 {
+                if data.len() < consumed + col_len {
+                    return None;
+                }
+                let s = String::from_utf8(data[consumed..consumed + col_len].to_vec()).ok()?;
+                consumed += col_len;
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let col = ColumnDef {
             name,
             data_type,
+            collation,
             is_primary_key: flags & 0x01 != 0,
             is_unique: flags & 0x02 != 0,
             is_nullable: flags & 0x04 != 0,
@@ -387,5 +425,13 @@ mod tests {
         let bytes = col.serialize();
         let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
         assert_eq!(col2.check_expr, Some("age > 0".into()));
+    }
+
+    #[test]
+    fn test_column_roundtrip_collation() {
+        let col = ColumnDef::new("name", DataType::Varchar(None)).with_collation("utf8mb4_bin");
+        let bytes = col.serialize();
+        let (col2, _) = ColumnDef::deserialize(&bytes).unwrap();
+        assert_eq!(col2.collation.as_deref(), Some("utf8mb4_bin"));
     }
 }

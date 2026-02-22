@@ -363,16 +363,19 @@ fn test_sql_fulltext_insert_keeps_index_reachable_after_root_splits() {
     );
 
     for id in 1..=128u64 {
-        let body = format!("t{:016x}", id);
+        let hashed = id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let body = format!("t{:016x}", hashed);
         let sql = format!("INSERT INTO docs VALUES ({}, '{}')", id, body);
         exec(&mut pager, &mut catalog, &sql);
     }
 
-    let rows = query_rows(
-        &mut pager,
-        &mut catalog,
-        "SELECT id FROM docs WHERE MATCH(body) AGAINST('t0000000000000001' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id",
+    let target = format!("t{:016x}", 1u64.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let sql = format!(
+        "SELECT id FROM docs WHERE MATCH(body) AGAINST('{}' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id",
+        target
     );
+
+    let rows = query_rows(&mut pager, &mut catalog, &sql);
     assert!(!rows.is_empty(), "expected at least one FTS hit");
     assert!(
         rows.iter().any(|r| r.get("id") == Some(&Value::Integer(1))),

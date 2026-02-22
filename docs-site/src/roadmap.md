@@ -162,6 +162,9 @@ MySQL-compatible scalar functions.
     - Extended WAL `MetaUpdate` to persist `epoch` alongside `catalog_root` / `page_count` / `freelist_page_id`.
     - WAL recovery now restores the latest committed `epoch` value into DB metadata.
     - Added backward-compatible decode defaults (`epoch=0`) for legacy WAL MetaUpdate records.
+  - Decision (2026-02-22):
+    - Deferred for now due to low immediate demand relative to implementation/operational complexity.
+    - Keep current work as groundwork and resume when concrete user or compliance requirements arise.
   - Done when:
     - Online/offline rotation flow is available with resumable progress.
     - WAL + data file epoch mismatch handling is crash-safe.

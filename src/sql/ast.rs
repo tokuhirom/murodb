@@ -79,6 +79,7 @@ pub struct CreateTable {
 pub struct ColumnSpec {
     pub name: String,
     pub data_type: DataType,
+    pub collation: Option<String>,
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_nullable: bool,

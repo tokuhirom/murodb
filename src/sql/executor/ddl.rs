@@ -472,18 +472,18 @@ pub(super) fn exec_analyze_table(
             let values =
                 deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
             for (idx_name, col_idx) in &numeric_targets {
-                if let Some(Value::Integer(n)) = values.get(*col_idx) {
+                if let Some(n) = values.get(*col_idx).and_then(value_as_i64_for_stats) {
                     numeric_bounds
                         .entry(idx_name.clone())
                         .and_modify(|(min_v, max_v)| {
-                            if *n < *min_v {
-                                *min_v = *n;
+                            if n < *min_v {
+                                *min_v = n;
                             }
-                            if *n > *max_v {
-                                *max_v = *n;
+                            if n > *max_v {
+                                *max_v = n;
                             }
                         })
-                        .or_insert((*n, *n));
+                        .or_insert((n, n));
                 }
             }
             Ok(true)
@@ -531,6 +531,16 @@ pub(super) fn exec_analyze_table(
     }
 
     Ok(ExecResult::Ok)
+}
+
+fn value_as_i64_for_stats(v: &Value) -> Option<i64> {
+    match v {
+        Value::Integer(n) => Some(*n),
+        Value::Date(n) => Some(*n as i64),
+        Value::DateTime(n) => Some(*n),
+        Value::Timestamp(n) => Some(*n),
+        _ => None,
+    }
 }
 
 pub(super) fn exec_drop_table(

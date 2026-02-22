@@ -401,6 +401,9 @@ fn estimate_numeric_range_rows(
 fn const_i64(expr: &Expr) -> Option<i64> {
     match eval_expr(expr, &|_| None).ok()? {
         crate::types::Value::Integer(n) => Some(n),
+        crate::types::Value::Date(n) => Some(n as i64),
+        crate::types::Value::DateTime(n) => Some(n),
+        crate::types::Value::Timestamp(n) => Some(n),
         _ => None,
     }
 }

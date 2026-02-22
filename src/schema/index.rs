@@ -178,27 +178,21 @@ impl IndexDef {
         };
 
         // numeric bounds stats (optional extension)
-        let stats_num_bounds_known = if data.len() > offset {
-            let b = data[offset];
+        // Backward-compatible decode:
+        // - old layout: [stats_distinct_keys][fts_stop_filter][fts_stop_df_ratio_ppm]
+        // - new layout: [stats_distinct_keys][num_known][num_min][num_max][fts...]
+        // So only parse numeric extension when there are enough bytes for all of it.
+        let mut stats_num_bounds_known = false;
+        let mut stats_num_min = 0i64;
+        let mut stats_num_max = 0i64;
+        if data.len().saturating_sub(offset) >= 17 {
+            stats_num_bounds_known = data[offset] != 0;
             offset += 1;
-            b != 0
-        } else {
-            false
-        };
-        let stats_num_min = if data.len() >= offset + 8 {
-            let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            stats_num_min = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
-            n
-        } else {
-            0
-        };
-        let stats_num_max = if data.len() >= offset + 8 {
-            let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            stats_num_max = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
-            n
-        } else {
-            0
-        };
+        }
 
         // FULLTEXT stop-ngram settings (optional extension)
         let fts_stop_filter = if data.len() > offset {
@@ -239,6 +233,37 @@ impl IndexDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serialize_old_layout(idx: &IndexDef) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let name_bytes = idx.name.as_bytes();
+        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+        let table_bytes = idx.table_name.as_bytes();
+        buf.extend_from_slice(&(table_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(table_bytes);
+        let first_col = idx.column_names.first().map(|s| s.as_str()).unwrap_or("");
+        let col_bytes = first_col.as_bytes();
+        buf.extend_from_slice(&(col_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(col_bytes);
+        buf.push(match idx.index_type {
+            IndexType::BTree => 1,
+            IndexType::Fulltext => 2,
+        });
+        buf.push(if idx.is_unique { 1 } else { 0 });
+        buf.extend_from_slice(&idx.btree_root.to_le_bytes());
+        let extra = idx.column_names.len().saturating_sub(1);
+        buf.extend_from_slice(&(extra as u16).to_le_bytes());
+        for col in idx.column_names.iter().skip(1) {
+            let cb = col.as_bytes();
+            buf.extend_from_slice(&(cb.len() as u16).to_le_bytes());
+            buf.extend_from_slice(cb);
+        }
+        buf.extend_from_slice(&idx.stats_distinct_keys.to_le_bytes());
+        buf.push(if idx.fts_stop_filter { 1 } else { 0 });
+        buf.extend_from_slice(&idx.fts_stop_df_ratio_ppm.to_le_bytes());
+        buf
+    }
 
     #[test]
     fn test_index_roundtrip() {
@@ -288,5 +313,31 @@ mod tests {
             idx2.column_names,
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
+    }
+
+    #[test]
+    fn test_deserialize_old_layout_keeps_fts_settings() {
+        let idx = IndexDef {
+            name: "fts_idx".to_string(),
+            table_name: "docs".to_string(),
+            column_names: vec!["body".to_string()],
+            index_type: IndexType::Fulltext,
+            is_unique: false,
+            btree_root: 88,
+            stats_distinct_keys: 123,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
+            fts_stop_filter: true,
+            fts_stop_df_ratio_ppm: 250_000,
+        };
+        let old = serialize_old_layout(&idx);
+        let (decoded, _used) = IndexDef::deserialize(&old).unwrap();
+        assert_eq!(decoded.name, idx.name);
+        assert_eq!(decoded.index_type, IndexType::Fulltext);
+        assert_eq!(decoded.stats_distinct_keys, 123);
+        assert!(decoded.fts_stop_filter);
+        assert_eq!(decoded.fts_stop_df_ratio_ppm, 250_000);
+        assert!(!decoded.stats_num_bounds_known);
     }
 }

@@ -348,3 +348,52 @@ fn test_explain_range_rows_improve_after_analyze_with_numeric_bounds() {
     assert!(after_rows < before_rows);
     assert!(after_rows <= 20);
 }
+
+#[test]
+fn test_explain_date_range_rows_improve_after_analyze() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, d DATE)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_d ON t(d)", &mut pager, &mut catalog).unwrap();
+
+    for day in 1..=200 {
+        execute(
+            &format!(
+                "INSERT INTO t (id, d) VALUES ({}, '2026-03-{:02}')",
+                day,
+                day.min(28)
+            ),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let before = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE d >= CAST('2026-03-10' AS DATE) AND d <= CAST('2026-03-11' AS DATE)",
+        &mut pager,
+        &mut catalog,
+    );
+    let before_rows = match before[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+    let after = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE d >= CAST('2026-03-10' AS DATE) AND d <= CAST('2026-03-11' AS DATE)",
+        &mut pager,
+        &mut catalog,
+    );
+    let after_rows = match after[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    assert!(after_rows < before_rows);
+}

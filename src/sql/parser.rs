@@ -540,7 +540,15 @@ impl Parser {
                     },
                     "stop_df_ratio_ppm" => match self.advance() {
                         Some(Token::Integer(n)) if n >= 0 => {
-                            stop_df_ratio_ppm = n as u32;
+                            let n_u64 = n as u64;
+                            if n_u64 > u32::MAX as u64 {
+                                return Err(format!(
+                                    "stop_df_ratio_ppm is too large: {} (max {})",
+                                    n,
+                                    u32::MAX
+                                ));
+                            }
+                            stop_df_ratio_ppm = n_u64 as u32;
                         }
                         Some(Token::Integer(_)) => {
                             return Err("stop_df_ratio_ppm must be >= 0".into());
@@ -1953,6 +1961,15 @@ mod tests {
         } else {
             panic!("Expected CreateFulltextIndex");
         }
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_index_rejects_too_large_stop_df_ratio_ppm() {
+        let err = parse_sql(
+            "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (stop_df_ratio_ppm=4294967297)",
+        )
+        .unwrap_err();
+        assert!(err.contains("stop_df_ratio_ppm is too large"));
     }
 
     #[test]

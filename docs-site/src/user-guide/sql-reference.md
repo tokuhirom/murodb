@@ -720,7 +720,7 @@ All SELECT statements in a UNION must return the same number of columns.
 
 ## EXPLAIN
 
-Shows the query execution plan for a statement.
+Shows the optimizer's chosen access path and cardinality/cost estimates for a statement.
 
 ```sql
 EXPLAIN SELECT * FROM t WHERE id = 1;
@@ -728,27 +728,75 @@ EXPLAIN UPDATE t SET name = 'Alicia' WHERE id = 1;
 EXPLAIN DELETE FROM t WHERE id = 1;
 ```
 
-Output columns:
+### Output Columns
 
 | Column | Description |
 |--------|-------------|
-| id | Always 1 (single-table queries) |
-| select_type | Always "SIMPLE" |
-| table | Table name |
+| id | Always `1` (single plan row output) |
+| select_type | `SIMPLE`, `UPDATE`, or `DELETE` |
+| table | Base table name |
 | type | Access type: `const` (PK lookup), `ref` (index lookup), `range` (index range seek), `ALL` (full scan), `fulltext` (FTS) |
 | key | Index used (NULL for full scan) |
-| rows | Estimated rows |
-| cost | Heuristic plan cost |
-| Extra | Additional info: "Using where", "Using index", "Using fulltext" |
+| rows | Estimated candidate rows for the chosen access path |
+| cost | Heuristic cost of the chosen plan |
+| Extra | Additional diagnostics (`Using where`, `Using index`, `Using fulltext`, JOIN loop notes, etc.) |
 
-`select_type` values:
-- `SIMPLE` for `EXPLAIN SELECT`
-- `UPDATE` for `EXPLAIN UPDATE`
-- `DELETE` for `EXPLAIN DELETE`
+### Access Type Meanings
+
+- `const`: primary-key equality lookup (`WHERE pk = ...`).
+- `ref`: secondary index equality lookup.
+- `range`: index range scan (single/composite range shape).
+- `ALL`: full table scan.
+- `fulltext`: FULLTEXT index path.
+
+### How `rows` Is Estimated
+
+- If table/index stats are present (`ANALYZE TABLE`), EXPLAIN uses:
+  - table row stats,
+  - index distinct-key stats,
+  - numeric min/max bounds,
+  - numeric histograms (single-column numeric B-tree indexes).
+- If stats are missing, EXPLAIN falls back to conservative heuristics (or table row scan fallback where applicable).
+
+### How `cost` Is Estimated
+
+- `cost` is a deterministic heuristic score used for plan comparison.
+- Lower is better.
+- It includes access-path cost and, for JOIN planning diagnostics, nested-loop alternative comparison cost.
+- Compare `cost` values primarily within the same query shape.
+
+### JOIN Diagnostics in `Extra`
+
+For `EXPLAIN SELECT ... JOIN ...`, `Extra` can include join-loop notes such as:
+
+```text
+Join loops: j1=right_outer (L=20,R=3,cL=620,cR=603)
+```
+
+- `j1` = first JOIN step.
+- `left_outer` / `right_outer` = chosen outer loop side.
+- `L` / `R` = estimated left/right input rows at that step.
+- `cL` / `cR` = compared heuristic costs for each outer-loop alternative.
+
+### Practical Workflow
+
+```sql
+-- 1) inspect plan
+EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110;
+
+-- 2) refresh stats after major data changes
+ANALYZE TABLE t;
+
+-- 3) inspect again (rows/cost should better reflect current data)
+EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110;
+```
+
+### Current Scope and Limits
 
 **Limitations:**
 - Supported targets are `SELECT`, `UPDATE`, and `DELETE`.
-- JOIN and subquery queries show only one row (the primary table's plan).
+- Output is currently a single-row summary (not a full operator tree).
+- JOIN/subquery internals are summarized in `Extra` rather than emitted as multiple plan rows.
 
 ## Transactions
 

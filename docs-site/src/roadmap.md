@@ -96,13 +96,14 @@ MySQL-compatible scalar functions.
     - `BLOB` type is available in DDL/CAST/type display.
     - DML/read path supports large payload round-trip with stable behavior.
     - Operational limits are documented (max size, indexing restrictions, comparison semantics).
-- [ ] Overflow pages (posting list > 4096B)
+- [x] Overflow pages (posting list > 4096B)
   - Scope: support values/postings that exceed single-page capacity.
   - Progress:
     - Implemented FTS segment overflow chains (`__segovf__`) with typed page format (`OFG1`).
     - Read/write/delete + vacuum path now reclaims overflow pages without orphaning.
     - Covered by unit/integration tests (`cargo test` green as of 2026-02-22).
     - Added WAL recovery integration tests for overflow chains (torn WAL tail and post-sync partial-write replay paths).
+    - Benchmarked on 2026-02-22 (`murodb_bench`, commit `829ad18145c2`) with no severe small-record regression signal.
   - Done when:
     - Overflow chain format is versioned and crash-safe.
     - WAL/recovery covers partial-write and torn-tail scenarios for overflow chains.

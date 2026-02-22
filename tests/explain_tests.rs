@@ -534,3 +534,79 @@ fn test_explain_join_extra_shows_loop_order_choice() {
     assert!(extra.contains("Join loops:"));
     assert!(extra.contains("j1=right_outer"));
 }
+
+#[test]
+fn test_explain_plan_choice_is_deterministic_when_index_costs_tie() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a2 ON t(a)", &mut pager, &mut catalog).unwrap();
+    execute("CREATE INDEX idx_a1 ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a = 42",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][4].1, Value::Varchar("idx_a1".to_string()));
+}
+
+#[test]
+fn test_explain_histogram_stats_are_refreshable_via_reanalyze() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    for i in 1..=100 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+    let before = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 80 AND a <= 90",
+        &mut pager,
+        &mut catalog,
+    );
+    let before_rows = match before[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    // Shift distribution heavily toward high values, then refresh stats.
+    for i in 101..=400 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, 80 + (i % 11)),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+    let after = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 80 AND a <= 90",
+        &mut pager,
+        &mut catalog,
+    );
+    let after_rows = match after[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    assert!(after_rows > before_rows);
+}

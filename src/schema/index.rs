@@ -370,4 +370,26 @@ mod tests {
         assert_eq!(decoded.fts_stop_df_ratio_ppm, 250_000);
         assert!(!decoded.stats_num_bounds_known);
     }
+
+    #[test]
+    fn test_deserialize_truncated_index_returns_none() {
+        let idx = IndexDef {
+            name: "idx_users_email".to_string(),
+            table_name: "users".to_string(),
+            column_names: vec!["email".to_string()],
+            index_type: IndexType::BTree,
+            is_unique: true,
+            btree_root: 42,
+            stats_distinct_keys: 0,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
+        };
+        let mut bytes = idx.serialize();
+        bytes.truncate(4);
+        assert!(IndexDef::deserialize(&bytes).is_none());
+    }
 }

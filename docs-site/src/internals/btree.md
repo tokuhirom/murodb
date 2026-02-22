@@ -100,6 +100,17 @@ There are no leaf sibling links.
 4. Parent inserts new separator; parent may split recursively.
 5. If root splits, allocate new internal root.
 
+## What Happens If It Does Not Fit in One Page?
+
+Two different cases:
+
+1. Tree growth case (many entries):
+   - normal behavior is page split (leaf/internal), with separator propagation up to root.
+   - this is fully supported.
+2. Single-cell-too-large case (one key/value entry itself is huge):
+   - current implementation has no overflow/LOB pages.
+   - insert returns `PageOverflow` instead of spilling payload to extra pages.
+
 ## Delete/Rebalance Path
 
 `BTree::delete` removes target entry and handles underflow:

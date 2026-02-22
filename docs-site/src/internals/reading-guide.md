@@ -19,11 +19,13 @@ The internals section now follows this order:
 
 1. [Architecture](architecture.md): module map and end-to-end data flow.
 2. [Files, WAL, and Locking](files-and-locking.md): main file / `.wal` / `.lock` contract.
-3. [B-tree](btree.md): in-page node format and mutation/scan algorithms.
-4. [Query Planning & Execution](query-planning.md): plan selection and execution mapping.
-5. [Cryptography](cryptography.md): encryption/KDF details and rationale.
-6. [WAL & Crash Resilience](wal.md): transaction protocol and recovery validation.
-7. [Durability Matrix](durability-matrix.md): crash-at-each-step outcomes.
+3. [Storage](storage.md): file header, generic page layout, and freelist format.
+4. [Catalog Format](catalog-format.md): system catalog key/value encoding and compatibility.
+5. [B-tree](btree.md): in-page node format and mutation/scan algorithms.
+6. [Query Planning & Execution](query-planning.md): plan selection and execution mapping.
+7. [Cryptography](cryptography.md): encryption/KDF details and rationale.
+8. [WAL & Crash Resilience](wal.md): transaction protocol and recovery validation.
+9. [Durability Matrix](durability-matrix.md): crash-at-each-step outcomes.
 
 ## Suggested Rebuild Path (for implementers)
 

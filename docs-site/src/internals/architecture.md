@@ -30,10 +30,12 @@ If your goal is "reconstruct internals after a long break", read in this order:
 
 1. [Reading Guide](reading-guide.md)
 2. [Files, WAL, and Locking](files-and-locking.md)
-3. [B-tree](btree.md)
-4. [Query Planning & Execution](query-planning.md)
-5. [Cryptography](cryptography.md)
-6. [WAL & Crash Resilience](wal.md)
+3. [Storage](storage.md)
+4. [Catalog Format](catalog-format.md)
+5. [B-tree](btree.md)
+6. [Query Planning & Execution](query-planning.md)
+7. [Cryptography](cryptography.md)
+8. [WAL & Crash Resilience](wal.md)
 
 ## Module Map
 
@@ -59,3 +61,4 @@ If your goal is "reconstruct internals after a long break", read in this order:
   - CLI routes read-only statements to `query` unless an explicit transaction is active.
 
 For on-disk file contracts (main DB file / `.wal` / `.lock`), see [Files, WAL, and Locking](files-and-locking.md).
+For catalog key/value binary layouts, see [Catalog Format](catalog-format.md).

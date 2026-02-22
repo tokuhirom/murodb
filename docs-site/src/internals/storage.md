@@ -1,6 +1,45 @@
 # Storage
 
-## Page Layout
+## Data File Structure (At a Glance)
+
+The main `.db` file is:
+
+`[plaintext file header (76B)] [page 0 on disk] [page 1 on disk] [page 2 on disk] ...`
+
+- File header is always plaintext and fixed-size.
+- Each page is a logical 4096-byte page (`PAGE_SIZE`) stored at:
+  - `offset = 76 + page_id * page_size_on_disk`
+- `page_size_on_disk` is:
+  - plaintext mode: `4096`
+  - encrypted mode: `12 (nonce) + 4096 (ciphertext) + 16 (tag) = 4124`
+
+This chapter first explains the file header, then the page layout, then special page formats (freelist).
+
+## Data File Header
+
+Main DB file header (`src/storage/pager/mod.rs`) is 76 bytes:
+
+```
+0..8    Magic "MURODB01"
+8..12   Format version (u32 LE)
+12..28  Salt (16B, Argon2 input)
+28..36  Catalog root page ID (u64 LE)
+36..44  Page count (u64 LE)
+44..52  Epoch (u64 LE)
+52..60  Freelist page ID (u64 LE, 0 = none)
+60..68  Next TxId (u64 LE)
+68..72  Encryption suite ID (u32 LE)
+72..76  CRC32 over bytes 0..72
+```
+
+- `freelist_page_id` persists the freelist root across restarts.
+- CRC32 protects header integrity before any page decryption.
+- This header exists once per file; everything after this is page data.
+- `catalog_root` points to the system catalog B-tree root (format in [Catalog Format](catalog-format.md)).
+
+See [Files, WAL, and Locking](files-and-locking.md) for `.db` / `.wal` / `.lock` lifecycle.
+
+## Generic Page Layout
 
 - **Page size**: 4096 bytes (`PAGE_SIZE`)
 - **Page header**: 14 bytes (`src/storage/page.rs`)
@@ -29,7 +68,7 @@ See [Cryptography](cryptography.md) for rationale and full details.
 
 ## Freelist
 
-Freed pages are tracked in a freelist for reuse:
+Freed pages are tracked in a freelist for reuse.
 
 ## Freelist In-Memory Model
 
@@ -42,9 +81,9 @@ Implementation (`src/storage/freelist.rs`) uses `Vec<PageId>`:
 
 ## Freelist On-Disk Format
 
-Primary format is a multi-page chain.
+Freelist is stored in normal data pages, linked as a chain.
 
-Per freelist page data area:
+Per freelist page data area (after the generic 14-byte page header):
 
 `[magic "FLMP":4][next_page_id:u64][count:u64][entries:u64...]`
 
@@ -83,18 +122,3 @@ At open/refresh (`Pager::reload_freelist_from_disk`):
    - duplicate entries
 
 Sanitization results are exposed as diagnostics and warning counters.
-
-## Data File Header
-
-Main DB file header (`src/storage/pager/mod.rs`) is 76 bytes:
-
-```
-Magic (8B) + Version (4B) + Salt (16B) + CatalogRoot (8B)
-+ PageCount (8B) + Epoch (8B) + FreelistPageId (8B)
-+ NextTxId (8B) + EncryptionSuiteId (4B) + CRC32 (4B)
-```
-
-- CRC32 covers bytes `0..72`
-- `freelist_page_id` persists the freelist root across restarts
-
-See [Files, WAL, and Locking](files-and-locking.md) for main file / `.wal` / `.lock` overview.

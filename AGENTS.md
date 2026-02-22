@@ -19,6 +19,13 @@
 - `src/btree/*.rs`: B-tree nodes, cursor, and supporting operations.
 - `src/schema/*.rs`: table/index catalog and schema metadata.
 
+## Documentation Map
+- `docs-site/src/`: mdBook source (edit here).
+- `docs-site/src/internals/*.md`: internals documentation pages.
+- `docs-site/src/user-guide/*.md`: user-facing guides and SQL reference.
+- `docs-site/src/SUMMARY.md`: sidebar/order for mdBook.
+- `docs-site/book/`: generated output (do not hand-edit).
+
 ## Refactor Notes
 - `src/sql/session.rs` was split into `src/sql/session/mod.rs` and `src/sql/session/tests.rs`.
 - Duplicated post-commit/post-rollback checkpoint flow was consolidated into `Session::post_checkpoint`.
@@ -26,3 +33,11 @@
 - `src/fts/index.rs` was split into `src/fts/index/mod.rs` and `src/fts/index/tests.rs`.
 - `src/btree/ops.rs` was split into `src/btree/ops/mod.rs` and `src/btree/ops/tests.rs`.
 - `src/sql/parser.rs` was split into `src/sql/parser/mod.rs`, `src/sql/parser/expr_and_select.rs`, and `src/sql/parser/tests.rs`.
+
+## Shell / Git Command Hygiene
+- Prefer non-interactive commands.
+- When posting issue/PR comments with `gh`, do not inline long text in `--body "..."` if it may contain backticks.
+- Use a temp file + `--body-file` to avoid shell command-substitution bugs:
+  1. `cat > /tmp/msg.md <<'EOF'` ... `EOF`
+  2. `gh issue comment <id> --body-file /tmp/msg.md`
+- Same rule for `gh issue create` / `gh pr create` bodies: prefer `--body-file`.

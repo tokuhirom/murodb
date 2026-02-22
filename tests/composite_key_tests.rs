@@ -769,6 +769,48 @@ fn test_non_unique_single_column_index_duplicates() {
 }
 
 #[test]
+fn test_non_unique_varchar_range_seek_does_not_early_stop() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_s ON t (s)", &mut pager, &mut catalog);
+
+    // For non-unique keys, physical order is by (s || pk). With variable-length s,
+    // rows with s='a' can appear after s='ab'/'ac' depending on pk bytes.
+    exec(
+        "INSERT INTO t (id, s) VALUES (1, 'ab')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, s) VALUES (2, 'ac')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, s) VALUES (3, 'a')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE s < 'ab' ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(
+        rows.len(),
+        1,
+        "range seek must not drop trailing s='a' rows"
+    );
+    assert_eq!(rows[0][0].1, Value::Integer(3));
+}
+
+#[test]
 fn test_non_unique_index_delete_preserves_others() {
     let (mut pager, mut catalog, _dir) = setup();
 

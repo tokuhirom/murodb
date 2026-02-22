@@ -175,7 +175,12 @@ pub(super) fn index_seek_pk_keys_range(
 
         if let Some((upper_key, inclusive)) = &upper {
             match idx_part.cmp(upper_key) {
-                std::cmp::Ordering::Greater => return Ok(false),
+                std::cmp::Ordering::Greater => {
+                    if idx.is_unique {
+                        return Ok(false);
+                    }
+                    return Ok(true);
+                }
                 std::cmp::Ordering::Equal if !inclusive => return Ok(true),
                 _ => {}
             }

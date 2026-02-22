@@ -393,9 +393,10 @@ fn estimate_numeric_range_rows(
         return Some(1);
     }
 
-    let covered = (clamped_hi as i128 - clamped_lo as i128 + 1).max(0) as u64;
-    let total = (max_v as i128 - min_v as i128 + 1).max(1) as u64;
-    Some(div_ceil(prefix_rows.saturating_mul(covered), total).max(1))
+    let covered = span_inclusive_u128(clamped_lo, clamped_hi)?;
+    let total = span_inclusive_u128(min_v, max_v)?;
+    let scaled = div_ceil_u128((prefix_rows as u128).saturating_mul(covered), total);
+    Some((scaled as u64).max(1))
 }
 
 fn const_i64(expr: &Expr) -> Option<i64> {
@@ -405,6 +406,40 @@ fn const_i64(expr: &Expr) -> Option<i64> {
         crate::types::Value::DateTime(n) => Some(n),
         crate::types::Value::Timestamp(n) => Some(n),
         _ => None,
+    }
+}
+
+fn span_inclusive_u128(lo: i64, hi: i64) -> Option<u128> {
+    if hi < lo {
+        return None;
+    }
+    Some((hi as i128 - lo as i128 + 1) as u128)
+}
+
+fn div_ceil_u128(num: u128, den: u128) -> u128 {
+    if den == 0 {
+        return num;
+    }
+    num.saturating_add(den - 1) / den
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_numeric_range_estimator_handles_full_i64_span() {
+        let idx = IndexPlanStat {
+            name: "idx_a".to_string(),
+            column_names: vec!["a".to_string()],
+            is_unique: false,
+            stats_distinct_keys: 0,
+            stats_num_min: Some(i64::MIN),
+            stats_num_max: Some(i64::MAX),
+        };
+        let lower = Some((Box::new(Expr::IntLiteral(0)), true));
+        let rows = estimate_numeric_range_rows(1000, &lower, &None, Some(&idx)).unwrap();
+        assert_eq!(rows, 500);
     }
 }
 

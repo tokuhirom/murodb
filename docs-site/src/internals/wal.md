@@ -1,84 +1,96 @@
 # WAL & Crash Resilience
 
-MuroDB uses a Write-Ahead Log (WAL) for crash recovery. All writes go through the WAL before being applied to the data file.
+MuroDB uses a write-ahead log (`.wal`) for crash recovery.
+All commits are WAL-first: durable intent is recorded before data-file flush.
+
+## `.wal` Binary Layout
+
+WAL constants are in `src/wal/mod.rs`:
+
+- magic: `"MUROWAL1"` (8 bytes)
+- version: `u32` (current `1`)
+- header size: 12 bytes
+
+File layout:
+
+1. Header: `[magic:8][version:4]`
+2. Repeating frames:
+   - `[frame_len: u32]`
+   - `[encrypted_payload: frame_len bytes]`
+
+`frame_len` is bounded by `MAX_WAL_FRAME_LEN` (`PAGE_SIZE + 1024`).
+
+Encrypted payload format before encryption (`src/wal/writer.rs`):
+
+- `record_bytes = WalRecord::serialize(...)`
+- `payload = record_bytes || crc32(record_bytes)`
+
+Encryption uses `PageCipher`; frame nonce context is `(lsn, 0)`.
 
 ## WAL Record Types
 
-| Record | Description |
-|---|---|
-| BEGIN | Start of a transaction |
-| PAGE_PUT | Write a page (page_id + page data) |
-| META_UPDATE | Metadata update (catalog_root, freelist_page_id, page_count, epoch) |
-| COMMIT | Transaction commit marker |
-| ABORT | Transaction abort marker |
+`WalRecord` (`src/wal/record.rs`) variants:
 
-All WAL records are encrypted.
+| Record | Payload |
+|---|---|
+| `Begin` | `txid` |
+| `PagePut` | `txid`, `page_id`, full page image bytes |
+| `MetaUpdate` | `txid`, `catalog_root`, `page_count`, `freelist_page_id`, `epoch` |
+| `Commit` | `txid`, `lsn` |
+| `Abort` | `txid` |
+
+Record tags on wire:
+
+- `1=Begin`, `2=PagePut`, `3=Commit`, `4=Abort`, `5=MetaUpdate`
 
 ## Write Path
 
 ### Read-Only Query Path (`Database::query`)
 
-```
-Database::query(sql)
-  1. Acquire shared lock
-  2. Parse and validate statement is read-only
-  3. Execute directly on pager/catalog (no implicit tx, no WAL append)
-```
+`Database::query(sql)`:
+
+1. Acquire shared lock
+2. Parse/validate read-only statement
+3. Execute directly on pager/catalog (no implicit WAL transaction)
 
 If an explicit transaction is active, read statements are executed in the transaction context (`execute_in_tx`) so uncommitted writes remain visible to that session.
 
 ### Auto-Commit Mode (no explicit BEGIN)
 
-```
-Session::execute_auto_commit(stmt)
-  1. Transaction::begin(txid, snapshot_lsn)
-  2. Create TxPageStore (dirty page buffer)
-  3. execute_statement(stmt, tx_page_store, catalog)
-       → BTree::insert(tx_page_store, key, value)
-         → TxPageStore::write_page()
-           → Transaction::write_page()  ← stored in HashMap (memory only)
-  4. tx.commit(&mut pager, &mut wal)    ← WAL-first commit
-       → Write Begin + PagePut + MetaUpdate + Commit records to WAL
-       → wal.sync()                     ← fsync WAL
-       → Write dirty pages to data file
-       → pager.flush_meta()             ← fsync data file
-  (on error: tx.rollback_no_wal() + restore catalog)
-```
+`Session::execute_auto_commit(stmt)`:
+
+1. Create implicit transaction + dirty-page buffer.
+2. Execute statement against transactional page store.
+3. `tx.commit(...)` writes:
+   - `Begin`
+   - all dirty `PagePut`
+   - freelist `PagePut` pages (if needed)
+   - `MetaUpdate`
+   - `Commit`
+4. `wal.sync()` (fsync) establishes durability boundary.
+5. Flush pages + metadata to main DB file.
 
 ### Explicit Transaction (BEGIN ... COMMIT)
 
-```
-BEGIN
-  → Transaction::begin(txid, wal.current_lsn())
+Explicit transaction (`BEGIN ... COMMIT`) follows the same commit primitive.
+`ROLLBACK` discards dirty state without WAL append (`rollback_no_wal` in session path).
 
-exec_insert() / exec_update() / exec_delete()
-  → Write to dirty page buffer via TxPageStore
+## Commit Point
 
-COMMIT
-  → tx.commit(&mut pager, &mut wal)   ← WAL-first commit
-    1. Write Begin record to WAL
-    2. Write PagePut record for each dirty page
-    3. Write MetaUpdate (catalog_root, freelist_page_id, page_count, epoch)
-    4. Write Commit record
-    5. wal.sync()                      ← fsync WAL
-    6. Write dirty pages to data file
-    7. pager.flush_meta()              ← fsync data file
+Durability commit point is WAL fsync:
 
-ROLLBACK
-  → tx.rollback_no_wal()              ← discard dirty buffer (no WAL write)
-  → Session post_rollback_checkpoint() keeps WAL clean
-  → Reload catalog from disk
-```
+- before `wal.sync()`: commit may be lost on crash
+- after `wal.sync()`: commit must be recoverable even if DB flush fails
+
+If post-sync DB flush fails, transaction returns `CommitInDoubt`, session is poisoned, and next open recovers from WAL.
 
 ## Recovery (Database::open)
 
 ```
 Database::open(path, master_key)
   1. If WAL file exists, run recovery::recover()
-     → Scan WAL and validate transaction state transitions
-       (reject PagePut/MetaUpdate/Commit/Abort before Begin)
-       (reject records after Commit/Abort)
-       (reject Commit.lsn mismatch with actual LSN)
+     → Scan WAL and validate per-tx state machine
+       (Begin -> PagePut/MetaUpdate* -> Commit/Abort)
      → Collect latest page images from committed transactions
      → Replay to data file
   2. Truncate WAL file (empty it)
@@ -87,12 +99,16 @@ Database::open(path, master_key)
   3. Build Session with Pager + Catalog + WalWriter
 ```
 
+Validation is implemented in `src/wal/recovery.rs` with explicit skip/error codes.
+
 ## Recovery Modes
 
 - **strict** (default): Fails on any WAL protocol violation
 - **permissive**: Skips invalid transactions, recovers only valid committed ones
 
 See [Recovery](../user-guide/recovery.md) for user-facing documentation.
+
+In permissive mode, if invalid transactions were skipped, WAL can be quarantined (`*.quarantine.<ts>.<pid>`) before reopening a clean WAL stream.
 
 ### Inspect-WAL JSON Contract
 

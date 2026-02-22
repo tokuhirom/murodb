@@ -778,4 +778,56 @@ mod tests {
         assert_eq!(key_dt.len(), 9);
         assert_eq!(key_ts.len(), 9);
     }
+
+    #[test]
+    fn test_timestamp_insert_with_timezone_is_normalized_to_utc() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, ts TIMESTAMP)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, '2026-02-22 09:30:00+09:00')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute("SELECT ts FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("ts"), Some(&Value::Timestamp(20260222003000)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_invalid_temporal_literals_are_rejected() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, d DATE, ts TIMESTAMP)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let invalid_date = execute(
+            "INSERT INTO t VALUES (1, '2026-02-30', '2026-02-22 00:00:00Z')",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(invalid_date.is_err());
+
+        let invalid_timestamp = execute(
+            "INSERT INTO t VALUES (2, '2026-02-22', '2026-02-22 00:00:00+24:00')",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(invalid_timestamp.is_err());
+    }
 }

@@ -1,55 +1,46 @@
 # MuroDB
 
-Embedded SQL database with B+Tree (no leaf links) + Full-Text Search (Bigram), written in Rust.
+MuroDB is an embedded SQL database written in Rust.
 
-## Features
+This documentation is designed for people who already know SQL and want to start building quickly.
 
-- **Pluggable at-rest mode** - `aes256-gcm-siv` (default) or explicit `off` plaintext mode
-- **B+tree storage (no leaf links)** - PRIMARY KEY (TINYINT/SMALLINT/INT/BIGINT), UNIQUE indexes (single column)
-- **Full-text search** - Bigram (n=2) with NFKC normalization
-  - MySQL-style `MATCH(col) AGAINST(...)` syntax
-  - NATURAL LANGUAGE MODE with BM25 scoring
-  - BOOLEAN MODE with `+term`, `-term`, `"phrase"` operators
-  - `fts_snippet()` for highlighted excerpts
-- **ACID transactions** - WAL-based crash recovery
-- **Concurrency** - Multiple readers / single writer (thread RwLock + process file lock)
-- **Single file** - Database file + WAL file
+## What You Can Do Quickly
 
-## Components
+- Create a local database file and start querying right away.
+- Keep data durable with WAL-based crash recovery.
+- Use encrypted-at-rest mode by default, or explicitly opt into plaintext mode.
+- Add full-text search with bigram tokenization and relevance scoring.
+
+If you want hands-on steps first, start here:
+
+1. [First Session (10 minutes)](getting-started/first-session.md)
+2. [Quick Start](getting-started/quick-start.md)
+3. [SQL Reference](user-guide/sql-reference.md)
+
+## Core Capabilities
+
+- **At-rest mode**: `aes256-gcm-siv` (default) or explicit `off` (plaintext)
+- **Storage engine**: B+tree, WAL, page cache, crash recovery
+- **Transactions**: ACID semantics
+- **Concurrency model**: multiple readers / single writer
+- **Full-text search**: `MATCH(...) AGAINST(...)`, NATURAL/BOOLEAN modes, `fts_snippet()`
+
+## Architecture Map
 
 | Component | Description |
 |---|---|
-| `crypto/` | AES-256-GCM-SIV page encryption, Argon2 KDF, HMAC-SHA256 term blinding |
-| `storage/` | 4096B slotted pages, pager with pluggable at-rest mode + LRU cache, freelist |
-| `btree/` | Insert/split, delete, search, scan, order-preserving key encoding |
-| `wal/` | WAL records (suite-aligned with DB mode), writer/reader, crash recovery |
-| `tx/` | Transaction with dirty page buffer, commit/rollback |
-| `schema/` | System catalog, table/index definitions |
-| `sql/` | Hand-written lexer/parser, AST, rule-based planner, executor |
-| `fts/` | Bigram tokenizer, delta+varint postings, BM25, NATURAL/BOOLEAN queries, snippets |
-| `concurrency/` | parking_lot RwLock + fs4 file lock |
-
-## Dependencies
-
-| Crate | Purpose |
-|---|---|
-| `aes-gcm-siv` | AEAD encryption |
-| `argon2` | Passphrase KDF |
-| `hmac` + `sha2` | FTS term ID blinding |
-| `nom` | SQL lexer |
-| `unicode-normalization` | NFKC normalization |
-| `parking_lot` | RwLock |
-| `fs4` | File lock |
-| `lru` | Page cache |
-| `rand` | Nonce generation |
-| `thiserror` | Error types |
+| `crypto/` | Page encryption, key derivation, and term-ID blinding |
+| `storage/` | Pager, slotted pages, cache, and freelist management |
+| `btree/` | Index/table structures, search, and mutation operations |
+| `wal/` | Write-ahead log, reader/writer, recovery flow |
+| `tx/` | Transaction lifecycle, dirty-page buffering, commit/rollback |
+| `schema/` | Catalog metadata for tables and indexes |
+| `sql/` | Lexer, parser, planner, executor, and session control |
+| `fts/` | Tokenizer, postings, BM25 scoring, snippets |
+| `concurrency/` | In-process and cross-process locking |
 
 ## Non-goals
 
 - Network server protocol
-- Full access-pattern obfuscation (ORAM, etc.)
+- Full access-pattern obfuscation
 - Stored procedures / triggers
-
-## License
-
-MIT License. See [LICENSE](https://github.com/tokuhirom/murodb/blob/main/LICENSE) for details.

@@ -2,14 +2,22 @@
 
 Embedded SQL database written in Rust.
 
+## Why Try MuroDB
+
+- SQL-first workflow: create tables, insert rows, query immediately from CLI.
+- Safe-by-default storage: encrypted pages + WAL crash recovery.
+- Single-process simplicity: embed locally, no server setup required.
+- Built-in full-text search: bigram index + relevance scoring.
+
 ## Status
 
 MuroDB is under active development.
 
-- Core storage: encrypted pages + WAL crash recovery
-- Pluggable encryption suite: `aes256-gcm-siv` / `off` (plaintext)
-- SQL engine: practical subset for local/embedded use
-- Documentation: moved to `docs-site/`
+Current core capabilities:
+
+- Storage engine with WAL-based durability
+- Pluggable at-rest mode: `aes256-gcm-siv` (default) or explicit `off` (plaintext)
+- Practical SQL subset for local application use
 
 ## Install
 
@@ -17,23 +25,28 @@ MuroDB is under active development.
 cargo install --path .
 ```
 
-## Quick Start
+## Two-Minute Run
 
 ```bash
-# Create a database
-murodb mydb.db --create -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
+# 1) Create a database and table (password prompt appears in encrypted mode)
+murodb mydb.db --create -e "CREATE TABLE notes (id BIGINT PRIMARY KEY, title VARCHAR, body TEXT)"
 
-# Create a plaintext database (explicit opt-in)
-murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
+# 2) Insert rows
+murodb mydb.db -e "INSERT INTO notes (id, title, body) VALUES
+  (1, 'first', 'hello murodb'),
+  (2, 'todo', 'ship docs')"
 
-# Insert data
-murodb mydb.db -e "INSERT INTO t (id, name) VALUES (1, 'hello')"
+# 3) Query rows
+murodb mydb.db -e "SELECT id, title FROM notes ORDER BY id"
 
-# Query
-murodb mydb.db -e "SELECT * FROM t"
-
-# Interactive REPL
+# 4) Open REPL
 murodb mydb.db
+```
+
+If you need plaintext mode, opt in explicitly:
+
+```bash
+murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
 ```
 
 ## Documentation
@@ -47,12 +60,13 @@ The detailed manual and internals docs are in `docs-site/`.
 mdbook build docs-site
 ```
 
-Main entry points:
+Recommended reading order:
 
+- `docs-site/src/getting-started/first-session.md`
 - `docs-site/src/getting-started/quick-start.md`
 - `docs-site/src/user-guide/sql-reference.md`
+- `docs-site/src/user-guide/full-text-search.md`
 - `docs-site/src/user-guide/recovery.md`
-- `docs-site/src/internals/architecture.md`
 
 ## API Notes
 

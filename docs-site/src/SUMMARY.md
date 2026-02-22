@@ -5,6 +5,7 @@
 # Getting Started
 
 - [Installation](getting-started/installation.md)
+- [First Session (10 Minutes)](getting-started/first-session.md)
 - [Quick Start](getting-started/quick-start.md)
 
 # User Guide

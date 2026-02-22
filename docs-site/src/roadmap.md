@@ -158,6 +158,10 @@ MySQL-compatible scalar functions.
 ## Phase 8 — Security (Future)
 
 - [ ] Key rotation (epoch-based re-encryption)
+  - Progress:
+    - Extended WAL `MetaUpdate` to persist `epoch` alongside `catalog_root` / `page_count` / `freelist_page_id`.
+    - WAL recovery now restores the latest committed `epoch` value into DB metadata.
+    - Added backward-compatible decode defaults (`epoch=0`) for legacy WAL MetaUpdate records.
   - Done when:
     - Online/offline rotation flow is available with resumable progress.
     - WAL + data file epoch mismatch handling is crash-safe.

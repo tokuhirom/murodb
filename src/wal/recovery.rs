@@ -313,6 +313,7 @@ fn recover_with_mode_internal(
     let mut latest_catalog_root: Option<u64> = None;
     let mut latest_page_count: Option<u64> = None;
     let mut latest_freelist_page_id: Option<u64> = None;
+    let mut latest_epoch: Option<u64> = None;
 
     for (_, record) in &records {
         match record {
@@ -330,11 +331,13 @@ fn recover_with_mode_internal(
                 catalog_root,
                 page_count,
                 freelist_page_id,
+                epoch,
             } => {
                 if matches!(terminal.get(txid), Some(TxTerminalState::Committed)) {
                     latest_catalog_root = Some(*catalog_root);
                     latest_page_count = Some(*page_count);
                     latest_freelist_page_id = Some(*freelist_page_id);
+                    latest_epoch = Some(*epoch);
                 }
             }
             _ => {}
@@ -397,6 +400,9 @@ fn recover_with_mode_internal(
         }
         if let Some(freelist_page_id) = latest_freelist_page_id {
             p.set_freelist_page_id(freelist_page_id);
+        }
+        if let Some(epoch) = latest_epoch {
+            p.set_epoch(epoch);
         }
 
         // Also ensure page_count covers all replayed pages (fallback safety)
@@ -508,6 +514,7 @@ mod tests {
                     catalog_root: 0,
                     page_count: 2,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             writer
@@ -592,7 +599,7 @@ mod tests {
             page_data = p.data.to_vec();
         }
 
-        // Write WAL with committed tx that updates page 1 and sets catalog_root=42
+        // Write WAL with committed tx that updates page 1 and metadata.
         {
             let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
             writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
@@ -609,6 +616,7 @@ mod tests {
                     catalog_root: 42,
                     page_count: 2,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             writer
@@ -623,6 +631,7 @@ mod tests {
         let pager = Pager::open(&db_path, &test_key()).unwrap();
         assert!(pager.page_count() >= 2);
         assert_eq!(pager.catalog_root(), 42);
+        assert_eq!(pager.epoch(), 0);
     }
 
     #[test]
@@ -644,6 +653,7 @@ mod tests {
                     catalog_root: 0,
                     page_count: 1,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             // Actual LSN here is 2, but declared as 999.
@@ -686,6 +696,7 @@ mod tests {
                     catalog_root: 0,
                     page_count: 1,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             writer
@@ -786,6 +797,7 @@ mod tests {
                     catalog_root: 0,
                     page_count: 2,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             writer
@@ -863,6 +875,7 @@ mod tests {
                     catalog_root: 0,
                     page_count: 2,
                     freelist_page_id: 0,
+                    epoch: 0,
                 })
                 .unwrap();
             writer

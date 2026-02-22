@@ -156,6 +156,7 @@ fn write_wal_up_to(
         catalog_root,
         page_count,
         freelist_page_id,
+        epoch: 0,
     })
     .unwrap();
     if matches!(crash_point, CrashPoint::AfterMetaUpdate) {

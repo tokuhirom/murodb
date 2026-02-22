@@ -6,7 +6,7 @@
 /// Record types:
 ///   Begin(txid)
 ///   PagePut(txid, page_id, page_data)
-///   MetaUpdate(txid, catalog_root, page_count)
+///   MetaUpdate(txid, catalog_root, page_count, freelist_page_id, epoch)
 ///   Commit(txid, lsn)
 ///   Abort(txid)
 use crate::storage::page::PageId;
@@ -29,6 +29,7 @@ pub enum WalRecord {
         catalog_root: u64,
         page_count: u64,
         freelist_page_id: u64,
+        epoch: u64,
     },
     Commit {
         txid: TxId,
@@ -83,13 +84,15 @@ impl WalRecord {
                 catalog_root,
                 page_count,
                 freelist_page_id,
+                epoch,
             } => {
-                let mut buf = Vec::with_capacity(1 + 8 + 8 + 8 + 8);
+                let mut buf = Vec::with_capacity(1 + 8 + 8 + 8 + 8 + 8);
                 buf.push(TAG_META_UPDATE);
                 buf.extend_from_slice(&txid.to_le_bytes());
                 buf.extend_from_slice(&catalog_root.to_le_bytes());
                 buf.extend_from_slice(&page_count.to_le_bytes());
                 buf.extend_from_slice(&freelist_page_id.to_le_bytes());
+                buf.extend_from_slice(&epoch.to_le_bytes());
                 buf
             }
             WalRecord::Commit { txid, lsn } => {
@@ -146,9 +149,15 @@ impl WalRecord {
                 let txid = u64::from_le_bytes(data[1..9].try_into().unwrap());
                 let catalog_root = u64::from_le_bytes(data[9..17].try_into().unwrap());
                 let page_count = u64::from_le_bytes(data[17..25].try_into().unwrap());
-                // Backward compatible: old records (25 bytes) have no freelist_page_id
+                // Backward compatible: old records (25 bytes) have no freelist_page_id/epoch.
                 let freelist_page_id = if data.len() >= 33 {
                     u64::from_le_bytes(data[25..33].try_into().unwrap())
+                } else {
+                    0
+                };
+                // Backward compatible: records before epoch persistence default to 0.
+                let epoch = if data.len() >= 41 {
+                    u64::from_le_bytes(data[33..41].try_into().unwrap())
                 } else {
                     0
                 };
@@ -157,6 +166,7 @@ impl WalRecord {
                     catalog_root,
                     page_count,
                     freelist_page_id,
+                    epoch,
                 })
             }
             TAG_COMMIT => {
@@ -213,6 +223,7 @@ mod tests {
                 catalog_root: 10,
                 page_count: 50,
                 freelist_page_id: 0,
+                epoch: 0,
             },
             WalRecord::Commit { txid: 1, lsn: 5 },
             WalRecord::Abort { txid: 2 },
@@ -232,6 +243,7 @@ mod tests {
             catalog_root: 42,
             page_count: 100,
             freelist_page_id: 7,
+            epoch: 9,
         };
         let serialized = record.serialize();
         let deserialized = WalRecord::deserialize(&serialized).unwrap();
@@ -240,14 +252,44 @@ mod tests {
             catalog_root,
             page_count,
             freelist_page_id,
+            epoch,
         } = deserialized
         {
             assert_eq!(txid, 3);
             assert_eq!(catalog_root, 42);
             assert_eq!(page_count, 100);
             assert_eq!(freelist_page_id, 7);
+            assert_eq!(epoch, 9);
         } else {
             panic!("Expected MetaUpdate");
+        }
+    }
+
+    #[test]
+    fn test_meta_update_deserialize_legacy_without_epoch() {
+        // TAG + txid + catalog_root + page_count + freelist_page_id (no epoch)
+        let mut bytes = Vec::new();
+        bytes.push(TAG_META_UPDATE);
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.extend_from_slice(&42u64.to_le_bytes());
+        bytes.extend_from_slice(&100u64.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        let deserialized = WalRecord::deserialize(&bytes).unwrap();
+        match deserialized {
+            WalRecord::MetaUpdate {
+                txid,
+                catalog_root,
+                page_count,
+                freelist_page_id,
+                epoch,
+            } => {
+                assert_eq!(txid, 3);
+                assert_eq!(catalog_root, 42);
+                assert_eq!(page_count, 100);
+                assert_eq!(freelist_page_id, 7);
+                assert_eq!(epoch, 0);
+            }
+            _ => panic!("Expected MetaUpdate"),
         }
     }
 

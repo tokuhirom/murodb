@@ -181,6 +181,7 @@ impl Transaction {
             catalog_root,
             page_count,
             freelist_page_id,
+            epoch: pager.epoch(),
         })?;
 
         // Write Commit record

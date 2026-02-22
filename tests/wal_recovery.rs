@@ -33,6 +33,7 @@ fn test_wal_write_and_read() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 6,
             })
             .unwrap();
@@ -90,6 +91,7 @@ fn test_recovery_replays_committed_only() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 2,
             })
             .unwrap();
@@ -243,6 +245,7 @@ fn test_truncated_wal_tail_recovery() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -307,6 +310,7 @@ fn test_corrupt_tail_frame_recovery() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -603,6 +607,7 @@ fn test_interleaved_txs_with_tail_corruption() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -679,6 +684,7 @@ fn test_corruption_at_transaction_boundary() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -739,6 +745,7 @@ fn test_committed_tx_then_aborted_tx_then_crash() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -936,6 +943,7 @@ fn test_recovery_truncates_wal_durably() {
                 txid: 1,
                 catalog_root: 0,
                 freelist_page_id: 0,
+                epoch: 0,
                 page_count: 1,
             })
             .unwrap();
@@ -988,7 +996,8 @@ fn test_recovery_truncates_wal_durably() {
     assert_eq!(page.cell(0), Some(b"wal data".as_slice()));
 }
 
-/// MetaUpdate backward compatibility: old WAL records (25 bytes) without freelist_page_id
+/// MetaUpdate backward compatibility: old WAL records (25 bytes) without
+/// freelist_page_id/epoch must default both fields to 0.
 #[test]
 fn test_meta_update_backward_compat() {
     use murodb::wal::record::WalRecord;
@@ -1007,12 +1016,14 @@ fn test_meta_update_backward_compat() {
         catalog_root,
         page_count,
         freelist_page_id,
+        epoch,
     } = record
     {
         assert_eq!(txid, 1);
         assert_eq!(catalog_root, 42);
         assert_eq!(page_count, 100);
         assert_eq!(freelist_page_id, 0, "Old records should default to 0");
+        assert_eq!(epoch, 0, "Old records should default epoch to 0");
     } else {
         panic!("Expected MetaUpdate");
     }

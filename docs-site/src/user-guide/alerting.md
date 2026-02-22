@@ -67,6 +67,8 @@ Policy is configured via environment variables:
 - `MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD` (default `0`, disabled)
 - `MURODB_CHECKPOINT_INTERVAL_MS` (default `0`, disabled)
 
+See [Checkpoint Policy Tuning](checkpoint-policy.md) for recommended starting values and rollout procedure.
+
 ### freelist_sanitize_count
 
 **Alert threshold**: `> 0` (informational)

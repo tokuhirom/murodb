@@ -38,6 +38,19 @@ pub enum Plan {
     },
 }
 
+/// Stable heuristic cost used by the planner for deterministic plan selection.
+pub fn plan_cost_hint(plan: &Plan) -> u64 {
+    match plan {
+        Plan::PkSeek { .. } => 100,
+        Plan::IndexSeek { key_exprs, .. } => 3000u64.saturating_sub((key_exprs.len() as u64) * 900),
+        Plan::IndexRangeSeek {
+            prefix_key_exprs, ..
+        } => 3200u64.saturating_sub(((prefix_key_exprs.len() as u64) + 1) * 800),
+        Plan::FtsScan { .. } => 2000,
+        Plan::FullScan { .. } => 10_000,
+    }
+}
+
 /// Analyze a WHERE clause and determine the access plan.
 pub fn plan_select(
     table_name: &str,
@@ -45,6 +58,16 @@ pub fn plan_select(
     index_columns: &[(String, Vec<String>)], // (index_name, column_names)
     where_clause: &Option<Expr>,
 ) -> Plan {
+    let mut best_candidate: Option<(u64, String, Plan)> = None;
+    let consider = |best: &mut Option<(u64, String, Plan)>, plan: Plan, tie_key: String| {
+        let cost = plan_cost_hint(&plan);
+        match best {
+            Some((best_cost, best_tie, _)) if *best_cost < cost => {}
+            Some((best_cost, best_tie, _)) if *best_cost == cost && *best_tie <= tie_key => {}
+            _ => *best = Some((cost, tie_key, plan)),
+        }
+    };
+
     if let Some(expr) = where_clause {
         // Check for FTS MATCH...AGAINST
         if let Some((column, query, mode)) = extract_fts_match(expr) {
@@ -106,22 +129,30 @@ pub fn plan_select(
                         None
                     }
                 }) {
-                    return Plan::IndexSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        key_exprs: vec![key_expr],
-                    };
+                    consider(
+                        &mut best_candidate,
+                        Plan::IndexSeek {
+                            table_name: table_name.to_string(),
+                            index_name: idx_name.clone(),
+                            column_names: col_names.clone(),
+                            key_exprs: vec![key_expr],
+                        },
+                        format!("0:{}", idx_name),
+                    );
                 }
                 if let Some(range) = ranges.get(&col_names[0]) {
-                    return Plan::IndexRangeSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        prefix_key_exprs: Vec::new(),
-                        lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
-                        upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
-                    };
+                    consider(
+                        &mut best_candidate,
+                        Plan::IndexRangeSeek {
+                            table_name: table_name.to_string(),
+                            index_name: idx_name.clone(),
+                            column_names: col_names.clone(),
+                            prefix_key_exprs: Vec::new(),
+                            lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                            upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                        },
+                        format!("1:{}", idx_name),
+                    );
                 }
             } else {
                 // Composite index:
@@ -140,31 +171,44 @@ pub fn plan_select(
                     }
                 }
                 if prefix_len == col_names.len() {
-                    return Plan::IndexSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        key_exprs,
-                    };
+                    consider(
+                        &mut best_candidate,
+                        Plan::IndexSeek {
+                            table_name: table_name.to_string(),
+                            index_name: idx_name.clone(),
+                            column_names: col_names.clone(),
+                            key_exprs,
+                        },
+                        format!("0:{}", idx_name),
+                    );
+                    continue;
                 }
 
                 if prefix_len < col_names.len() && prefix_len + 1 == col_names.len() {
                     let range_col = &col_names[prefix_len];
                     if let Some(range) = ranges.get(range_col) {
                         if prefix_key_exprs.iter().all(is_row_independent_expr) {
-                            return Plan::IndexRangeSeek {
-                                table_name: table_name.to_string(),
-                                index_name: idx_name.clone(),
-                                column_names: col_names.clone(),
-                                prefix_key_exprs,
-                                lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
-                                upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
-                            };
+                            consider(
+                                &mut best_candidate,
+                                Plan::IndexRangeSeek {
+                                    table_name: table_name.to_string(),
+                                    index_name: idx_name.clone(),
+                                    column_names: col_names.clone(),
+                                    prefix_key_exprs,
+                                    lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                                    upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                                },
+                                format!("1:{}", idx_name),
+                            );
                         }
                     }
                 }
             }
         }
+    }
+
+    if let Some((_, _, plan)) = best_candidate {
+        return plan;
     }
 
     Plan::FullScan {

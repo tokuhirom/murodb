@@ -48,6 +48,7 @@ pub(super) fn exec_explain(
         where_clause,
     );
     let estimated_rows = estimate_plan_rows(&plan, &table_def, &indexes, pager)?;
+    let estimated_cost = plan_cost_hint(&plan) as i64;
 
     let (access_type, key_name, extra) = match &plan {
         Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
@@ -104,6 +105,7 @@ pub(super) fn exec_explain(
                 },
             ),
             ("rows".to_string(), Value::Integer(estimated_rows as i64)),
+            ("cost".to_string(), Value::Integer(estimated_cost)),
             (
                 "Extra".to_string(),
                 if extra.is_empty() {

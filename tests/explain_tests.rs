@@ -50,7 +50,8 @@ fn test_explain_full_scan() {
     assert_eq!(row[3].0, "type");
     assert_eq!(row[4].0, "key");
     assert_eq!(row[5].0, "rows");
-    assert_eq!(row[6].0, "Extra");
+    assert_eq!(row[6].0, "cost");
+    assert_eq!(row[7].0, "Extra");
 
     // Check values for full scan
     assert_eq!(row[1].1, Value::Varchar("SIMPLE".to_string()));
@@ -132,7 +133,7 @@ fn test_explain_full_scan_with_where() {
 
     let row = &rows[0];
     assert_eq!(row[3].1, Value::Varchar("ALL".to_string())); // full scan, no index on name
-    assert_eq!(row[6].1, Value::Varchar("Using where".to_string()));
+    assert_eq!(row[7].1, Value::Varchar("Using where".to_string()));
 }
 
 #[test]
@@ -207,4 +208,30 @@ fn test_explain_composite_index_range_seek() {
     assert_eq!(row[3].1, Value::Varchar("range".to_string()));
     assert_eq!(row[4].1, Value::Varchar("idx_ab".to_string()));
     assert!(matches!(row[5].1, Value::Integer(_)));
+    assert!(matches!(row[6].1, Value::Integer(_)));
+}
+
+#[test]
+fn test_explain_prefers_composite_range_over_single_index_seek() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+    execute("CREATE INDEX idx_ab ON t(a, b)", &mut pager, &mut catalog).unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a = 10 AND b >= 3 AND b <= 7",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row[3].1, Value::Varchar("range".to_string()));
+    assert_eq!(row[4].1, Value::Varchar("idx_ab".to_string()));
 }

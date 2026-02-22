@@ -1990,6 +1990,7 @@ fn exec_select(
         &indexes,
         pager,
     )?;
+    let needs_fts_doc_ids = !fts_ctx.score_maps.is_empty();
 
     if need_aggregation {
         // Aggregation path: collect raw values first
@@ -2005,13 +2006,15 @@ fn exec_select(
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
+                    if needs_fts_doc_ids {
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                    }
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
@@ -2044,13 +2047,15 @@ fn exec_select(
                             &table_def.columns,
                             table_def.row_format_version,
                         )?;
-                        populate_fts_row_doc_ids(
-                            &mut fts_ctx,
-                            pk_key,
-                            &indexes,
-                            &table_def.name,
-                            pager,
-                        )?;
+                        if needs_fts_doc_ids {
+                            populate_fts_row_doc_ids(
+                                &mut fts_ctx,
+                                pk_key,
+                                &indexes,
+                                &table_def.name,
+                                pager,
+                            )?;
+                        }
                         if matches_where_with_fts(
                             &sel.where_clause,
                             &table_def,
@@ -2064,32 +2069,51 @@ fn exec_select(
             }
             Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
-                let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
-                data_btree.scan(pager, |pk_key, v| {
-                    let values = deserialize_row_versioned(
-                        v,
-                        &table_def.columns,
-                        table_def.row_format_version,
-                    )?;
-                    entries.push((pk_key.to_vec(), values));
-                    Ok(true)
-                })?;
-                for (pk_key, values) in entries {
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
-                    if matches_where_with_fts(
-                        &sel.where_clause,
-                        &table_def,
-                        &values,
-                        Some(&fts_ctx),
-                    )? {
-                        raw_rows.push(values);
+                if needs_fts_doc_ids {
+                    let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+                    data_btree.scan(pager, |pk_key, v| {
+                        let values = deserialize_row_versioned(
+                            v,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
+                        entries.push((pk_key.to_vec(), values));
+                        Ok(true)
+                    })?;
+                    for (pk_key, values) in entries {
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
+                            raw_rows.push(values);
+                        }
                     }
+                } else {
+                    data_btree.scan(pager, |_, v| {
+                        let values = deserialize_row_versioned(
+                            v,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
+                            raw_rows.push(values);
+                        }
+                        Ok(true)
+                    })?;
                 }
             }
             Plan::FtsScan {
@@ -2101,14 +2125,16 @@ fn exec_select(
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
                 for (_doc_id, values) in fts_rows {
-                    let pk_key = encode_pk_key(&table_def, &values);
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
+                    if needs_fts_doc_ids {
+                        let pk_key = encode_pk_key(&table_def, &values);
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                    }
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
@@ -2158,21 +2184,23 @@ fn exec_select(
                         &table_def.columns,
                         table_def.row_format_version,
                     )?;
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
-                    let row =
-                        build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                    if needs_fts_doc_ids {
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                    }
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
                         &values,
                         Some(&fts_ctx),
                     )? {
+                        let row =
+                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
                         rows.push(row);
                     }
                 }
@@ -2199,13 +2227,15 @@ fn exec_select(
                             &table_def.columns,
                             table_def.row_format_version,
                         )?;
-                        populate_fts_row_doc_ids(
-                            &mut fts_ctx,
-                            pk_key,
-                            &indexes,
-                            &table_def.name,
-                            pager,
-                        )?;
+                        if needs_fts_doc_ids {
+                            populate_fts_row_doc_ids(
+                                &mut fts_ctx,
+                                pk_key,
+                                &indexes,
+                                &table_def.name,
+                                pager,
+                            )?;
+                        }
                         if matches_where_with_fts(
                             &sel.where_clause,
                             &table_def,
@@ -2225,34 +2255,63 @@ fn exec_select(
             }
             Plan::FullScan { .. } => {
                 let data_btree = BTree::open(table_def.data_btree_root);
-                let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
-                data_btree.scan(pager, |pk_key, v| {
-                    let values = deserialize_row_versioned(
-                        v,
-                        &table_def.columns,
-                        table_def.row_format_version,
-                    )?;
-                    entries.push((pk_key.to_vec(), values));
-                    Ok(true)
-                })?;
-                for (pk_key, values) in entries {
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
-                    if matches_where_with_fts(
-                        &sel.where_clause,
-                        &table_def,
-                        &values,
-                        Some(&fts_ctx),
-                    )? {
-                        let row =
-                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
-                        rows.push(row);
+                if needs_fts_doc_ids {
+                    let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+                    data_btree.scan(pager, |pk_key, v| {
+                        let values = deserialize_row_versioned(
+                            v,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
+                        entries.push((pk_key.to_vec(), values));
+                        Ok(true)
+                    })?;
+                    for (pk_key, values) in entries {
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
+                            let row = build_row_with_fts(
+                                &table_def,
+                                &values,
+                                &sel.columns,
+                                Some(&fts_ctx),
+                            )?;
+                            rows.push(row);
+                        }
                     }
+                } else {
+                    data_btree.scan(pager, |_, v| {
+                        let values = deserialize_row_versioned(
+                            v,
+                            &table_def.columns,
+                            table_def.row_format_version,
+                        )?;
+                        if matches_where_with_fts(
+                            &sel.where_clause,
+                            &table_def,
+                            &values,
+                            Some(&fts_ctx),
+                        )? {
+                            let row = build_row_with_fts(
+                                &table_def,
+                                &values,
+                                &sel.columns,
+                                Some(&fts_ctx),
+                            )?;
+                            rows.push(row);
+                        }
+                        Ok(true)
+                    })?;
                 }
             }
             Plan::FtsScan {
@@ -2264,14 +2323,16 @@ fn exec_select(
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
                 for (_doc_id, values) in fts_rows {
-                    let pk_key = encode_pk_key(&table_def, &values);
-                    populate_fts_row_doc_ids(
-                        &mut fts_ctx,
-                        &pk_key,
-                        &indexes,
-                        &table_def.name,
-                        pager,
-                    )?;
+                    if needs_fts_doc_ids {
+                        let pk_key = encode_pk_key(&table_def, &values);
+                        populate_fts_row_doc_ids(
+                            &mut fts_ctx,
+                            &pk_key,
+                            &indexes,
+                            &table_def.name,
+                            pager,
+                        )?;
+                    }
                     if matches_where_with_fts(
                         &sel.where_clause,
                         &table_def,
@@ -4786,7 +4847,7 @@ fn build_row_with_fts(
     select_columns: &[SelectColumn],
     fts_ctx: Option<&FtsEvalContext>,
 ) -> Result<Row> {
-    let mut row_values = Vec::new();
+    let mut row_values = Vec::with_capacity(select_columns.len().max(table_def.columns.len()));
 
     for sel_col in select_columns {
         match sel_col {

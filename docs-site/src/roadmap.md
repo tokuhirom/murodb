@@ -123,7 +123,7 @@ MySQL-compatible scalar functions.
     - Multi-column prefix ranges (`(a,b)` with predicates on `a`, optional range on `b`) use index scan.
     - EXPLAIN shows index-range choice and estimated cardinality.
     - Fallback path remains correct for unsupported predicate shapes.
-- [ ] Query optimizer improvements (cost-based)
+- [x] Query optimizer improvements (cost-based)
   - Progress:
     - Added deterministic heuristic cost hints for `PkSeek` / `IndexSeek` / `IndexRangeSeek` / `FullScan`.
     - Planner now compares index candidates by cost instead of choosing the first matching index.

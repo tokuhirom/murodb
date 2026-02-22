@@ -261,6 +261,9 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
             }
             BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
                 if let Expr::ColumnRef(col) = left.as_ref() {
+                    if !is_row_independent_expr(right) {
+                        return;
+                    }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
                         BinaryOp::Gt => entry.lower = Some((*right.clone(), false)),
@@ -270,6 +273,9 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
                         _ => {}
                     }
                 } else if let Expr::ColumnRef(col) = right.as_ref() {
+                    if !is_row_independent_expr(left) {
+                        return;
+                    }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
                         BinaryOp::Gt => entry.upper = Some((*left.clone(), false)),
@@ -289,11 +295,69 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
             negated: false,
         } => {
             if let Expr::ColumnRef(col) = expr.as_ref() {
-                let entry = result.entry(col.clone()).or_default();
-                entry.lower = Some((*low.clone(), true));
-                entry.upper = Some((*high.clone(), true));
+                if is_row_independent_expr(low) && is_row_independent_expr(high) {
+                    let entry = result.entry(col.clone()).or_default();
+                    entry.lower = Some((*low.clone(), true));
+                    entry.upper = Some((*high.clone(), true));
+                }
             }
         }
         _ => {}
+    }
+}
+
+fn is_row_independent_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRef(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            is_row_independent_expr(left) && is_row_independent_expr(right)
+        }
+        Expr::UnaryOp { operand, .. } => is_row_independent_expr(operand),
+        Expr::Like { expr, pattern, .. } => {
+            is_row_independent_expr(expr) && is_row_independent_expr(pattern)
+        }
+        Expr::InList { expr, list, .. } => {
+            is_row_independent_expr(expr) && list.iter().all(is_row_independent_expr)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            is_row_independent_expr(expr)
+                && is_row_independent_expr(low)
+                && is_row_independent_expr(high)
+        }
+        Expr::IsNull { expr, .. } => is_row_independent_expr(expr),
+        Expr::FunctionCall { args, .. } => args.iter().all(is_row_independent_expr),
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_ref()
+                .map(|e| is_row_independent_expr(e))
+                .unwrap_or(true)
+                && when_clauses.iter().all(|(cond, value)| {
+                    is_row_independent_expr(cond) && is_row_independent_expr(value)
+                })
+                && else_clause
+                    .as_ref()
+                    .map(|e| is_row_independent_expr(e))
+                    .unwrap_or(true)
+        }
+        Expr::Cast { expr, .. } => is_row_independent_expr(expr),
+        Expr::AggregateFunc { arg, .. } => arg
+            .as_ref()
+            .map(|e| is_row_independent_expr(e))
+            .unwrap_or(true),
+        Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::IntLiteral(_)
+        | Expr::FloatLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BlobLiteral(_)
+        | Expr::Null
+        | Expr::DefaultValue => true,
     }
 }

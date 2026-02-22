@@ -811,6 +811,43 @@ fn test_non_unique_varchar_range_seek_does_not_early_stop() {
 }
 
 #[test]
+fn test_range_seek_does_not_plan_row_dependent_bound() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (1, 5, 3)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (2, 2, 4)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (3, 7, 7)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // a > b is row-dependent and must fall back to row-wise predicate evaluation.
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a > b ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].1, Value::Integer(1));
+}
+
+#[test]
 fn test_non_unique_index_delete_preserves_others() {
     let (mut pager, mut catalog, _dir) = setup();
 

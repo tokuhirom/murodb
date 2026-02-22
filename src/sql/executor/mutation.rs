@@ -24,12 +24,7 @@ pub(super) fn exec_update(
         &index_columns,
         &upd.where_clause,
     );
-    if where_clause_requires_collation_full_scan(&upd.where_clause, &table_def)
-        && matches!(
-            plan,
-            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
-        )
-    {
+    if plan_requires_collation_full_scan(&plan, &table_def) {
         plan = Plan::FullScan {
             table_name: upd.table_name.clone(),
         };
@@ -219,12 +214,7 @@ pub(super) fn exec_delete(
         &index_columns,
         &del.where_clause,
     );
-    if where_clause_requires_collation_full_scan(&del.where_clause, &table_def)
-        && matches!(
-            plan,
-            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
-        )
-    {
+    if plan_requires_collation_full_scan(&plan, &table_def) {
         plan = Plan::FullScan {
             table_name: del.table_name.clone(),
         };

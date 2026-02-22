@@ -181,12 +181,7 @@ pub(super) fn exec_select(
         &index_columns,
         &sel.where_clause,
     );
-    if where_clause_requires_collation_full_scan(&sel.where_clause, &table_def)
-        && matches!(
-            plan,
-            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
-        )
-    {
+    if plan_requires_collation_full_scan(&plan, &table_def) {
         plan = Plan::FullScan {
             table_name: table_name.clone(),
         };
@@ -824,81 +819,23 @@ pub(super) fn sort_rows_with_table(
     Ok(())
 }
 
-pub(super) fn where_clause_requires_collation_full_scan(
-    where_clause: &Option<Expr>,
-    table_def: &TableDef,
-) -> bool {
-    where_clause
-        .as_ref()
-        .is_some_and(|expr| expr_references_non_binary_collation(expr, table_def))
-}
-
-fn expr_references_non_binary_collation(expr: &Expr, table_def: &TableDef) -> bool {
-    match expr {
-        Expr::ColumnRef(name) => table_def.column_index(name).is_some_and(|i| {
+pub(super) fn plan_requires_collation_full_scan(plan: &Plan, table_def: &TableDef) -> bool {
+    let requires_full_scan_for = |column_name: &str| {
+        table_def.column_index(column_name).is_some_and(|i| {
             table_def.columns[i]
                 .collation
                 .as_deref()
                 .is_some_and(|c| !c.eq_ignore_ascii_case("binary"))
-        }),
-        Expr::BinaryOp { left, right, .. } => {
-            expr_references_non_binary_collation(left, table_def)
-                || expr_references_non_binary_collation(right, table_def)
+        })
+    };
+    match plan {
+        Plan::PkSeek { key_exprs, .. } => {
+            key_exprs.iter().any(|(col, _)| requires_full_scan_for(col))
         }
-        Expr::UnaryOp { operand, .. } => expr_references_non_binary_collation(operand, table_def),
-        Expr::Like { expr, pattern, .. } => {
-            expr_references_non_binary_collation(expr, table_def)
-                || expr_references_non_binary_collation(pattern, table_def)
+        Plan::IndexSeek { column_names, .. } | Plan::IndexRangeSeek { column_names, .. } => {
+            column_names.iter().any(|col| requires_full_scan_for(col))
         }
-        Expr::InList { expr, list, .. } => {
-            expr_references_non_binary_collation(expr, table_def)
-                || list
-                    .iter()
-                    .any(|e| expr_references_non_binary_collation(e, table_def))
-        }
-        Expr::Between {
-            expr, low, high, ..
-        } => {
-            expr_references_non_binary_collation(expr, table_def)
-                || expr_references_non_binary_collation(low, table_def)
-                || expr_references_non_binary_collation(high, table_def)
-        }
-        Expr::IsNull { expr, .. } => expr_references_non_binary_collation(expr, table_def),
-        Expr::FunctionCall { args, .. } => args
-            .iter()
-            .any(|e| expr_references_non_binary_collation(e, table_def)),
-        Expr::CaseWhen {
-            operand,
-            when_clauses,
-            else_clause,
-        } => {
-            operand
-                .as_ref()
-                .is_some_and(|e| expr_references_non_binary_collation(e, table_def))
-                || when_clauses.iter().any(|(a, b)| {
-                    expr_references_non_binary_collation(a, table_def)
-                        || expr_references_non_binary_collation(b, table_def)
-                })
-                || else_clause
-                    .as_ref()
-                    .is_some_and(|e| expr_references_non_binary_collation(e, table_def))
-        }
-        Expr::Cast { expr, .. } => expr_references_non_binary_collation(expr, table_def),
-        Expr::AggregateFunc { arg, .. } => arg
-            .as_ref()
-            .is_some_and(|e| expr_references_non_binary_collation(e, table_def)),
-        Expr::GreaterThanZero(expr) => expr_references_non_binary_collation(expr, table_def),
-        Expr::InSubquery { expr, .. } => expr_references_non_binary_collation(expr, table_def),
-        Expr::IntLiteral(_)
-        | Expr::FloatLiteral(_)
-        | Expr::StringLiteral(_)
-        | Expr::BlobLiteral(_)
-        | Expr::Null
-        | Expr::DefaultValue
-        | Expr::MatchAgainst { .. }
-        | Expr::FtsSnippet { .. }
-        | Expr::Exists { .. }
-        | Expr::ScalarSubquery(_) => false,
+        Plan::FullScan { .. } | Plan::FtsScan { .. } => false,
     }
 }
 

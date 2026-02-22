@@ -1155,4 +1155,37 @@ mod tests {
             panic!("Expected rows");
         }
     }
+
+    #[test]
+    fn test_explain_keeps_pk_seek_for_mixed_pk_and_nocase_predicate() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "EXPLAIN SELECT id FROM t WHERE id = 1 AND name = 'alice'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("type"),
+                Some(&Value::Varchar("const".to_string()))
+            );
+        } else {
+            panic!("Expected rows");
+        }
+    }
 }

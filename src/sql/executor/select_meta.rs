@@ -35,20 +35,29 @@ pub(super) fn exec_explain(
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
 
     let indexes = catalog.get_indexes_for_table(pager, &table_name)?;
-    let index_columns: Vec<(String, Vec<String>)> = indexes
+    let index_stats: Vec<IndexPlanStat> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
-        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .map(|idx| IndexPlanStat {
+            name: idx.name.clone(),
+            column_names: idx.column_names.clone(),
+            is_unique: idx.is_unique,
+            stats_distinct_keys: idx.stats_distinct_keys,
+        })
         .collect();
+    let planner_stats = PlannerStats {
+        table_rows: estimate_table_rows(&table_def, pager)?,
+    };
 
     let plan = plan_select(
         &table_name,
         &table_def.pk_columns,
-        &index_columns,
+        &index_stats,
         where_clause,
+        planner_stats,
     );
-    let estimated_rows = estimate_plan_rows(&plan, &table_def, &indexes, pager)?;
-    let estimated_cost = plan_cost_hint(&plan) as i64;
+    let estimated_rows = estimate_plan_rows_hint(&plan, &planner_stats, &index_stats);
+    let estimated_cost = plan_cost_hint_with_stats(&plan, &planner_stats, &index_stats) as i64;
 
     let (access_type, key_name, extra) = match &plan {
         Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
@@ -120,84 +129,6 @@ pub(super) fn exec_explain(
     Ok(ExecResult::Rows(vec![row]))
 }
 
-fn estimate_plan_rows(
-    plan: &Plan,
-    table_def: &TableDef,
-    indexes: &[IndexDef],
-    pager: &mut impl PageStore,
-) -> Result<u64> {
-    let table_rows = estimate_table_rows(table_def, pager)?;
-    let fallback_rows = table_rows.max(1);
-
-    match plan {
-        Plan::PkSeek { key_exprs, .. } => {
-            let Ok(pk_key) = eval_pk_seek_key(table_def, key_exprs) else {
-                return Ok(fallback_rows);
-            };
-            let data_btree = BTree::open(table_def.data_btree_root);
-            Ok(if data_btree.search(pager, &pk_key)?.is_some() {
-                1
-            } else {
-                0
-            })
-        }
-        Plan::IndexSeek {
-            index_name,
-            column_names,
-            key_exprs,
-            ..
-        } => {
-            let Some(idx) = indexes.iter().find(|i| i.name == *index_name) else {
-                return Ok(fallback_rows);
-            };
-            let Ok(idx_key) = eval_index_seek_key(table_def, column_names, key_exprs) else {
-                return Ok(fallback_rows);
-            };
-            Ok(index_seek_pk_keys(idx, &idx_key, pager)?.len() as u64)
-        }
-        Plan::IndexRangeSeek {
-            index_name,
-            column_names,
-            prefix_key_exprs,
-            lower,
-            upper,
-            ..
-        } => {
-            let Some(idx) = indexes.iter().find(|i| i.name == *index_name) else {
-                return Ok(fallback_rows);
-            };
-            if prefix_key_exprs.len() + 1 != column_names.len() {
-                return Ok(fallback_rows);
-            }
-
-            let lower_key = if let Some((expr, inclusive)) = lower {
-                let mut key_exprs = prefix_key_exprs.clone();
-                key_exprs.push((**expr).clone());
-                let Ok(key) = eval_index_seek_key(table_def, column_names, &key_exprs) else {
-                    return Ok(fallback_rows);
-                };
-                Some((key, *inclusive))
-            } else {
-                None
-            };
-
-            let upper_key = if let Some((expr, inclusive)) = upper {
-                let mut key_exprs = prefix_key_exprs.clone();
-                key_exprs.push((**expr).clone());
-                let Ok(key) = eval_index_seek_key(table_def, column_names, &key_exprs) else {
-                    return Ok(fallback_rows);
-                };
-                Some((key, *inclusive))
-            } else {
-                None
-            };
-
-            Ok(index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?.len() as u64)
-        }
-        Plan::FullScan { .. } | Plan::FtsScan { .. } => Ok(table_rows),
-    }
-}
-
 fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Result<u64> {
     if table_def.stats_row_count > 0 {
         return Ok(table_def.stats_row_count);
@@ -208,7 +139,7 @@ fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Resu
         cnt += 1;
         Ok(true)
     })?;
-    Ok(cnt)
+    Ok(cnt.max(1))
 }
 
 pub(super) fn exec_set_query(

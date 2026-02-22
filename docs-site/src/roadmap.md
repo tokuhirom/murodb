@@ -130,6 +130,8 @@ MySQL-compatible scalar functions.
     - EXPLAIN now reports a `cost` column for the chosen plan.
     - Added persisted stats via `ANALYZE TABLE` (`table_rows`, `index_distinct_keys`) in catalog metadata.
     - EXPLAIN row estimation now prefers persisted `table_rows` when available.
+    - Planner cost model now incorporates persisted `table_rows`/`index_distinct_keys` when available, with conservative fallback selectivity when stats are missing.
+    - EXPLAIN `rows`/`cost` now uses the same planner estimation logic (with table-row fallback), so estimates reflect planner tradeoffs.
   - Done when:
     - Planner compares at least full-scan vs single-index vs join-order alternatives.
     - Basic column stats/histograms are persisted and refreshable.

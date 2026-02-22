@@ -360,7 +360,6 @@ impl Parser {
     fn parse_column_spec(&mut self) -> Result<ColumnSpec, String> {
         let name = self.expect_ident()?;
         let data_type = self.parse_data_type()?;
-        let mut collation = None;
 
         let mut is_primary_key = false;
         let mut is_unique = false;
@@ -399,10 +398,6 @@ impl Parser {
                     check_expr = Some(self.parse_expr()?);
                     self.expect(&Token::RParen)?;
                 }
-                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("collate") => {
-                    self.advance();
-                    collation = Some(self.expect_ident()?);
-                }
                 _ => break,
             }
         }
@@ -410,7 +405,6 @@ impl Parser {
         Ok(ColumnSpec {
             name,
             data_type,
-            collation,
             is_primary_key,
             is_unique,
             is_nullable,
@@ -1938,21 +1932,6 @@ mod tests {
             assert!(ci.is_unique);
         } else {
             panic!("Expected CreateIndex");
-        }
-    }
-
-    #[test]
-    fn test_parse_column_with_collate() {
-        let stmt =
-            parse_sql("CREATE TABLE t (name VARCHAR COLLATE utf8mb4_ja_0900_as_cs)").unwrap();
-        if let Statement::CreateTable(ct) = stmt {
-            assert_eq!(ct.columns.len(), 1);
-            assert_eq!(
-                ct.columns[0].collation.as_deref(),
-                Some("utf8mb4_ja_0900_as_cs")
-            );
-        } else {
-            panic!("Expected CreateTable");
         }
     }
 

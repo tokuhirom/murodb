@@ -47,6 +47,7 @@ cargo run --release --bin murodb_bench
 | Date (UTC) | Commit | Environment | Notes |
 |---|---|---|---|
 | 2026-02-22 | `a78694537f59` | local dev machine | first baseline |
+| 2026-02-22 | `829ad18145c2` | local dev machine | after secondary-index root persistence fix |
 
 ### 2026-02-22 / `a78694537f59`
 
@@ -59,6 +60,27 @@ Raw output summary:
 | insert_autocommit | 5,000 | 8.785356 | 569.13 | 1.5480 | 2.4816 | 5.7406 |
 | range_scan_limit_100 | 2,000 | 20.240664 | 98.81 | 9.6326 | 13.5310 | 13.9811 |
 | mixed_80r_15u_5i | 10,000 | 10.417702 | 959.90 | 0.0112 | 6.2421 | 6.7669 |
+
+Row counts:
+
+- start: `20,000`
+- after insert phase: `25,000`
+- final: `25,519`
+
+### 2026-02-22 / `829ad18145c2`
+
+Raw output summary:
+
+| Workload | Ops | Total sec | Ops/sec | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| point_select_pk | 20,000 | 0.123495 | 161,949.51 | 0.0072 | 0.0076 | 0.0087 |
+| point_update_pk | 5,000 | 8.146347 | 613.77 | 1.4856 | 2.0578 | 5.4681 |
+| insert_autocommit | 5,000 | 8.675668 | 576.32 | 1.5077 | 2.7074 | 5.8033 |
+| range_scan_limit_100 | 2,000 | 18.577489 | 107.66 | 9.2207 | 12.1729 | 12.5408 |
+| mixed_80r_15u_5i | 10,000 | 3.626337 | 2,757.60 | 0.0098 | 1.7256 | 2.4382 |
+| fts_select_natural | 5,000 | 2.797700 | 1,787.18 | 0.5595 | 0.6087 | 0.6366 |
+| fts_update_point | 2,000 | 11.462999 | 174.47 | 5.4321 | 7.0625 | 9.7803 |
+| fts_mixed_70q_30u | 5,000 | 10.865190 | 460.19 | 0.6296 | 6.3375 | 7.4033 |
 
 Row counts:
 

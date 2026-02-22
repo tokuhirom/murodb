@@ -876,7 +876,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("Unsupported collation"));
-        assert!(err.contains("only binary is supported"));
+        assert!(err.contains("only binary and nocase are supported"));
     }
 
     #[test]
@@ -889,6 +889,33 @@ mod tests {
         )
         .unwrap();
         execute("INSERT INTO t VALUES (1, 'b')", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (2, 'a')", &mut pager, &mut catalog).unwrap();
+
+        let result = execute(
+            "SELECT id FROM t ORDER BY name ASC",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(2)));
+            assert_eq!(rows[1].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_order_by_uses_nocase_collation_path() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (1, 'B')", &mut pager, &mut catalog).unwrap();
         execute("INSERT INTO t VALUES (2, 'a')", &mut pager, &mut catalog).unwrap();
 
         let result = execute(

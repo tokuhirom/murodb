@@ -170,6 +170,13 @@ MySQL-compatible scalar functions.
     - WAL + data file epoch mismatch handling is crash-safe.
     - Rotation metrics/events are visible via inspection commands.
 - [ ] Collation support (Japanese sort order, etc.)
+  - Progress:
+    - Added column-level collation metadata (`COLLATE`) for `VARCHAR`/`TEXT`.
+    - Current supported collations are `binary` (default) and `nocase` (ASCII case-insensitive).
+    - `ORDER BY` now consults column collation metadata.
+  - Remaining:
+    - Apply collation semantics to `WHERE` comparisons and `LIKE`.
+    - Align index key encoding/order with collation rules.
   - Done when:
     - Collation can be selected per column/index.
     - ORDER BY / comparison / LIKE behavior is deterministic per collation.

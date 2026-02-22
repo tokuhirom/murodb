@@ -85,9 +85,6 @@ pub(super) fn exec_create_table(
         .iter()
         .map(|cs| {
             let mut col = ColumnDef::new(&cs.name, cs.data_type);
-            if let Some(collation) = &cs.collation {
-                col = col.with_collation(collation);
-            }
             if cs.is_primary_key {
                 col = col.primary_key();
             }

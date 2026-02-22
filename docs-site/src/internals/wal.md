@@ -16,6 +16,17 @@ All WAL records are encrypted.
 
 ## Write Path
 
+### Read-Only Query Path (`Database::query`)
+
+```
+Database::query(sql)
+  1. Acquire shared lock
+  2. Parse and validate statement is read-only
+  3. Execute directly on pager/catalog (no implicit tx, no WAL append)
+```
+
+If an explicit transaction is active, read statements are executed in the transaction context (`execute_in_tx`) so uncommitted writes remain visible to that session.
+
 ### Auto-Commit Mode (no explicit BEGIN)
 
 ```

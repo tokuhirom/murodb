@@ -119,6 +119,78 @@ impl Session {
         }
     }
 
+    /// Execute a read-only SQL query and return rows.
+    ///
+    /// This path avoids auto-commit WAL writes for non-transactional reads.
+    pub fn execute_read_only_query(&mut self, sql: &str) -> Result<Vec<Row>> {
+        let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
+
+        // Stats queries are always allowed, even on poisoned sessions.
+        match &stmt {
+            Statement::ShowCheckpointStats => {
+                return Self::rows_from_exec_result(self.handle_show_checkpoint_stats())
+            }
+            Statement::ShowDatabaseStats => {
+                return Self::rows_from_exec_result(self.handle_show_database_stats())
+            }
+            _ => {}
+        }
+
+        self.check_poisoned()?;
+
+        if !Self::is_read_only_statement(&stmt) {
+            return Err(MuroError::Execution(
+                "Database::query accepts read-only SQL only; use execute() for writes".into(),
+            ));
+        }
+
+        if self.active_tx.is_some() {
+            Self::rows_from_exec_result(self.execute_in_tx(&stmt))
+        } else {
+            // Read directly from pager/catalog without opening an implicit WAL transaction.
+            Self::rows_from_exec_result(execute_statement(
+                &stmt,
+                &mut self.pager,
+                &mut self.catalog,
+            ))
+        }
+    }
+
+    fn rows_from_exec_result(result: Result<ExecResult>) -> Result<Vec<Row>> {
+        match result? {
+            ExecResult::Rows(rows) => Ok(rows),
+            ExecResult::RowsAffected(_) | ExecResult::Ok => Err(MuroError::Execution(
+                "Read-only query must return rows".into(),
+            )),
+        }
+    }
+
+    fn is_read_only_statement(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Select(_)
+            | Statement::SetQuery(_)
+            | Statement::ShowTables
+            | Statement::ShowCreateTable(_)
+            | Statement::Describe(_)
+            | Statement::ShowCheckpointStats
+            | Statement::ShowDatabaseStats => true,
+            Statement::Explain(inner) => Self::is_read_only_statement(inner),
+            Statement::CreateTable(_)
+            | Statement::CreateIndex(_)
+            | Statement::CreateFulltextIndex(_)
+            | Statement::DropTable(_)
+            | Statement::DropIndex(_)
+            | Statement::AlterTable(_)
+            | Statement::RenameTable(_)
+            | Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback => false,
+        }
+    }
+
     fn handle_begin(&mut self) -> Result<ExecResult> {
         if self.active_tx.is_some() {
             return Err(MuroError::Transaction("Transaction already active".into()));
@@ -939,5 +1011,80 @@ mod tests {
             }
             _ => panic!("Expected rows from SHOW CHECKPOINT STATS"),
         }
+    }
+
+    #[test]
+    fn test_read_only_query_select_does_not_create_wal_records() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        session
+            .execute("INSERT INTO t VALUES (1, 'alice')")
+            .unwrap();
+
+        let wal_before = std::fs::metadata(&wal_path).unwrap().len();
+        let rows = session
+            .execute_read_only_query("SELECT id, name FROM t")
+            .unwrap();
+        let wal_after = std::fs::metadata(&wal_path).unwrap().len();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(wal_before, wal_after, "read-only query must not append WAL");
+    }
+
+    #[test]
+    fn test_read_only_query_rejects_writes() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        let result = session.execute_read_only_query("INSERT INTO t VALUES (1)");
+        assert!(matches!(result, Err(MuroError::Execution(_))));
+    }
+
+    #[test]
+    fn test_read_only_query_in_explicit_tx_reads_uncommitted_state() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        session.execute("BEGIN").unwrap();
+        session
+            .execute("INSERT INTO t VALUES (1, 'alice')")
+            .unwrap();
+
+        let rows = session.execute_read_only_query("SELECT id FROM t").unwrap();
+        assert_eq!(rows.len(), 1);
+
+        session.execute("ROLLBACK").unwrap();
+        let rows = session.execute_read_only_query("SELECT id FROM t").unwrap();
+        assert!(rows.is_empty());
     }
 }

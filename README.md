@@ -50,6 +50,12 @@ Main entry points:
 - `docs-site/src/user-guide/recovery.md`
 - `docs-site/src/internals/architecture.md`
 
+## API Notes
+
+- `Database::execute(sql)` is the general SQL entrypoint (read/write, exclusive lock).
+- `Database::query(sql)` is read-only (shared lock, rejects write SQL).
+- CLI auto-routes read-only SQL to the read path; inside explicit transactions it always uses execute semantics.
+
 ## Repository Layout
 
 - `src/` - database implementation

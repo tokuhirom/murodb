@@ -256,14 +256,13 @@ impl Database {
         self.session.execute(sql)
     }
 
-    /// Execute a SQL query and return rows.
-    /// Uses a write lock because auto-commit SELECTs may write to WAL.
+    /// Execute a read-only SQL query and return rows.
+    ///
+    /// This uses a shared lock so multiple readers can run concurrently.
+    /// Non-read-only SQL returns an execution error.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.write_lock()?;
-        match self.session.execute(sql)? {
-            ExecResult::Rows(rows) => Ok(rows),
-            _ => Ok(Vec::new()),
-        }
+        let _guard = self.lock_manager.read_lock()?;
+        self.session.execute_read_only_query(sql)
     }
 
     /// Get the catalog root page ID (needed for reopening).

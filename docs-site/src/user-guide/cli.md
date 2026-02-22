@@ -39,6 +39,14 @@ murodb mydb.db --format json -e "SELECT * FROM t"
 
 ```
 
+## Query routing behavior
+
+The CLI parses each statement and routes execution automatically:
+
+- Read-only statements (`SELECT`, `UNION`, `EXPLAIN SELECT`, `SHOW ...`, `DESCRIBE`) use the read path.
+- Write and transaction-control statements (`INSERT`, `UPDATE`, `DELETE`, DDL, `BEGIN`/`COMMIT`/`ROLLBACK`) use the write path.
+- While an explicit transaction is active (`BEGIN` ... `COMMIT`/`ROLLBACK`), all statements (including `SELECT`) run with execute semantics.
+
 ## JSON output
 
 When using `--format json`, results are emitted as a single JSON object per statement.

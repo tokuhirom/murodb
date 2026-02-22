@@ -3,7 +3,9 @@ use std::process;
 
 use base64::Engine;
 use clap::{Parser, ValueEnum};
+use murodb::sql::ast::Statement;
 use murodb::sql::executor::ExecResult;
+use murodb::sql::parser::parse_sql;
 use murodb::types::Value;
 use murodb::wal::recovery::RecoveryMode;
 use murodb::Database;
@@ -251,11 +253,86 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg) {
-    match db.execute(sql) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionRoute {
+    Execute,
+    Query,
+}
+
+fn is_read_only_statement(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(_)
+        | Statement::SetQuery(_)
+        | Statement::ShowTables
+        | Statement::ShowCreateTable(_)
+        | Statement::Describe(_)
+        | Statement::ShowCheckpointStats
+        | Statement::ShowDatabaseStats => true,
+        Statement::Explain(inner) => is_read_only_statement(inner),
+        Statement::CreateTable(_)
+        | Statement::CreateIndex(_)
+        | Statement::CreateFulltextIndex(_)
+        | Statement::DropTable(_)
+        | Statement::DropIndex(_)
+        | Statement::AlterTable(_)
+        | Statement::RenameTable(_)
+        | Statement::Insert(_)
+        | Statement::Update(_)
+        | Statement::Delete(_)
+        | Statement::Begin
+        | Statement::Commit
+        | Statement::Rollback => false,
+    }
+}
+
+fn choose_execution_route(stmt: &Statement, in_explicit_tx: bool) -> ExecutionRoute {
+    if in_explicit_tx {
+        ExecutionRoute::Execute
+    } else if is_read_only_statement(stmt) {
+        ExecutionRoute::Query
+    } else {
+        ExecutionRoute::Execute
+    }
+}
+
+fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explicit_tx: &mut bool) {
+    let stmt = match parse_sql(sql) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            match format {
+                OutputFormatArg::Text => eprintln!("ERROR: SQL parse error: {}", e),
+                OutputFormatArg::Json => {
+                    println!("{}", format_error_json(&format!("SQL parse error: {}", e)))
+                }
+            }
+            return;
+        }
+    };
+
+    let route = choose_execution_route(&stmt, *in_explicit_tx);
+    let result = match route {
+        ExecutionRoute::Execute => db.execute(sql),
+        ExecutionRoute::Query => db.query(sql).map(ExecResult::Rows),
+    };
+
+    match result {
         Ok(result) => match format {
-            OutputFormatArg::Text => println!("{}", format_rows(&result)),
-            OutputFormatArg::Json => println!("{}", format_rows_json(&result)),
+            OutputFormatArg::Text => {
+                if matches!(stmt, Statement::Begin) {
+                    *in_explicit_tx = true;
+                } else if matches!(stmt, Statement::Commit | Statement::Rollback) {
+                    *in_explicit_tx = false;
+                }
+                println!("{}", format_rows(&result));
+            }
+            OutputFormatArg::Json => {
+                if matches!(stmt, Statement::Begin) {
+                    *in_explicit_tx = true;
+                } else if matches!(stmt, Statement::Commit | Statement::Rollback) {
+                    *in_explicit_tx = false;
+                }
+                println!("{}", format_rows_json(&result));
+            }
         },
         Err(e) => match format {
             OutputFormatArg::Text => eprintln!("ERROR: {}", e),
@@ -271,6 +348,7 @@ fn run_repl(db: &mut Database, format: &OutputFormatArg) {
     });
 
     let mut buffer = String::new();
+    let mut in_explicit_tx = false;
 
     loop {
         let prompt = if buffer.is_empty() {
@@ -297,7 +375,7 @@ fn run_repl(db: &mut Database, format: &OutputFormatArg) {
                 if buffer.trim_end().ends_with(';') {
                     let sql = buffer.trim().to_string();
                     let _ = rl.add_history_entry(&sql);
-                    execute_sql(db, &sql, format);
+                    execute_sql(db, &sql, format, &mut in_explicit_tx);
                     buffer.clear();
                 }
             }
@@ -380,7 +458,8 @@ fn main() {
     };
 
     if let Some(sql) = &cli.execute {
-        execute_sql(&mut db, sql, &cli.format);
+        let mut in_explicit_tx = false;
+        execute_sql(&mut db, sql, &cli.format, &mut in_explicit_tx);
         if let Err(e) = db.flush() {
             eprintln!("ERROR: Failed to flush database: {}", e);
             process::exit(1);
@@ -444,6 +523,27 @@ mod tests {
         assert_eq!(
             json,
             "{\"type\":\"error\",\"message\":\"bad \\\"sql\\\"\\nline\"}"
+        );
+    }
+
+    #[test]
+    fn choose_route_select_outside_tx_uses_query() {
+        let stmt = parse_sql("SELECT * FROM t").unwrap();
+        assert_eq!(choose_execution_route(&stmt, false), ExecutionRoute::Query);
+    }
+
+    #[test]
+    fn choose_route_select_inside_tx_uses_execute() {
+        let stmt = parse_sql("SELECT * FROM t").unwrap();
+        assert_eq!(choose_execution_route(&stmt, true), ExecutionRoute::Execute);
+    }
+
+    #[test]
+    fn choose_route_insert_uses_execute() {
+        let stmt = parse_sql("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(
+            choose_execution_route(&stmt, false),
+            ExecutionRoute::Execute
         );
     }
 }

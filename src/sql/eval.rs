@@ -12,7 +12,7 @@ mod pattern;
 use cast::eval_cast;
 pub use compare::is_truthy;
 use compare::value_cmp;
-use functions::{eval_case_when, eval_function_call};
+use functions::{eval_case_when, eval_case_when_with, eval_function_call, eval_function_call_with};
 use ops::{eval_binary_op, eval_unary_op};
 use pattern::like_match;
 
@@ -268,19 +268,101 @@ pub fn eval_expr_with_collation(
             }
         }
 
-        Expr::InList { .. }
-        | Expr::Between { .. }
-        | Expr::IsNull { .. }
-        | Expr::FunctionCall { .. }
-        | Expr::CaseWhen { .. }
-        | Expr::Cast { .. }
-        | Expr::AggregateFunc { .. }
-        | Expr::MatchAgainst { .. }
-        | Expr::FtsSnippet { .. }
-        | Expr::GreaterThanZero(_)
-        | Expr::InSubquery { .. }
-        | Expr::Exists { .. }
-        | Expr::ScalarSubquery(_) => eval_expr(expr, columns),
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            let mut found = false;
+            let mut has_null = false;
+            for item in list {
+                let item_val = eval_expr_with_collation(item, columns, resolve_collation)?;
+                if item_val.is_null() {
+                    has_null = true;
+                    continue;
+                }
+                let collation = resolve_collation(expr, item)?;
+                if value_cmp_with_collation(&val, &item_val, collation.as_deref())?
+                    == Some(std::cmp::Ordering::Equal)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                Ok(Value::Integer(if *negated { 0 } else { 1 }))
+            } else if has_null {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Integer(if *negated { 1 } else { 0 }))
+            }
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
+            let low_val = eval_expr_with_collation(low, columns, resolve_collation)?;
+            let high_val = eval_expr_with_collation(high, columns, resolve_collation)?;
+            if val.is_null() || low_val.is_null() || high_val.is_null() {
+                return Ok(Value::Null);
+            }
+            let low_collation = resolve_collation(expr, low)?;
+            let high_collation = resolve_collation(expr, high)?;
+            let ge_low = matches!(
+                value_cmp_with_collation(&val, &low_val, low_collation.as_deref())?,
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+            );
+            let le_high = matches!(
+                value_cmp_with_collation(&val, &high_val, high_collation.as_deref())?,
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            );
+            let in_range = ge_low && le_high;
+            let result = if *negated { !in_range } else { in_range };
+            Ok(Value::Integer(if result { 1 } else { 0 }))
+        }
+        Expr::IsNull { expr, negated } => {
+            let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
+            let is_null = val.is_null();
+            let result = if *negated { !is_null } else { is_null };
+            Ok(Value::Integer(if result { 1 } else { 0 }))
+        }
+        Expr::FunctionCall { name, args } => {
+            eval_function_call_with(name, args, columns, &|e, c| {
+                eval_expr_with_collation(e, c, resolve_collation)
+            })
+        }
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => eval_case_when_with(operand, when_clauses, else_clause, columns, &|e, c| {
+            eval_expr_with_collation(e, c, resolve_collation)
+        }),
+        Expr::Cast { expr, target_type } => {
+            let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
+            eval_cast(&val, target_type)
+        }
+        Expr::AggregateFunc { .. } | Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => {
+            eval_expr(expr, columns)
+        }
+        Expr::GreaterThanZero(inner) => {
+            let val = eval_expr_with_collation(inner, columns, resolve_collation)?;
+            match val {
+                Value::Integer(n) => Ok(Value::Integer(if n > 0 { 1 } else { 0 })),
+                Value::Float(n) => Ok(Value::Integer(if n > 0.0 { 1 } else { 0 })),
+                _ => Ok(Value::Integer(0)),
+            }
+        }
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => {
+            eval_expr(expr, columns)
+        }
     }
 }
 

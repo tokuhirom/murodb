@@ -6,10 +6,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::compare::{is_truthy, value_cmp};
 use super::eval_expr;
 
+type EvalFn<'a> = dyn Fn(&Expr, &dyn Fn(&str) -> Option<Value>) -> Result<Value> + 'a;
+
 pub(super) fn eval_function_call(
     name: &str,
     args: &[Expr],
     columns: &dyn Fn(&str) -> Option<Value>,
+) -> Result<Value> {
+    eval_function_call_with(name, args, columns, &|expr, cols| eval_expr(expr, cols))
+}
+
+pub(super) fn eval_function_call_with(
+    name: &str,
+    args: &[Expr],
+    columns: &dyn Fn(&str) -> Option<Value>,
+    eval_fn: &EvalFn<'_>,
 ) -> Result<Value> {
     match name {
         // Date/time functions
@@ -19,7 +30,7 @@ pub(super) fn eval_function_call(
         }
         "DATE_FORMAT" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -34,7 +45,7 @@ pub(super) fn eval_function_call(
         // NULL handling & conditional (these have special NULL semantics)
         "COALESCE" => {
             for arg in args {
-                let val = eval_expr(arg, columns)?;
+                let val = eval_fn(arg, columns)?;
                 if !val.is_null() {
                     return Ok(val);
                 }
@@ -43,17 +54,17 @@ pub(super) fn eval_function_call(
         }
         "IFNULL" => {
             check_args(name, args, 2)?;
-            let a = eval_expr(&args[0], columns)?;
+            let a = eval_fn(&args[0], columns)?;
             if !a.is_null() {
                 Ok(a)
             } else {
-                eval_expr(&args[1], columns)
+                eval_fn(&args[1], columns)
             }
         }
         "NULLIF" => {
             check_args(name, args, 2)?;
-            let a = eval_expr(&args[0], columns)?;
-            let b = eval_expr(&args[1], columns)?;
+            let a = eval_fn(&args[0], columns)?;
+            let b = eval_fn(&args[1], columns)?;
             if !a.is_null() && !b.is_null() && value_cmp(&a, &b) == Some(std::cmp::Ordering::Equal)
             {
                 Ok(Value::Null)
@@ -63,18 +74,18 @@ pub(super) fn eval_function_call(
         }
         "IF" => {
             check_args(name, args, 3)?;
-            let cond = eval_expr(&args[0], columns)?;
+            let cond = eval_fn(&args[0], columns)?;
             if is_truthy(&cond) {
-                eval_expr(&args[1], columns)
+                eval_fn(&args[1], columns)
             } else {
-                eval_expr(&args[2], columns)
+                eval_fn(&args[2], columns)
             }
         }
 
         // String functions (basic)
         "LENGTH" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -86,7 +97,7 @@ pub(super) fn eval_function_call(
         }
         "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -103,7 +114,7 @@ pub(super) fn eval_function_call(
             }
             let mut result = String::new();
             for arg in args {
-                let val = eval_expr(arg, columns)?;
+                let val = eval_fn(arg, columns)?;
                 if val.is_null() {
                     return Ok(Value::Null);
                 }
@@ -118,7 +129,7 @@ pub(super) fn eval_function_call(
                     name
                 )));
             }
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -161,7 +172,7 @@ pub(super) fn eval_function_call(
         }
         "UPPER" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -169,7 +180,7 @@ pub(super) fn eval_function_call(
         }
         "LOWER" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -179,7 +190,7 @@ pub(super) fn eval_function_call(
         // String functions (extended)
         "TRIM" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -187,7 +198,7 @@ pub(super) fn eval_function_call(
         }
         "LTRIM" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -195,7 +206,7 @@ pub(super) fn eval_function_call(
         }
         "RTRIM" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -203,7 +214,7 @@ pub(super) fn eval_function_call(
         }
         "REPLACE" => {
             check_args(name, args, 3)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -215,7 +226,7 @@ pub(super) fn eval_function_call(
         }
         "REVERSE" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -223,7 +234,7 @@ pub(super) fn eval_function_call(
         }
         "REPEAT" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -239,7 +250,7 @@ pub(super) fn eval_function_call(
         }
         "LEFT" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -255,7 +266,7 @@ pub(super) fn eval_function_call(
         }
         "RIGHT" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -273,7 +284,7 @@ pub(super) fn eval_function_call(
         }
         "LPAD" => {
             check_args(name, args, 3)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -301,7 +312,7 @@ pub(super) fn eval_function_call(
         }
         "RPAD" => {
             check_args(name, args, 3)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -328,7 +339,7 @@ pub(super) fn eval_function_call(
         }
         "INSTR" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -349,7 +360,7 @@ pub(super) fn eval_function_call(
                     "LOCATE requires 2 or 3 arguments".into(),
                 ));
             }
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -382,7 +393,7 @@ pub(super) fn eval_function_call(
         // REGEXP
         "REGEXP" | "REGEXP_LIKE" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -397,7 +408,7 @@ pub(super) fn eval_function_call(
         // Numeric functions
         "ABS" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -409,7 +420,7 @@ pub(super) fn eval_function_call(
         }
         "CEIL" | "CEILING" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -424,7 +435,7 @@ pub(super) fn eval_function_call(
         }
         "FLOOR" => {
             check_args(name, args, 1)?;
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -442,7 +453,7 @@ pub(super) fn eval_function_call(
                     "ROUND requires 1 or 2 arguments".into(),
                 ));
             }
-            let val = eval_expr(&args[0], columns)?;
+            let val = eval_fn(&args[0], columns)?;
             if val.is_null() {
                 return Ok(Value::Null);
             }
@@ -451,7 +462,7 @@ pub(super) fn eval_function_call(
                 Value::Integer(n) => Ok(Value::Integer(n)),
                 Value::Float(n) => {
                     let scale = if args.len() == 2 {
-                        eval_expr(&args[1], columns)?.as_i64().ok_or_else(|| {
+                        eval_fn(&args[1], columns)?.as_i64().ok_or_else(|| {
                             MuroError::Execution("ROUND scale must be integer".into())
                         })?
                     } else {
@@ -467,7 +478,7 @@ pub(super) fn eval_function_call(
         }
         "MOD" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -494,7 +505,7 @@ pub(super) fn eval_function_call(
         }
         "POWER" | "POW" => {
             check_args(name, args, 2)?;
-            let vals = eval_args_null_check(args, columns)?;
+            let vals = eval_args_null_check(args, columns, eval_fn)?;
             let vals = match vals {
                 Some(v) => v,
                 None => return Ok(Value::Null),
@@ -729,10 +740,11 @@ fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<()> {
 fn eval_args_null_check(
     args: &[Expr],
     columns: &dyn Fn(&str) -> Option<Value>,
+    eval_fn: &EvalFn<'_>,
 ) -> Result<Option<Vec<Value>>> {
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let val = eval_expr(arg, columns)?;
+        let val = eval_fn(arg, columns)?;
         if val.is_null() {
             return Ok(None);
         }
@@ -747,32 +759,48 @@ pub(super) fn eval_case_when(
     else_clause: &Option<Box<Expr>>,
     columns: &dyn Fn(&str) -> Option<Value>,
 ) -> Result<Value> {
+    eval_case_when_with(
+        operand,
+        when_clauses,
+        else_clause,
+        columns,
+        &|expr, cols| eval_expr(expr, cols),
+    )
+}
+
+pub(super) fn eval_case_when_with(
+    operand: &Option<Box<Expr>>,
+    when_clauses: &[(Expr, Expr)],
+    else_clause: &Option<Box<Expr>>,
+    columns: &dyn Fn(&str) -> Option<Value>,
+    eval_fn: &EvalFn<'_>,
+) -> Result<Value> {
     match operand {
         Some(op_expr) => {
             // Simple CASE: CASE expr WHEN val THEN result ...
-            let op_val = eval_expr(op_expr, columns)?;
+            let op_val = eval_fn(op_expr, columns)?;
             for (when_expr, then_expr) in when_clauses {
-                let when_val = eval_expr(when_expr, columns)?;
+                let when_val = eval_fn(when_expr, columns)?;
                 if !op_val.is_null()
                     && !when_val.is_null()
                     && value_cmp(&op_val, &when_val) == Some(std::cmp::Ordering::Equal)
                 {
-                    return eval_expr(then_expr, columns);
+                    return eval_fn(then_expr, columns);
                 }
             }
         }
         None => {
             // Searched CASE: CASE WHEN condition THEN result ...
             for (cond_expr, then_expr) in when_clauses {
-                let cond_val = eval_expr(cond_expr, columns)?;
+                let cond_val = eval_fn(cond_expr, columns)?;
                 if is_truthy(&cond_val) {
-                    return eval_expr(then_expr, columns);
+                    return eval_fn(then_expr, columns);
                 }
             }
         }
     }
     match else_clause {
-        Some(else_expr) => eval_expr(else_expr, columns),
+        Some(else_expr) => eval_fn(else_expr, columns),
         None => Ok(Value::Null),
     }
 }

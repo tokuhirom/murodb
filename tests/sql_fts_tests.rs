@@ -379,3 +379,121 @@ fn test_sql_fulltext_insert_keeps_index_reachable_after_root_splits() {
         "expected inserted row to remain searchable after index growth"
     );
 }
+
+#[test]
+fn test_sql_fulltext_stop_ngram_filter_toggle() {
+    // stop_filter=off: frequent token matches remain.
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (1, '東京タワー')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (2, '東京駅')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (3, '東京大学')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (4, '東京ドーム')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter='off', stop_df_ratio_ppm=500000)",
+    );
+    let rows_off = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id",
+    );
+    assert!(
+        rows_off.len() >= 2,
+        "expected broad matches without stop filter, got {} rows",
+        rows_off.len()
+    );
+
+    // stop_filter=on: very frequent token "東京" is skipped at 50% threshold.
+    let (mut pager2, mut catalog2, _dir2) = setup();
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "INSERT INTO t VALUES (1, '東京タワー')",
+    );
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "INSERT INTO t VALUES (2, '東京駅')",
+    );
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "INSERT INTO t VALUES (3, '東京大学')",
+    );
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "INSERT INTO t VALUES (4, '東京ドーム')",
+    );
+    exec(
+        &mut pager2,
+        &mut catalog2,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter='on', stop_df_ratio_ppm=500000)",
+    );
+    let rows_on = query_rows(
+        &mut pager2,
+        &mut catalog2,
+        "SELECT id FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id",
+    );
+    assert_eq!(rows_on.len(), 1);
+    assert_eq!(rows_on[0].get("id"), Some(&Value::Integer(1)));
+}
+
+#[test]
+fn test_sql_fulltext_stop_df_ratio_validation() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter='on', stop_df_ratio_ppm=1000001)",
+    );
+    assert!(err.contains("stop_df_ratio_ppm=1000001 is out of range"));
+}
+
+#[test]
+fn test_sql_fulltext_stop_df_ratio_rejects_wrapping_input() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    let err = exec_err(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter='on', stop_df_ratio_ppm=4294967297)",
+    );
+    assert!(err.contains("stop_df_ratio_ppm is too large"));
+}

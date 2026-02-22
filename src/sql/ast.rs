@@ -104,6 +104,10 @@ pub struct CreateFulltextIndex {
     pub parser: String,    // e.g. "ngram"
     pub ngram_n: usize,    // e.g. 2
     pub normalize: String, // e.g. "nfkc"
+    /// Skip very frequent low-information ngrams during NATURAL mode scoring.
+    pub stop_filter: bool,
+    /// Document-frequency threshold in parts-per-million (0..=1_000_000).
+    pub stop_df_ratio_ppm: u32,
 }
 
 #[derive(Debug, Clone)]

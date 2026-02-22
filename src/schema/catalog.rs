@@ -570,6 +570,8 @@ mod tests {
             is_unique: true,
             btree_root: 99,
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
 
         catalog.create_index(&mut pager, idx).unwrap();

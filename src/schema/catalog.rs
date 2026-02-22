@@ -332,6 +332,15 @@ impl SystemCatalog {
         }
     }
 
+    /// Update an existing index definition.
+    pub fn update_index(&mut self, pager: &mut impl PageStore, index_def: &IndexDef) -> Result<()> {
+        let key = format!("index:{}", index_def.name);
+        let serialized = index_def.serialize();
+        self.catalog_btree
+            .insert(pager, key.as_bytes(), &serialized)?;
+        Ok(())
+    }
+
     /// Get all indexes for a table.
     pub fn get_indexes_for_table(
         &self,

@@ -12,7 +12,7 @@ pub(super) fn exec_update(
     // Upgrade v0 tables before writing v1-format rows
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
-    let indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
+    let mut indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
@@ -122,14 +122,15 @@ pub(super) fn exec_update(
         check_unique_index_constraints(&table_def, &indexes, &new_values, pager)?;
 
         // Update secondary indexes: remove old entries, insert new entries
-        delete_from_secondary_indexes(&table_def, &indexes, &old_values, &pk_key, pager)?;
-        insert_into_secondary_indexes(&table_def, &indexes, &new_values, &pk_key, pager)?;
+        delete_from_secondary_indexes(&table_def, &mut indexes, &old_values, &pk_key, pager)?;
+        insert_into_secondary_indexes(&table_def, &mut indexes, &new_values, &pk_key, pager)?;
 
         let row_data = serialize_row(&new_values, &table_def.columns);
         data_btree.insert(pager, &pk_key, &row_data)?;
         count += 1;
     }
 
+    persist_indexes(catalog, pager, &indexes)?;
     Ok(ExecResult::RowsAffected(count))
 }
 
@@ -142,7 +143,7 @@ pub(super) fn exec_delete(
         .get_table(pager, &del.table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", del.table_name)))?;
 
-    let indexes = catalog.get_indexes_for_table(pager, &del.table_name)?;
+    let mut indexes = catalog.get_indexes_for_table(pager, &del.table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
@@ -219,10 +220,11 @@ pub(super) fn exec_delete(
     let mut count = 0u64;
 
     for (pk_key, values) in &to_delete {
-        delete_from_secondary_indexes(&table_def, &indexes, values, pk_key, pager)?;
+        delete_from_secondary_indexes(&table_def, &mut indexes, values, pk_key, pager)?;
         data_btree.delete(pager, pk_key)?;
         count += 1;
     }
 
+    persist_indexes(catalog, pager, &indexes)?;
     Ok(ExecResult::RowsAffected(count))
 }

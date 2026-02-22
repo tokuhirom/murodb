@@ -75,31 +75,16 @@ fn build_snippet(
     post_tag: &str,
     context_chars: usize,
 ) -> String {
-    let text_chars: Vec<char> = text.chars().collect();
-
-    // Convert byte offsets to char offsets
-    let mut char_start = 0;
-    let mut byte_count = 0;
-    for (i, ch) in text_chars.iter().enumerate() {
-        if byte_count >= match_start {
-            char_start = i;
-            break;
-        }
-        byte_count += ch.len_utf8();
-    }
-
-    let mut char_end = char_start;
-    byte_count = 0;
-    for (i, ch) in text_chars[char_start..].iter().enumerate() {
-        byte_count += ch.len_utf8();
-        if byte_count >= match_len {
-            char_end = char_start + i + 1;
-            break;
-        }
-    }
+    let offsets = CharOffsetMap::new(text);
+    let char_start = offsets.byte_to_char_index(match_start);
+    let char_end = offsets.byte_to_char_index(match_start.saturating_add(match_len));
 
     let snippet_start = char_start.saturating_sub(context_chars);
-    let snippet_end = (char_end + context_chars).min(text_chars.len());
+    let snippet_end = (char_end + context_chars).min(offsets.char_len());
+    let snippet_start_b = offsets.char_to_byte(snippet_start);
+    let char_start_b = offsets.char_to_byte(char_start);
+    let char_end_b = offsets.char_to_byte(char_end);
+    let snippet_end_b = offsets.char_to_byte(snippet_end);
 
     let mut result = String::new();
 
@@ -108,20 +93,17 @@ fn build_snippet(
     }
 
     // Before match
-    let before: String = text_chars[snippet_start..char_start].iter().collect();
-    result.push_str(&before);
+    result.push_str(&text[snippet_start_b..char_start_b]);
 
     // Match with tags
     result.push_str(pre_tag);
-    let matched: String = text_chars[char_start..char_end].iter().collect();
-    result.push_str(&matched);
+    result.push_str(&text[char_start_b..char_end_b]);
     result.push_str(post_tag);
 
     // After match
-    let after: String = text_chars[char_end..snippet_end].iter().collect();
-    result.push_str(&after);
+    result.push_str(&text[char_end_b..snippet_end_b]);
 
-    if snippet_end < text_chars.len() {
+    if snippet_end < offsets.char_len() {
         result.push_str("...");
     }
 
@@ -158,12 +140,47 @@ fn clean_query_string(query: &str) -> String {
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
+    let offsets = CharOffsetMap::new(text);
+    if offsets.char_len() <= max_chars {
         text.to_string()
     } else {
-        let truncated: String = chars[..max_chars].iter().collect();
+        let cut = offsets.char_to_byte(max_chars);
+        let truncated = &text[..cut];
         format!("{}...", truncated)
+    }
+}
+
+/// Maps UTF-8 byte offsets to character offsets and back.
+struct CharOffsetMap {
+    /// Byte offset for each char index; includes trailing `text.len()` sentinel.
+    char_to_byte: Vec<usize>,
+}
+
+impl CharOffsetMap {
+    fn new(text: &str) -> Self {
+        let mut char_to_byte = Vec::with_capacity(text.chars().count() + 1);
+        for (b, _) in text.char_indices() {
+            char_to_byte.push(b);
+        }
+        char_to_byte.push(text.len());
+        Self { char_to_byte }
+    }
+
+    fn char_len(&self) -> usize {
+        self.char_to_byte.len().saturating_sub(1)
+    }
+
+    fn char_to_byte(&self, char_idx: usize) -> usize {
+        let idx = char_idx.min(self.char_len());
+        self.char_to_byte[idx]
+    }
+
+    fn byte_to_char_index(&self, byte_offset: usize) -> usize {
+        let b = byte_offset.min(self.char_to_byte[self.char_len()]);
+        match self.char_to_byte.binary_search(&b) {
+            Ok(i) => i.min(self.char_len()),
+            Err(i) => i.saturating_sub(1).min(self.char_len()),
+        }
     }
 }
 
@@ -205,5 +222,12 @@ mod tests {
     fn test_clean_query() {
         assert_eq!(clean_query_string("\"東京タワー\""), "東京タワー");
         assert_eq!(clean_query_string("+東京 -混雑"), "東京 混雑");
+    }
+
+    #[test]
+    fn test_snippet_handles_multibyte_boundary_without_splitting() {
+        let text = "a😀b😀c";
+        let snippet = fts_snippet(text, "😀b😀", "<b>", "</b>", 1);
+        assert!(snippet.contains("<b>😀b😀</b>"));
     }
 }

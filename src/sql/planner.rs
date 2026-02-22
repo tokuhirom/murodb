@@ -6,6 +6,7 @@
 ///   FullScan          - Full table scan
 ///   FtsScan(col, query, mode) - FTS search
 use crate::sql::ast::*;
+use crate::sql::eval::eval_expr;
 
 #[derive(Debug)]
 pub enum Plan {
@@ -316,10 +317,10 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
                     }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
-                        BinaryOp::Gt => entry.lower = Some((*right.clone(), false)),
-                        BinaryOp::Ge => entry.lower = Some((*right.clone(), true)),
-                        BinaryOp::Lt => entry.upper = Some((*right.clone(), false)),
-                        BinaryOp::Le => entry.upper = Some((*right.clone(), true)),
+                        BinaryOp::Gt => merge_lower(entry, *right.clone(), false),
+                        BinaryOp::Ge => merge_lower(entry, *right.clone(), true),
+                        BinaryOp::Lt => merge_upper(entry, *right.clone(), false),
+                        BinaryOp::Le => merge_upper(entry, *right.clone(), true),
                         _ => {}
                     }
                 } else if let Expr::ColumnRef(col) = right.as_ref() {
@@ -328,10 +329,10 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
                     }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
-                        BinaryOp::Gt => entry.upper = Some((*left.clone(), false)),
-                        BinaryOp::Ge => entry.upper = Some((*left.clone(), true)),
-                        BinaryOp::Lt => entry.lower = Some((*left.clone(), false)),
-                        BinaryOp::Le => entry.lower = Some((*left.clone(), true)),
+                        BinaryOp::Gt => merge_upper(entry, *left.clone(), false),
+                        BinaryOp::Ge => merge_upper(entry, *left.clone(), true),
+                        BinaryOp::Lt => merge_lower(entry, *left.clone(), false),
+                        BinaryOp::Le => merge_lower(entry, *left.clone(), true),
                         _ => {}
                     }
                 }
@@ -347,12 +348,76 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
             if let Expr::ColumnRef(col) = expr.as_ref() {
                 if is_row_independent_expr(low) && is_row_independent_expr(high) {
                     let entry = result.entry(col.clone()).or_default();
-                    entry.lower = Some((*low.clone(), true));
-                    entry.upper = Some((*high.clone(), true));
+                    merge_lower(entry, *low.clone(), true);
+                    merge_upper(entry, *high.clone(), true);
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn merge_lower(entry: &mut ColumnRange, expr: Expr, inclusive: bool) {
+    match &entry.lower {
+        None => entry.lower = Some((expr, inclusive)),
+        Some((cur_expr, cur_inclusive)) => match compare_const_expr(cur_expr, &expr) {
+            Some(std::cmp::Ordering::Less) => entry.lower = Some((expr, inclusive)),
+            Some(std::cmp::Ordering::Equal) => {
+                entry.lower = Some((cur_expr.clone(), *cur_inclusive && inclusive))
+            }
+            Some(std::cmp::Ordering::Greater) | None => {}
+        },
+    }
+}
+
+fn merge_upper(entry: &mut ColumnRange, expr: Expr, inclusive: bool) {
+    match &entry.upper {
+        None => entry.upper = Some((expr, inclusive)),
+        Some((cur_expr, cur_inclusive)) => match compare_const_expr(cur_expr, &expr) {
+            Some(std::cmp::Ordering::Greater) => entry.upper = Some((expr, inclusive)),
+            Some(std::cmp::Ordering::Equal) => {
+                entry.upper = Some((cur_expr.clone(), *cur_inclusive && inclusive))
+            }
+            Some(std::cmp::Ordering::Less) | None => {}
+        },
+    }
+}
+
+fn compare_const_expr(left: &Expr, right: &Expr) -> Option<std::cmp::Ordering> {
+    let lt = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Lt,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&lt)? {
+        return Some(std::cmp::Ordering::Less);
+    }
+
+    let gt = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Gt,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&gt)? {
+        return Some(std::cmp::Ordering::Greater);
+    }
+
+    let eq = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Eq,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&eq)? {
+        return Some(std::cmp::Ordering::Equal);
+    }
+
+    None
+}
+
+fn eval_to_true(expr: &Expr) -> Option<bool> {
+    match eval_expr(expr, &|_| None).ok()? {
+        crate::types::Value::Integer(n) => Some(n != 0),
+        _ => None,
     }
 }
 

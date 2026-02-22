@@ -235,3 +235,43 @@ fn test_explain_prefers_composite_range_over_single_index_seek() {
     assert_eq!(row[3].1, Value::Varchar("range".to_string()));
     assert_eq!(row[4].1, Value::Varchar("idx_ab".to_string()));
 }
+
+#[test]
+fn test_explain_range_bounds_are_merged_order_independent() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    for i in 1..=200 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let rows1 = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a > 100 AND a > 1",
+        &mut pager,
+        &mut catalog,
+    );
+    let rows2 = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a > 1 AND a > 100",
+        &mut pager,
+        &mut catalog,
+    );
+
+    let r1 = &rows1[0];
+    let r2 = &rows2[0];
+    assert_eq!(r1[3].1, Value::Varchar("range".to_string()));
+    assert_eq!(r2[3].1, Value::Varchar("range".to_string()));
+    assert_eq!(r1[5].1, Value::Integer(100));
+    assert_eq!(r2[5].1, Value::Integer(100));
+}

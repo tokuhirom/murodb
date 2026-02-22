@@ -132,7 +132,7 @@ MySQL-compatible scalar functions.
     - EXPLAIN row estimation now prefers persisted `table_rows` when available.
     - Planner cost model now incorporates persisted `table_rows`/`index_distinct_keys` when available, with conservative fallback selectivity when stats are missing.
     - EXPLAIN `rows`/`cost` now uses the same planner estimation logic (with table-row fallback), so estimates reflect planner tradeoffs.
-    - JOIN execution now compares simple nested-loop alternatives for `INNER`/`CROSS` joins and iterates the smaller side as the outer loop while preserving row shape (`left + right`).
+    - JOIN loop-order choice for `INNER`/`CROSS` now uses planner-side estimated row counts (stats-aware with runtime fallback) and keeps row shape (`left + right`) stable.
     - `ANALYZE TABLE` now persists numeric min/max bounds for single-column numeric B-tree indexes, and range row estimation uses those bounds when available.
   - Done when:
     - Planner compares at least full-scan vs single-index vs join-order alternatives.

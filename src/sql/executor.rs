@@ -14,7 +14,7 @@ use crate::schema::catalog::{SystemCatalog, TableDef};
 use crate::schema::column::{ColumnDef, DefaultValue};
 use crate::schema::index::{IndexDef, IndexType};
 use crate::sql::ast::*;
-use crate::sql::eval::{eval_expr, is_truthy};
+use crate::sql::eval::{eval_expr, eval_expr_with_collation, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{plan_cost_hint, plan_select, Plan};
 use crate::storage::page::PageId;
@@ -930,6 +930,95 @@ mod tests {
             assert_eq!(rows[1].get("id"), Some(&Value::Integer(1)));
         } else {
             panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_where_comparison_uses_nocase_collation_path() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT id FROM t WHERE name = 'alice'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_where_like_uses_nocase_collation_path() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT id FROM t WHERE name LIKE 'a%'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_delete_where_uses_nocase_collation_path() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "DELETE FROM t WHERE name = 'alice'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 1);
+        } else {
+            panic!("Expected RowsAffected");
         }
     }
 }

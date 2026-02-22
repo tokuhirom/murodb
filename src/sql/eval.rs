@@ -174,6 +174,139 @@ pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result
         ),
     }
 }
+
+/// Evaluate an expression with optional collation-aware comparison/LIKE semantics.
+/// `resolve_collation(left, right)` may return a collation name for binary comparisons and LIKE.
+pub fn eval_expr_with_collation(
+    expr: &Expr,
+    columns: &dyn Fn(&str) -> Option<Value>,
+    resolve_collation: &dyn Fn(&Expr, &Expr) -> Result<Option<String>>,
+) -> Result<Value> {
+    match expr {
+        Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
+        Expr::FloatLiteral(n) => Ok(Value::Float(*n)),
+        Expr::StringLiteral(s) => Ok(Value::Varchar(s.clone())),
+        Expr::BlobLiteral(b) => Ok(Value::Varbinary(b.clone())),
+        Expr::Null => Ok(Value::Null),
+        Expr::DefaultValue => Ok(Value::Null),
+
+        Expr::ColumnRef(name) => {
+            columns(name).ok_or_else(|| MuroError::Execution(format!("Unknown column: {}", name)))
+        }
+
+        Expr::BinaryOp { left, op, right } => {
+            let lval = eval_expr_with_collation(left, columns, resolve_collation)?;
+            let rval = eval_expr_with_collation(right, columns, resolve_collation)?;
+            match op {
+                crate::sql::ast::BinaryOp::Eq
+                | crate::sql::ast::BinaryOp::Ne
+                | crate::sql::ast::BinaryOp::Lt
+                | crate::sql::ast::BinaryOp::Gt
+                | crate::sql::ast::BinaryOp::Le
+                | crate::sql::ast::BinaryOp::Ge => {
+                    if lval.is_null() || rval.is_null() {
+                        return Ok(Value::Null);
+                    }
+                    let collation = resolve_collation(left, right)?;
+                    let ord = value_cmp_with_collation(&lval, &rval, collation.as_deref())?;
+                    let out = match op {
+                        crate::sql::ast::BinaryOp::Eq => ord == Some(std::cmp::Ordering::Equal),
+                        crate::sql::ast::BinaryOp::Ne => ord != Some(std::cmp::Ordering::Equal),
+                        crate::sql::ast::BinaryOp::Lt => ord == Some(std::cmp::Ordering::Less),
+                        crate::sql::ast::BinaryOp::Gt => ord == Some(std::cmp::Ordering::Greater),
+                        crate::sql::ast::BinaryOp::Le => {
+                            matches!(
+                                ord,
+                                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                            )
+                        }
+                        crate::sql::ast::BinaryOp::Ge => matches!(
+                            ord,
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        ),
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Integer(if out { 1 } else { 0 }))
+                }
+                _ => eval_binary_op(&lval, *op, &rval),
+            }
+        }
+
+        Expr::UnaryOp { op, operand } => {
+            let val = eval_expr_with_collation(operand, columns, resolve_collation)?;
+            eval_unary_op(*op, &val)
+        }
+
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
+            let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
+            let pat = eval_expr_with_collation(pattern, columns, resolve_collation)?;
+            match (&val, &pat) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                (Value::Varchar(s), Value::Varchar(p)) => {
+                    let collation = resolve_collation(expr, pattern)?;
+                    let matches = match collation.as_deref() {
+                        None | Some("binary") => like_match(s, p),
+                        Some("nocase") => like_match(&ascii_fold_nocase(s), &ascii_fold_nocase(p)),
+                        Some(other) => {
+                            return Err(MuroError::Execution(format!(
+                                "Unsupported collation '{}' in LIKE: currently only binary and nocase are supported",
+                                other
+                            )));
+                        }
+                    };
+                    let result = if *negated { !matches } else { matches };
+                    Ok(Value::Integer(if result { 1 } else { 0 }))
+                }
+                _ => Ok(Value::Integer(0)),
+            }
+        }
+
+        Expr::InList { .. }
+        | Expr::Between { .. }
+        | Expr::IsNull { .. }
+        | Expr::FunctionCall { .. }
+        | Expr::CaseWhen { .. }
+        | Expr::Cast { .. }
+        | Expr::AggregateFunc { .. }
+        | Expr::MatchAgainst { .. }
+        | Expr::FtsSnippet { .. }
+        | Expr::GreaterThanZero(_)
+        | Expr::InSubquery { .. }
+        | Expr::Exists { .. }
+        | Expr::ScalarSubquery(_) => eval_expr(expr, columns),
+    }
+}
+
+fn ascii_fold_nocase(s: &str) -> String {
+    let folded: Vec<u8> = s.bytes().map(|b| b.to_ascii_lowercase()).collect();
+    String::from_utf8(folded).expect("ASCII lowercasing preserves UTF-8 validity")
+}
+
+fn value_cmp_with_collation(
+    left: &Value,
+    right: &Value,
+    collation: Option<&str>,
+) -> Result<Option<std::cmp::Ordering>> {
+    match collation {
+        None | Some("binary") => Ok(value_cmp(left, right)),
+        Some("nocase") => match (left, right) {
+            (Value::Varchar(a), Value::Varchar(b)) => {
+                let a = ascii_fold_nocase(a);
+                let b = ascii_fold_nocase(b);
+                Ok(Some(a.cmp(&b)))
+            }
+            _ => Ok(value_cmp(left, right)),
+        },
+        Some(other) => Err(MuroError::Execution(format!(
+            "Unsupported collation '{}' in comparison: currently only binary and nocase are supported",
+            other
+        ))),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

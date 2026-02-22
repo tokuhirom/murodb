@@ -24,6 +24,12 @@ pub struct PlannerStats {
     pub table_rows: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinLoopOrder {
+    LeftOuter,
+    RightOuter,
+}
+
 #[derive(Debug)]
 pub enum Plan {
     PkSeek {
@@ -53,6 +59,15 @@ pub enum Plan {
         query: String,
         mode: MatchMode,
     },
+}
+
+/// Choose nested-loop order from estimated cardinalities.
+pub fn choose_nested_loop_order(left_rows_est: u64, right_rows_est: u64) -> JoinLoopOrder {
+    if right_rows_est < left_rows_est {
+        JoinLoopOrder::RightOuter
+    } else {
+        JoinLoopOrder::LeftOuter
+    }
 }
 
 /// Stable heuristic cost used by the planner for deterministic plan selection.
@@ -440,6 +455,13 @@ mod tests {
         let lower = Some((Box::new(Expr::IntLiteral(0)), true));
         let rows = estimate_numeric_range_rows(1000, &lower, &None, Some(&idx)).unwrap();
         assert_eq!(rows, 500);
+    }
+
+    #[test]
+    fn test_choose_nested_loop_order_prefers_smaller_outer() {
+        assert_eq!(choose_nested_loop_order(10, 9), JoinLoopOrder::RightOuter);
+        assert_eq!(choose_nested_loop_order(9, 10), JoinLoopOrder::LeftOuter);
+        assert_eq!(choose_nested_loop_order(10, 10), JoinLoopOrder::LeftOuter);
     }
 }
 

@@ -17,8 +17,8 @@ use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{
-    estimate_plan_rows_hint, plan_cost_hint_with_stats, plan_select, IndexPlanStat, Plan,
-    PlannerStats,
+    choose_nested_loop_order, estimate_plan_rows_hint, plan_cost_hint_with_stats, plan_select,
+    IndexPlanStat, JoinLoopOrder, Plan, PlannerStats,
 };
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;

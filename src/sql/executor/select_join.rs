@@ -94,6 +94,11 @@ pub(super) fn exec_select_join(
         base_table_def,
         pager,
     )?;
+    let mut joined_rows_est: u64 = if base_table_def.stats_row_count > 0 {
+        base_table_def.stats_row_count
+    } else {
+        joined_rows.len() as u64
+    };
 
     // Track accumulated left-side column qualifiers and table defs for RIGHT JOIN null generation
     let mut left_qualifiers_and_defs: Vec<(String, TableDef)> =
@@ -119,12 +124,19 @@ pub(super) fn exec_select_join(
             &right_table_def,
             pager,
         )?;
+        let right_rows_est: u64 = if right_table_def.stats_row_count > 0 {
+            right_table_def.stats_row_count
+        } else {
+            right_rows.len() as u64
+        };
 
         let mut new_rows: Vec<Vec<(String, Value)>> = Vec::new();
 
         match join.join_type {
             JoinType::Inner => {
-                if right_rows.len() < joined_rows.len() {
+                if choose_nested_loop_order(joined_rows_est, right_rows_est)
+                    == JoinLoopOrder::RightOuter
+                {
                     for right in &right_rows {
                         for left in &joined_rows {
                             let mut combined: Vec<(String, Value)> =
@@ -224,7 +236,9 @@ pub(super) fn exec_select_join(
                 }
             }
             JoinType::Cross => {
-                if right_rows.len() < joined_rows.len() {
+                if choose_nested_loop_order(joined_rows_est, right_rows_est)
+                    == JoinLoopOrder::RightOuter
+                {
                     for right in &right_rows {
                         for left in &joined_rows {
                             let mut combined: Vec<(String, Value)> =
@@ -249,6 +263,7 @@ pub(super) fn exec_select_join(
         }
 
         left_qualifiers_and_defs.push((right_qualifier.to_string(), right_table_def));
+        joined_rows_est = new_rows.len() as u64;
         joined_rows = new_rows;
     }
 

@@ -16,6 +16,9 @@ struct Cli {
     #[arg(long, default_value_t = 20_000, value_parser = value_parser!(u64).range(1..))]
     initial_rows: u64,
 
+    #[arg(long, default_value_t = 256, value_parser = value_parser!(u64).range(1..))]
+    fts_initial_rows: u64,
+
     #[arg(long, default_value_t = 20_000)]
     select_ops: u64,
 
@@ -30,6 +33,15 @@ struct Cli {
 
     #[arg(long, default_value_t = 10_000)]
     mixed_ops: u64,
+
+    #[arg(long, default_value_t = 5_000)]
+    fts_select_ops: u64,
+
+    #[arg(long, default_value_t = 2_000)]
+    fts_update_ops: u64,
+
+    #[arg(long, default_value_t = 5_000)]
+    fts_mixed_ops: u64,
 
     #[arg(long, default_value_t = 200)]
     warmup_ops: u64,
@@ -91,6 +103,24 @@ fn payload(id: u64, salt: u64) -> String {
     format!("p{:016x}_{:016x}", id, salt)
 }
 
+fn fts_mix(id: u64, salt: u64, seed: u64) -> u64 {
+    let mut x = id ^ salt.rotate_left(17) ^ seed;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    x
+}
+
+fn fts_token(id: u64, salt: u64) -> String {
+    format!("t{:016x}", fts_mix(id, salt, 0x9E37_79B9_7F4A_7C15))
+}
+
+fn fts_body(id: u64, salt: u64) -> String {
+    fts_token(id, salt)
+}
+
 fn populate(db: &mut Database, initial_rows: u64, batch_size: u64) {
     let mut id = 1u64;
     while id <= initial_rows {
@@ -115,16 +145,47 @@ fn populate(db: &mut Database, initial_rows: u64, batch_size: u64) {
     }
 }
 
+fn populate_fts_docs(db: &mut Database, initial_rows: u64, batch_size: u64) {
+    let mut id = 1u64;
+    while id <= initial_rows {
+        let end = (id + batch_size - 1).min(initial_rows);
+        db.execute("BEGIN")
+            .expect("BEGIN failed while populate_fts_docs");
+
+        let mut values_sql = String::new();
+        for current in id..=end {
+            if !values_sql.is_empty() {
+                values_sql.push(',');
+            }
+            let body = fts_body(current, 0);
+            values_sql.push_str(&format!("({}, '{}')", current, body));
+        }
+
+        let sql = format!("INSERT INTO docs_fts VALUES {}", values_sql);
+        db.execute(&sql)
+            .expect("INSERT batch failed while populate_fts_docs");
+        db.execute("COMMIT")
+            .expect("COMMIT failed while populate_fts_docs");
+
+        id = end + 1;
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if cli.initial_rows == 0 {
         eprintln!("error: --initial-rows must be >= 1");
         std::process::exit(2);
     }
+    if cli.fts_initial_rows == 0 {
+        eprintln!("error: --fts-initial-rows must be >= 1");
+        std::process::exit(2);
+    }
     if cli.batch_size == 0 {
         eprintln!("error: --batch-size must be >= 1");
         std::process::exit(2);
     }
+    let fts_batch_size = cli.batch_size.min(32);
 
     let seed = 0x5EED_u64;
     let mut rng = StdRng::seed_from_u64(seed);
@@ -143,24 +204,36 @@ fn main() {
     let mut db = Database::create(&db_path, &master_key).expect("create db failed");
     db.execute("CREATE TABLE kv (id BIGINT PRIMARY KEY, v1 BIGINT, v2 VARCHAR)")
         .expect("create table failed");
+    db.execute("CREATE TABLE docs_fts (id BIGINT PRIMARY KEY, body TEXT)")
+        .expect("create docs_fts table failed");
+    db.execute(
+        "CREATE FULLTEXT INDEX ft_docs_body ON docs_fts(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    )
+    .expect("create fulltext index failed");
 
     println!("== MuroDB Embedded Benchmark ==");
     println!("db_path={}", db_path.display());
     println!(
-        "config: initial_rows={}, select_ops={}, update_ops={}, insert_ops={}, scan_ops={}, mixed_ops={}, warmup_ops={}, batch_size={}, rng_seed={}",
+        "config: initial_rows={}, fts_initial_rows={}, select_ops={}, update_ops={}, insert_ops={}, scan_ops={}, mixed_ops={}, fts_select_ops={}, fts_update_ops={}, fts_mixed_ops={}, warmup_ops={}, batch_size={}, fts_batch_size={}, rng_seed={}",
         cli.initial_rows,
+        cli.fts_initial_rows,
         cli.select_ops,
         cli.update_ops,
         cli.insert_ops,
         cli.scan_ops,
         cli.mixed_ops,
+        cli.fts_select_ops,
+        cli.fts_update_ops,
+        cli.fts_mixed_ops,
         cli.warmup_ops,
         cli.batch_size,
+        fts_batch_size,
         seed
     );
 
     let setup_start = Instant::now();
     populate(&mut db, cli.initial_rows, cli.batch_size);
+    populate_fts_docs(&mut db, cli.fts_initial_rows, fts_batch_size);
     let setup_elapsed = setup_start.elapsed();
     println!(
         "setup_elapsed_ms={:.3}",
@@ -243,9 +316,63 @@ fn main() {
         }
     });
 
+    let fts_select_stat = measure("fts_select_natural", cli.fts_select_ops, || {
+        let id = rng.gen_range(1..=cli.fts_initial_rows);
+        let term = fts_token(id, 0);
+        let sql = format!(
+            "SELECT id FROM docs_fts WHERE MATCH(body) AGAINST('{}' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id LIMIT 20",
+            term
+        );
+        let rows = db.query(&sql).expect("fts natural select failed");
+        rows.len()
+    });
+
+    let mut fts_salts = vec![0u64; (cli.fts_initial_rows + 1) as usize];
+
+    let fts_update_stat = measure("fts_update_point", cli.fts_update_ops, || {
+        let id = rng.gen_range(1..=cli.fts_initial_rows);
+        let salt = rng.gen_range(1..=10_000_000u64);
+        fts_salts[id as usize] = salt;
+        let body = fts_body(id, salt);
+        let sql = format!("UPDATE docs_fts SET body = '{}' WHERE id = {}", body, id);
+        db.execute(&sql).expect("fts update failed");
+        1
+    });
+
+    let fts_mixed_stat = measure("fts_mixed_70q_30u", cli.fts_mixed_ops, || {
+        let dice = rng.gen_range(0..100u32);
+        if dice < 70 {
+            let id = rng.gen_range(1..=cli.fts_initial_rows);
+            let term = fts_token(id, fts_salts[id as usize]);
+            let sql = format!(
+                "SELECT id FROM docs_fts WHERE MATCH(body) AGAINST('{}' IN BOOLEAN MODE) > 0 LIMIT 20",
+                term
+            );
+            let rows = db.query(&sql).expect("fts mixed select failed");
+            rows.len()
+        } else {
+            let id = rng.gen_range(1..=cli.fts_initial_rows);
+            let salt = rng.gen_range(1..=10_000_000u64);
+            fts_salts[id as usize] = salt;
+            let body = fts_body(id, salt);
+            let sql = format!("UPDATE docs_fts SET body = '{}' WHERE id = {}", body, id);
+            db.execute(&sql).expect("fts mixed update failed");
+            1
+        }
+    });
+
     println!();
     println!("name,ops,total_sec,ops_per_sec,p50_ms,p95_ms,p99_ms");
-    for stat in [select_stat, update_stat, insert_stat, scan_stat, mixed_stat] {
+    for stat in [
+        select_stat,
+        update_stat,
+        insert_stat,
+        scan_stat,
+        mixed_stat,
+        fts_select_stat,
+        fts_update_stat,
+        fts_mixed_stat,
+    ] {
         let total_sec = stat.elapsed.as_secs_f64();
         let ops_per_sec = if total_sec > 0.0 {
             stat.ops as f64 / total_sec

@@ -41,3 +41,7 @@ Additional modules:
 
 - **Thread-level**: `parking_lot::RwLock` - multiple readers, single writer
 - **Process-level**: `fs4` file lock - prevents concurrent access from multiple processes
+- **API routing**:
+  - `Database::query` acquires a shared lock for read-only statements.
+  - `Database::execute` acquires an exclusive lock for general SQL execution.
+  - CLI routes read-only statements to `query` unless an explicit transaction is active.

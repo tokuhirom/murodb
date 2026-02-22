@@ -690,6 +690,10 @@ INSERT INTO t (id, name) VALUES (3, 'Charlie');
 ROLLBACK;
 ```
 
+Rust API note:
+- `Database::query()` accepts read-only SQL only.
+- Inside an explicit transaction (`BEGIN` ... `COMMIT`/`ROLLBACK`), run statements through `Database::execute()`, including `SELECT`.
+
 ## Hidden _rowid
 
 Tables without an explicit PRIMARY KEY automatically get a hidden `_rowid` column with auto-generated values.

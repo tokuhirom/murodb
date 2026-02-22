@@ -75,6 +75,7 @@ MySQL-compatible scalar functions.
 - [x] REPLACE INTO
 - [x] EXPLAIN (query plan display)
 - [x] RIGHT JOIN
+- [x] Shared-lock read path (`Database::query`) with CLI auto routing
 
 ## Phase 6 — Types & Storage
 

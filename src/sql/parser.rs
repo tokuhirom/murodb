@@ -525,6 +525,7 @@ impl Parser {
                     }
                     "stop_filter" => match self.advance() {
                         Some(Token::Integer(n)) => stop_filter = n != 0,
+                        Some(Token::On) => stop_filter = true,
                         Some(Token::StringLit(s)) | Some(Token::Ident(s)) => {
                             let v = s.to_ascii_lowercase();
                             stop_filter = match v.as_str() {
@@ -1958,6 +1959,19 @@ mod tests {
         if let Statement::CreateFulltextIndex(fi) = stmt {
             assert!(!fi.stop_filter);
             assert_eq!(fi.stop_df_ratio_ppm, 200_000);
+        } else {
+            panic!("Expected CreateFulltextIndex");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_index_accepts_unquoted_stop_filter_on() {
+        let stmt = parse_sql(
+            "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (stop_filter=on)",
+        )
+        .unwrap();
+        if let Statement::CreateFulltextIndex(fi) = stmt {
+            assert!(fi.stop_filter);
         } else {
             panic!("Expected CreateFulltextIndex");
         }

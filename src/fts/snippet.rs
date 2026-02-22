@@ -158,7 +158,7 @@ struct CharOffsetMap {
 
 impl CharOffsetMap {
     fn new(text: &str) -> Self {
-        let mut char_to_byte = Vec::with_capacity(text.len() + 1);
+        let mut char_to_byte = Vec::with_capacity(text.chars().count() + 1);
         for (b, _) in text.char_indices() {
             char_to_byte.push(b);
         }

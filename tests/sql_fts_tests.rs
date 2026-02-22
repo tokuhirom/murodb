@@ -497,3 +497,18 @@ fn test_sql_fulltext_stop_df_ratio_rejects_wrapping_input() {
     );
     assert!(err.contains("stop_df_ratio_ppm is too large"));
 }
+
+#[test]
+fn test_sql_fulltext_accepts_unquoted_stop_filter_on() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter=on, stop_df_ratio_ppm=500000)",
+    );
+}

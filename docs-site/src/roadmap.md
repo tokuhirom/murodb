@@ -170,6 +170,12 @@ MySQL-compatible scalar functions.
     - WAL + data file epoch mismatch handling is crash-safe.
     - Rotation metrics/events are visible via inspection commands.
 - [ ] Collation support (Japanese sort order, etc.)
+  - Decision (2026-02-22):
+    - Deferred for now; reverted the in-progress SQL `COLLATE` implementation due high complexity/maintenance cost relative to current user value.
+    - For now, use function-based handling in queries (for example `LOWER(col) = LOWER(?)`, `ORDER BY LOWER(col)`).
+  - Revisit when:
+    - There is clear demand for locale-aware ordering/comparison beyond function-based workarounds.
+    - We are ready to align planner/index key encoding with collation semantics end-to-end.
   - Done when:
     - Collation can be selected per column/index.
     - ORDER BY / comparison / LIKE behavior is deterministic per collation.

@@ -53,6 +53,7 @@ murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRI
 
 The detailed manual and internals docs are in `docs-site/`.
 
+- Published docs: https://tokuhirom.github.io/murodb/
 - Book source: `docs-site/src/`
 - Build locally:
 

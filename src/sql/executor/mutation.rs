@@ -13,16 +13,24 @@ pub(super) fn exec_update(
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
     let mut indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
-    let index_columns: Vec<(String, Vec<String>)> = indexes
+    let index_stats: Vec<IndexPlanStat> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
-        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .map(|idx| IndexPlanStat {
+            name: idx.name.clone(),
+            column_names: idx.column_names.clone(),
+            is_unique: idx.is_unique,
+            stats_distinct_keys: idx.stats_distinct_keys,
+        })
         .collect();
     let plan = plan_select(
         &upd.table_name,
         &table_def.pk_columns,
-        &index_columns,
+        &index_stats,
         &upd.where_clause,
+        PlannerStats {
+            table_rows: table_def.stats_row_count,
+        },
     );
 
     let data_btree = BTree::open(table_def.data_btree_root);
@@ -198,16 +206,24 @@ pub(super) fn exec_delete(
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", del.table_name)))?;
 
     let mut indexes = catalog.get_indexes_for_table(pager, &del.table_name)?;
-    let index_columns: Vec<(String, Vec<String>)> = indexes
+    let index_stats: Vec<IndexPlanStat> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
-        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .map(|idx| IndexPlanStat {
+            name: idx.name.clone(),
+            column_names: idx.column_names.clone(),
+            is_unique: idx.is_unique,
+            stats_distinct_keys: idx.stats_distinct_keys,
+        })
         .collect();
     let plan = plan_select(
         &del.table_name,
         &table_def.pk_columns,
-        &index_columns,
+        &index_stats,
         &del.where_clause,
+        PlannerStats {
+            table_rows: table_def.stats_row_count,
+        },
     );
 
     let data_btree = BTree::open(table_def.data_btree_root);

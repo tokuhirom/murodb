@@ -8,6 +8,20 @@
 use crate::sql::ast::*;
 use crate::sql::eval::eval_expr;
 
+#[derive(Debug, Clone)]
+pub struct IndexPlanStat {
+    pub name: String,
+    pub column_names: Vec<String>,
+    pub is_unique: bool,
+    pub stats_distinct_keys: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlannerStats {
+    /// 0 means unknown/not analyzed.
+    pub table_rows: u64,
+}
+
 #[derive(Debug)]
 pub enum Plan {
     PkSeek {
@@ -41,14 +55,77 @@ pub enum Plan {
 
 /// Stable heuristic cost used by the planner for deterministic plan selection.
 pub fn plan_cost_hint(plan: &Plan) -> u64 {
+    plan_cost_hint_with_stats(plan, &PlannerStats::default(), &[])
+}
+
+/// Cost hint that incorporates persisted stats when available.
+pub fn plan_cost_hint_with_stats(
+    plan: &Plan,
+    planner_stats: &PlannerStats,
+    index_stats: &[IndexPlanStat],
+) -> u64 {
+    let est_rows = estimate_plan_rows_hint(plan, planner_stats, index_stats);
     match plan {
-        Plan::PkSeek { .. } => 100,
-        Plan::IndexSeek { key_exprs, .. } => 3000u64.saturating_sub((key_exprs.len() as u64) * 900),
+        Plan::PkSeek { .. } => 100u64.saturating_add(est_rows),
+        Plan::IndexSeek { key_exprs, .. } => 1_500u64
+            .saturating_sub((key_exprs.len() as u64).saturating_mul(300))
+            .saturating_add(est_rows.saturating_mul(3)),
         Plan::IndexRangeSeek {
-            prefix_key_exprs, ..
-        } => 3200u64.saturating_sub(((prefix_key_exprs.len() as u64) + 1) * 800),
-        Plan::FtsScan { .. } => 2000,
-        Plan::FullScan { .. } => 10_000,
+            prefix_key_exprs,
+            lower,
+            upper,
+            ..
+        } => {
+            let bound_terms = (lower.is_some() as u64) + (upper.is_some() as u64);
+            1_400u64
+                .saturating_sub((prefix_key_exprs.len() as u64).saturating_mul(250))
+                .saturating_sub(bound_terms.saturating_mul(250))
+                .saturating_add(est_rows.saturating_mul(3))
+        }
+        Plan::FtsScan { .. } => 2_000u64.saturating_add(est_rows.saturating_mul(2)),
+        Plan::FullScan { .. } => 3_000u64.saturating_add(est_rows.saturating_mul(5)),
+    }
+}
+
+/// Heuristic row estimate used for both planning and EXPLAIN.
+pub fn estimate_plan_rows_hint(
+    plan: &Plan,
+    planner_stats: &PlannerStats,
+    index_stats: &[IndexPlanStat],
+) -> u64 {
+    let table_rows = table_rows_hint(planner_stats);
+    match plan {
+        Plan::PkSeek { .. } => 1,
+        Plan::IndexSeek {
+            index_name,
+            key_exprs,
+            ..
+        } => {
+            let index = index_stats.iter().find(|idx| idx.name == *index_name);
+            let full_key_equality = index
+                .map(|idx| idx.is_unique && key_exprs.len() == idx.column_names.len())
+                .unwrap_or(false);
+            estimate_index_seek_rows(table_rows, key_exprs.len(), index, full_key_equality)
+        }
+        Plan::IndexRangeSeek {
+            index_name,
+            prefix_key_exprs,
+            lower,
+            upper,
+            ..
+        } => {
+            let index = index_stats.iter().find(|idx| idx.name == *index_name);
+            let prefix_rows =
+                estimate_index_seek_rows(table_rows, prefix_key_exprs.len(), index, false);
+            let ranged_rows = match (lower.is_some(), upper.is_some()) {
+                (true, true) => div_ceil(prefix_rows, 5),
+                (true, false) | (false, true) => div_ceil(prefix_rows, 2),
+                (false, false) => prefix_rows,
+            };
+            ranged_rows.max(1).min(table_rows)
+        }
+        Plan::FullScan { .. } => table_rows,
+        Plan::FtsScan { .. } => div_ceil(table_rows.saturating_mul(3), 10).max(1),
     }
 }
 
@@ -56,12 +133,13 @@ pub fn plan_cost_hint(plan: &Plan) -> u64 {
 pub fn plan_select(
     table_name: &str,
     pk_columns: &[String],
-    index_columns: &[(String, Vec<String>)], // (index_name, column_names)
+    index_stats: &[IndexPlanStat],
     where_clause: &Option<Expr>,
+    planner_stats: PlannerStats,
 ) -> Plan {
     let mut best_candidate: Option<(u64, String, Plan)> = None;
     let consider = |best: &mut Option<(u64, String, Plan)>, plan: Plan, tie_key: String| {
-        let cost = plan_cost_hint(&plan);
+        let cost = plan_cost_hint_with_stats(&plan, &planner_stats, index_stats);
         match best {
             Some((best_cost, best_tie, _)) if *best_cost < cost => {}
             Some((best_cost, best_tie, _)) if *best_cost == cost && *best_tie <= tie_key => {}
@@ -121,7 +199,9 @@ pub fn plan_select(
         // Check for index equality (single or composite)
         let equalities = extract_equalities(expr);
         let ranges = extract_ranges(expr);
-        for (idx_name, col_names) in index_columns {
+        for idx in index_stats {
+            let idx_name = &idx.name;
+            let col_names = &idx.column_names;
             if col_names.len() == 1 {
                 if let Some(key_expr) = equalities.iter().find_map(|(col, e)| {
                     if col == &col_names[0] {
@@ -219,6 +299,52 @@ pub fn plan_select(
     Plan::FullScan {
         table_name: table_name.to_string(),
     }
+}
+
+fn table_rows_hint(planner_stats: &PlannerStats) -> u64 {
+    if planner_stats.table_rows > 0 {
+        planner_stats.table_rows
+    } else {
+        // Conservative fallback before ANALYZE TABLE is run.
+        10_000
+    }
+}
+
+fn estimate_index_seek_rows(
+    table_rows: u64,
+    key_parts: usize,
+    index: Option<&IndexPlanStat>,
+    full_key_equality: bool,
+) -> u64 {
+    if key_parts == 0 {
+        return table_rows.max(1);
+    }
+
+    if full_key_equality {
+        return 1;
+    }
+
+    let mut rows = if let Some(idx) = index {
+        if idx.stats_distinct_keys > 0 {
+            div_ceil(table_rows.max(1), idx.stats_distinct_keys)
+        } else {
+            div_ceil(table_rows.max(1), 4)
+        }
+    } else {
+        div_ceil(table_rows.max(1), 4)
+    };
+
+    for _ in 1..key_parts {
+        rows = div_ceil(rows, 2);
+    }
+    rows.max(1).min(table_rows.max(1))
+}
+
+fn div_ceil(num: u64, den: u64) -> u64 {
+    if den == 0 {
+        return num;
+    }
+    num.saturating_add(den - 1) / den
 }
 
 /// Extract FTS match from expression tree.

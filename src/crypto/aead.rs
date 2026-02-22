@@ -1,5 +1,5 @@
-use aes_gcm_siv::aead::{Aead, KeyInit, Payload};
-use aes_gcm_siv::{Aes256GcmSiv, Nonce};
+use aes_gcm_siv::aead::{AeadInPlace, KeyInit};
+use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use rand::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -64,46 +64,82 @@ impl PageCrypto {
     /// Encrypt page plaintext.
     /// Returns: nonce (12 bytes) || ciphertext+tag
     pub fn encrypt(&self, page_id: PageId, epoch: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let aad = Self::build_aad(page_id, epoch);
-
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let payload = Payload {
-            msg: plaintext,
-            aad: &aad,
-        };
-
-        let ciphertext = self
-            .cipher
-            .encrypt(nonce, payload)
-            .map_err(|e| MuroError::Encryption(e.to_string()))?;
-
-        let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
+        let mut result = vec![0u8; NONCE_SIZE + plaintext.len() + TAG_OVERHEAD];
+        let written = self.encrypt_into(page_id, epoch, plaintext, &mut result)?;
+        result.truncate(written);
         Ok(result)
     }
 
     /// Decrypt: input = nonce (12 bytes) || ciphertext+tag
     pub fn decrypt(&self, page_id: PageId, epoch: u64, encrypted: &[u8]) -> Result<Vec<u8>> {
+        let mut plaintext = vec![0u8; encrypted.len().saturating_sub(Self::overhead())];
+        let written = self.decrypt_into(page_id, epoch, encrypted, &mut plaintext)?;
+        plaintext.truncate(written);
+        Ok(plaintext)
+    }
+
+    /// Encrypt page plaintext into caller-provided buffer.
+    /// Output layout: nonce (12 bytes) || ciphertext || tag (16 bytes)
+    pub fn encrypt_into(
+        &self,
+        page_id: PageId,
+        epoch: u64,
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let required = NONCE_SIZE + plaintext.len() + TAG_OVERHEAD;
+        if out.len() < required {
+            return Err(MuroError::Encryption(
+                "output buffer too small for encryption".to_string(),
+            ));
+        }
+
+        let aad = Self::build_aad(page_id, epoch);
+
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        out[..NONCE_SIZE].copy_from_slice(&nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = &mut out[NONCE_SIZE..NONCE_SIZE + plaintext.len()];
+        ciphertext.copy_from_slice(plaintext);
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(nonce, &aad, ciphertext)
+            .map_err(|e| MuroError::Encryption(e.to_string()))?;
+        out[NONCE_SIZE + plaintext.len()..required].copy_from_slice(tag.as_slice());
+
+        Ok(required)
+    }
+
+    /// Decrypt encrypted payload into caller-provided buffer.
+    /// Input layout: nonce (12 bytes) || ciphertext || tag (16 bytes)
+    pub fn decrypt_into(
+        &self,
+        page_id: PageId,
+        epoch: u64,
+        encrypted: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize> {
         if encrypted.len() < NONCE_SIZE + TAG_OVERHEAD {
+            return Err(MuroError::Decryption);
+        }
+        let plaintext_len = encrypted.len() - NONCE_SIZE - TAG_OVERHEAD;
+        if out.len() < plaintext_len {
             return Err(MuroError::Decryption);
         }
 
         let aad = Self::build_aad(page_id, epoch);
         let nonce = Nonce::from_slice(&encrypted[..NONCE_SIZE]);
-        let ciphertext = &encrypted[NONCE_SIZE..];
-
-        let payload = Payload {
-            msg: ciphertext,
-            aad: &aad,
-        };
+        let ciphertext_start = NONCE_SIZE;
+        let ciphertext_end = ciphertext_start + plaintext_len;
+        out[..plaintext_len].copy_from_slice(&encrypted[ciphertext_start..ciphertext_end]);
+        let tag = Tag::from_slice(&encrypted[ciphertext_end..]);
 
         self.cipher
-            .decrypt(nonce, payload)
-            .map_err(|_| MuroError::Decryption)
+            .decrypt_in_place_detached(nonce, &aad, &mut out[..plaintext_len], tag)
+            .map_err(|_| MuroError::Decryption)?;
+        Ok(plaintext_len)
     }
 
     /// Overhead added by encryption (nonce + tag).

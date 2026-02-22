@@ -398,24 +398,33 @@ impl Pager {
         let offset = PLAINTEXT_HEADER_SIZE + page_id * ENCRYPTED_PAGE_SIZE as u64;
         self.file.seek(SeekFrom::Start(offset))?;
 
-        let mut encrypted = vec![0u8; ENCRYPTED_PAGE_SIZE];
+        let mut encrypted = [0u8; ENCRYPTED_PAGE_SIZE];
         self.file.read_exact(&mut encrypted)?;
 
-        let plaintext = self.crypto.decrypt(page_id, self.epoch, &encrypted)?;
+        let mut plaintext = [0u8; PAGE_SIZE];
+        let plaintext_len =
+            self.crypto
+                .decrypt_into(page_id, self.epoch, &encrypted, &mut plaintext)?;
 
-        if plaintext.len() != PAGE_SIZE {
+        if plaintext_len != PAGE_SIZE {
             return Err(MuroError::InvalidPage);
         }
 
-        let mut data = [0u8; PAGE_SIZE];
-        data.copy_from_slice(&plaintext);
-        Ok(Page::from_bytes(data))
+        Ok(Page::from_bytes(plaintext))
     }
 
     /// Encrypt a page and write it to disk.
     fn write_page_to_disk(&mut self, page: &Page) -> Result<()> {
         let page_id = page.page_id();
-        let encrypted = self.crypto.encrypt(page_id, self.epoch, page.as_bytes())?;
+        let mut encrypted = [0u8; ENCRYPTED_PAGE_SIZE];
+        let written =
+            self.crypto
+                .encrypt_into(page_id, self.epoch, page.as_bytes(), &mut encrypted)?;
+        if written != ENCRYPTED_PAGE_SIZE {
+            return Err(MuroError::Encryption(
+                "unexpected encrypted page size".to_string(),
+            ));
+        }
 
         let offset = PLAINTEXT_HEADER_SIZE + page_id * ENCRYPTED_PAGE_SIZE as u64;
         self.file.seek(SeekFrom::Start(offset))?;

@@ -18,12 +18,22 @@ pub(super) fn exec_update(
         .filter(|idx| idx.index_type == IndexType::BTree)
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
-    let plan = plan_select(
+    let mut plan = plan_select(
         &upd.table_name,
         &table_def.pk_columns,
         &index_columns,
         &upd.where_clause,
     );
+    if where_clause_requires_collation_full_scan(&upd.where_clause, &table_def)
+        && matches!(
+            plan,
+            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
+        )
+    {
+        plan = Plan::FullScan {
+            table_name: upd.table_name.clone(),
+        };
+    }
 
     let data_btree = BTree::open(table_def.data_btree_root);
 
@@ -203,12 +213,22 @@ pub(super) fn exec_delete(
         .filter(|idx| idx.index_type == IndexType::BTree)
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
-    let plan = plan_select(
+    let mut plan = plan_select(
         &del.table_name,
         &table_def.pk_columns,
         &index_columns,
         &del.where_clause,
     );
+    if where_clause_requires_collation_full_scan(&del.where_clause, &table_def)
+        && matches!(
+            plan,
+            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
+        )
+    {
+        plan = Plan::FullScan {
+            table_name: del.table_name.clone(),
+        };
+    }
 
     let data_btree = BTree::open(table_def.data_btree_root);
 

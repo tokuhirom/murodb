@@ -175,12 +175,22 @@ pub(super) fn exec_select(
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
 
-    let plan = plan_select(
+    let mut plan = plan_select(
         table_name,
         &table_def.pk_columns,
         &index_columns,
         &sel.where_clause,
     );
+    if where_clause_requires_collation_full_scan(&sel.where_clause, &table_def)
+        && matches!(
+            plan,
+            Plan::PkSeek { .. } | Plan::IndexSeek { .. } | Plan::IndexRangeSeek { .. }
+        )
+    {
+        plan = Plan::FullScan {
+            table_name: table_name.clone(),
+        };
+    }
 
     let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();
     let mut fts_ctx = build_fts_eval_context(
@@ -812,6 +822,84 @@ pub(super) fn sort_rows_with_table(
         return Err(err);
     }
     Ok(())
+}
+
+pub(super) fn where_clause_requires_collation_full_scan(
+    where_clause: &Option<Expr>,
+    table_def: &TableDef,
+) -> bool {
+    where_clause
+        .as_ref()
+        .is_some_and(|expr| expr_references_non_binary_collation(expr, table_def))
+}
+
+fn expr_references_non_binary_collation(expr: &Expr, table_def: &TableDef) -> bool {
+    match expr {
+        Expr::ColumnRef(name) => table_def.column_index(name).is_some_and(|i| {
+            table_def.columns[i]
+                .collation
+                .as_deref()
+                .is_some_and(|c| !c.eq_ignore_ascii_case("binary"))
+        }),
+        Expr::BinaryOp { left, right, .. } => {
+            expr_references_non_binary_collation(left, table_def)
+                || expr_references_non_binary_collation(right, table_def)
+        }
+        Expr::UnaryOp { operand, .. } => expr_references_non_binary_collation(operand, table_def),
+        Expr::Like { expr, pattern, .. } => {
+            expr_references_non_binary_collation(expr, table_def)
+                || expr_references_non_binary_collation(pattern, table_def)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_references_non_binary_collation(expr, table_def)
+                || list
+                    .iter()
+                    .any(|e| expr_references_non_binary_collation(e, table_def))
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_non_binary_collation(expr, table_def)
+                || expr_references_non_binary_collation(low, table_def)
+                || expr_references_non_binary_collation(high, table_def)
+        }
+        Expr::IsNull { expr, .. } => expr_references_non_binary_collation(expr, table_def),
+        Expr::FunctionCall { args, .. } => args
+            .iter()
+            .any(|e| expr_references_non_binary_collation(e, table_def)),
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|e| expr_references_non_binary_collation(e, table_def))
+                || when_clauses.iter().any(|(a, b)| {
+                    expr_references_non_binary_collation(a, table_def)
+                        || expr_references_non_binary_collation(b, table_def)
+                })
+                || else_clause
+                    .as_ref()
+                    .is_some_and(|e| expr_references_non_binary_collation(e, table_def))
+        }
+        Expr::Cast { expr, .. } => expr_references_non_binary_collation(expr, table_def),
+        Expr::AggregateFunc { arg, .. } => arg
+            .as_ref()
+            .is_some_and(|e| expr_references_non_binary_collation(e, table_def)),
+        Expr::GreaterThanZero(expr) => expr_references_non_binary_collation(expr, table_def),
+        Expr::InSubquery { expr, .. } => expr_references_non_binary_collation(expr, table_def),
+        Expr::IntLiteral(_)
+        | Expr::FloatLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BlobLiteral(_)
+        | Expr::Null
+        | Expr::DefaultValue
+        | Expr::MatchAgainst { .. }
+        | Expr::FtsSnippet { .. }
+        | Expr::Exists { .. }
+        | Expr::ScalarSubquery(_) => false,
+    }
 }
 
 pub(super) fn matches_where(

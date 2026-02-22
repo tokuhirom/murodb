@@ -1124,4 +1124,35 @@ mod tests {
             panic!("Expected rows");
         }
     }
+
+    #[test]
+    fn test_where_nocase_with_index_does_not_miss_rows() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("CREATE INDEX idx_name ON t(name)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT id FROM t WHERE name = 'alice'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
 }

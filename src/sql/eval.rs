@@ -12,7 +12,7 @@ mod pattern;
 use cast::eval_cast;
 pub use compare::is_truthy;
 use compare::value_cmp;
-use functions::{eval_case_when, eval_case_when_with, eval_function_call, eval_function_call_with};
+use functions::{eval_case_when, eval_function_call, eval_function_call_with};
 use ops::{eval_binary_op, eval_unary_op};
 use pattern::like_match;
 
@@ -342,9 +342,43 @@ pub fn eval_expr_with_collation(
             operand,
             when_clauses,
             else_clause,
-        } => eval_case_when_with(operand, when_clauses, else_clause, columns, &|e, c| {
-            eval_expr_with_collation(e, c, resolve_collation)
-        }),
+        } => match operand {
+            Some(op_expr) => {
+                let op_val = eval_expr_with_collation(op_expr, columns, resolve_collation)?;
+                for (when_expr, then_expr) in when_clauses {
+                    let when_val = eval_expr_with_collation(when_expr, columns, resolve_collation)?;
+                    if op_val.is_null() || when_val.is_null() {
+                        continue;
+                    }
+                    let collation = resolve_collation(op_expr, when_expr)?;
+                    if value_cmp_with_collation(&op_val, &when_val, collation.as_deref())?
+                        == Some(std::cmp::Ordering::Equal)
+                    {
+                        return eval_expr_with_collation(then_expr, columns, resolve_collation);
+                    }
+                }
+                match else_clause {
+                    Some(else_expr) => {
+                        eval_expr_with_collation(else_expr, columns, resolve_collation)
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
+            None => {
+                for (cond_expr, then_expr) in when_clauses {
+                    let cond_val = eval_expr_with_collation(cond_expr, columns, resolve_collation)?;
+                    if is_truthy(&cond_val) {
+                        return eval_expr_with_collation(then_expr, columns, resolve_collation);
+                    }
+                }
+                match else_clause {
+                    Some(else_expr) => {
+                        eval_expr_with_collation(else_expr, columns, resolve_collation)
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
+        },
         Expr::Cast { expr, target_type } => {
             let val = eval_expr_with_collation(expr, columns, resolve_collation)?;
             eval_cast(&val, target_type)

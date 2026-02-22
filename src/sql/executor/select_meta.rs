@@ -14,20 +14,16 @@ pub(super) fn exec_explain(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let (table_name, where_clause, select_type, join_note) = match stmt {
+    let (table_name, where_clause, select_type, join_note, join_cost) = match stmt {
         Statement::Select(sel) => {
             let table_name = sel.table_name.as_ref().ok_or_else(|| {
                 MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
             })?;
-            (
-                table_name.clone(),
-                &sel.where_clause,
-                "SIMPLE",
-                build_join_loop_note(sel, pager, catalog)?,
-            )
+            let (note, cost) = build_join_loop_note(sel, pager, catalog)?;
+            (table_name.clone(), &sel.where_clause, "SIMPLE", note, cost)
         }
-        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE", None),
-        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE", None),
+        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE", None, 0),
+        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE", None, 0),
         _ => {
             return Err(MuroError::Execution(
                 "EXPLAIN supports SELECT, UPDATE, and DELETE statements".into(),
@@ -70,7 +66,8 @@ pub(super) fn exec_explain(
         table_rows: estimate_table_rows(&table_def, pager)?,
     };
     let estimated_rows = estimate_plan_rows_hint(&plan, &display_stats, &index_stats);
-    let estimated_cost = plan_cost_hint_with_stats(&plan, &planner_stats, &index_stats) as i64;
+    let estimated_cost = (plan_cost_hint_with_stats(&plan, &planner_stats, &index_stats) as i64)
+        .saturating_add(join_cost as i64);
 
     let (access_type, key_name, extra) = match &plan {
         Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
@@ -155,9 +152,9 @@ fn build_join_loop_note(
     sel: &Select,
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
-) -> Result<Option<String>> {
+) -> Result<(Option<String>, u64)> {
     if sel.joins.is_empty() {
-        return Ok(None);
+        return Ok((None, 0));
     }
     let base_name = sel
         .table_name
@@ -168,6 +165,7 @@ fn build_join_loop_note(
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", base_name)))?;
     let mut left_est = estimate_table_rows(&base_def, pager)?;
     let mut parts: Vec<String> = Vec::new();
+    let mut total_join_cost: u64 = 0;
 
     for (i, join) in sel.joins.iter().enumerate() {
         if !matches!(join.join_type, JoinType::Inner | JoinType::Cross) {
@@ -177,25 +175,31 @@ fn build_join_loop_note(
             .get_table(pager, &join.table_name)?
             .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", join.table_name)))?;
         let right_est = estimate_table_rows(&right_def, pager)?;
-        let order = choose_nested_loop_order(left_est, right_est);
-        let order_label = match order {
+        let decision = choose_nested_loop_order_with_cost(left_est, right_est);
+        let order_label = match decision.order {
             JoinLoopOrder::LeftOuter => "left_outer",
             JoinLoopOrder::RightOuter => "right_outer",
         };
         parts.push(format!(
-            "j{}={} (L={},R={})",
+            "j{}={} (L={},R={},cL={},cR={})",
             i + 1,
             order_label,
             left_est,
-            right_est
+            right_est,
+            decision.left_outer_cost,
+            decision.right_outer_cost
         ));
+        total_join_cost = total_join_cost.saturating_add(decision.chosen_cost);
         left_est = left_est.saturating_mul(right_est).max(1);
     }
 
     if parts.is_empty() {
-        Ok(None)
+        Ok((None, 0))
     } else {
-        Ok(Some(format!("Join loops: {}", parts.join(", "))))
+        Ok((
+            Some(format!("Join loops: {}", parts.join(", "))),
+            total_join_cost,
+        ))
     }
 }
 

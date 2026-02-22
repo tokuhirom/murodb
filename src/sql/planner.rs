@@ -31,6 +31,14 @@ pub enum JoinLoopOrder {
     RightOuter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinLoopEstimate {
+    pub order: JoinLoopOrder,
+    pub left_outer_cost: u64,
+    pub right_outer_cost: u64,
+    pub chosen_cost: u64,
+}
+
 #[derive(Debug)]
 pub enum Plan {
     PkSeek {
@@ -64,10 +72,34 @@ pub enum Plan {
 
 /// Choose nested-loop order from estimated cardinalities.
 pub fn choose_nested_loop_order(left_rows_est: u64, right_rows_est: u64) -> JoinLoopOrder {
-    if right_rows_est < left_rows_est {
-        JoinLoopOrder::RightOuter
+    choose_nested_loop_order_with_cost(left_rows_est, right_rows_est).order
+}
+
+/// Compare nested-loop alternatives and return chosen order + alternative costs.
+pub fn choose_nested_loop_order_with_cost(
+    left_rows_est: u64,
+    right_rows_est: u64,
+) -> JoinLoopEstimate {
+    let l = left_rows_est.max(1);
+    let r = right_rows_est.max(1);
+    // Both alternatives evaluate l*r combinations, but outer-loop iterations differ.
+    // This lightweight model biases toward smaller outer side.
+    let left_outer_cost = l.saturating_mul(r).saturating_add(l);
+    let right_outer_cost = l.saturating_mul(r).saturating_add(r);
+    if right_outer_cost < left_outer_cost {
+        JoinLoopEstimate {
+            order: JoinLoopOrder::RightOuter,
+            left_outer_cost,
+            right_outer_cost,
+            chosen_cost: right_outer_cost,
+        }
     } else {
-        JoinLoopOrder::LeftOuter
+        JoinLoopEstimate {
+            order: JoinLoopOrder::LeftOuter,
+            left_outer_cost,
+            right_outer_cost,
+            chosen_cost: left_outer_cost,
+        }
     }
 }
 
@@ -548,6 +580,14 @@ mod tests {
         assert_eq!(choose_nested_loop_order(10, 9), JoinLoopOrder::RightOuter);
         assert_eq!(choose_nested_loop_order(9, 10), JoinLoopOrder::LeftOuter);
         assert_eq!(choose_nested_loop_order(10, 10), JoinLoopOrder::LeftOuter);
+    }
+
+    #[test]
+    fn test_choose_nested_loop_order_with_costs() {
+        let e = choose_nested_loop_order_with_cost(100, 3);
+        assert_eq!(e.order, JoinLoopOrder::RightOuter);
+        assert!(e.right_outer_cost < e.left_outer_cost);
+        assert_eq!(e.chosen_cost, e.right_outer_cost);
     }
 }
 

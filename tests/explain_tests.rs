@@ -534,3 +534,53 @@ fn test_explain_join_extra_shows_loop_order_choice() {
     assert!(extra.contains("Join loops:"));
     assert!(extra.contains("j1=right_outer"));
 }
+
+#[test]
+fn test_explain_join_cost_includes_loop_choice_cost() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t1 (id BIGINT PRIMARY KEY, v INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "CREATE TABLE t2 (id BIGINT PRIMARY KEY, t1_id BIGINT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    for i in 1..=20 {
+        execute(
+            &format!("INSERT INTO t1 (id, v) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+    for i in 1..=3 {
+        execute(
+            &format!("INSERT INTO t2 (id, t1_id) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let base = query_rows("EXPLAIN SELECT * FROM t1", &mut pager, &mut catalog);
+    let join = query_rows(
+        "EXPLAIN SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id",
+        &mut pager,
+        &mut catalog,
+    );
+    let base_cost = match base[0][6].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer cost, got {:?}", other),
+    };
+    let join_cost = match join[0][6].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer cost, got {:?}", other),
+    };
+    assert!(join_cost > base_cost);
+}

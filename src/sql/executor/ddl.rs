@@ -1,6 +1,23 @@
 use super::*;
 use std::collections::HashSet;
 
+pub(super) fn validate_column_collation(
+    column_name: &str,
+    data_type: DataType,
+    collation: Option<&str>,
+) -> Result<()> {
+    if collation.is_none() {
+        return Ok(());
+    }
+    if matches!(data_type, DataType::Varchar(_) | DataType::Text) {
+        return Ok(());
+    }
+    Err(MuroError::Schema(format!(
+        "COLLATE is only supported for VARCHAR/TEXT columns: '{}'",
+        column_name
+    )))
+}
+
 pub(super) fn exec_create_table(
     ct: &CreateTable,
     pager: &mut impl PageStore,
@@ -66,6 +83,11 @@ pub(super) fn exec_create_table(
         .map(|(name, _)| name.clone())
         .collect();
     for col_spec in &ct.columns {
+        validate_column_collation(
+            &col_spec.name,
+            col_spec.data_type,
+            col_spec.collation.as_deref(),
+        )?;
         if col_spec.is_unique && !col_spec.is_primary_key {
             let idx_name = format!("auto_unique_{}_{}", ct.table_name, col_spec.name);
             if all_index_names.contains(&idx_name) {

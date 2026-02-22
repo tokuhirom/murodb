@@ -25,8 +25,6 @@ use crate::wal::record::crc32;
 ///   68..72  Encryption suite ID (u32 LE)
 ///   72..76  Header CRC32 (u32 LE, over bytes 0..72)
 const PLAINTEXT_HEADER_SIZE: u64 = 76;
-const LEGACY_HEADER_SIZE_V1_V2: u64 = 64;
-const LEGACY_HEADER_SIZE_V3: u64 = 72;
 const MAGIC: &[u8; 8] = b"MURODB01";
 const FORMAT_VERSION: u32 = 4;
 
@@ -36,7 +34,6 @@ const DEFAULT_CACHE_CAPACITY: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeaderSnapshot {
     version: u32,
-    header_size: u64,
     salt: [u8; 16],
     catalog_root: u64,
     page_count: u64,
@@ -57,8 +54,6 @@ pub struct Pager {
     file: File,
     crypto: PageCipher,
     encryption_suite: EncryptionSuite,
-    header_version: u32,
-    header_size: u64,
     page_count: u64,
     epoch: u64,
     catalog_root: u64,
@@ -78,14 +73,6 @@ pub struct Pager {
 }
 
 impl Pager {
-    fn header_size_for_version(version: u32) -> u64 {
-        match version {
-            1 | 2 => LEGACY_HEADER_SIZE_V1_V2,
-            3 => LEGACY_HEADER_SIZE_V3,
-            _ => PLAINTEXT_HEADER_SIZE,
-        }
-    }
-
     fn page_size_on_disk(&self) -> usize {
         PAGE_SIZE + self.crypto.overhead()
     }
@@ -120,8 +107,6 @@ impl Pager {
             file,
             crypto,
             encryption_suite: suite,
-            header_version: FORMAT_VERSION,
-            header_size: PLAINTEXT_HEADER_SIZE,
             page_count: 0,
             epoch: 0,
             catalog_root: 0,
@@ -187,8 +172,6 @@ impl Pager {
             file,
             crypto,
             encryption_suite: snapshot.encryption_suite,
-            header_version: snapshot.version,
-            header_size: snapshot.header_size,
             page_count: 0,
             epoch: 0,
             catalog_root: 0,
@@ -247,39 +230,19 @@ impl Pager {
     fn write_plaintext_header(&mut self) -> Result<()> {
         let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
         header[0..8].copy_from_slice(MAGIC);
-        header[8..12].copy_from_slice(&self.header_version.to_le_bytes());
+        header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         header[12..28].copy_from_slice(&self.salt);
         header[28..36].copy_from_slice(&self.catalog_root.to_le_bytes());
         header[36..44].copy_from_slice(&self.page_count.to_le_bytes());
         header[44..52].copy_from_slice(&self.epoch.to_le_bytes());
         header[52..60].copy_from_slice(&self.freelist_page_id.to_le_bytes());
-
-        match self.header_version {
-            1 => {
-                // v1 has no next_txid and no CRC.
-            }
-            2 => {
-                // v2 has CRC over 0..60 and no next_txid.
-                let checksum = crc32(&header[0..60]);
-                header[60..64].copy_from_slice(&checksum.to_le_bytes());
-            }
-            3 => {
-                // v3 persists next_txid and CRC over 0..68.
-                header[60..68].copy_from_slice(&self.next_txid.to_le_bytes());
-                let checksum = crc32(&header[0..68]);
-                header[68..72].copy_from_slice(&checksum.to_le_bytes());
-            }
-            _ => {
-                // v4 adds encryption suite id and moves CRC.
-                header[60..68].copy_from_slice(&self.next_txid.to_le_bytes());
-                header[68..72].copy_from_slice(&self.encryption_suite.id().to_le_bytes());
-                let checksum = crc32(&header[0..72]);
-                header[72..76].copy_from_slice(&checksum.to_le_bytes());
-            }
-        }
+        header[60..68].copy_from_slice(&self.next_txid.to_le_bytes());
+        header[68..72].copy_from_slice(&self.encryption_suite.id().to_le_bytes());
+        let checksum = crc32(&header[0..72]);
+        header[72..76].copy_from_slice(&checksum.to_le_bytes());
 
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&header[..self.header_size as usize])?;
+        self.file.write_all(&header)?;
         Ok(())
     }
 
@@ -296,10 +259,10 @@ impl Pager {
     }
 
     fn read_plaintext_header_snapshot_from_file(file: &mut File) -> Result<HeaderSnapshot> {
-        // Read max possible header size; older versions have smaller headers.
+        // Read fixed v4 header size.
         let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
         file.seek(SeekFrom::Start(0))?;
-        // Read at least old header size (64 bytes), tolerating shorter files for v1
+        // Require full v4 header bytes.
         let bytes_read = {
             let mut total = 0;
             loop {
@@ -312,7 +275,7 @@ impl Pager {
             }
             total
         };
-        if bytes_read < 64 {
+        if bytes_read < PLAINTEXT_HEADER_SIZE as usize {
             return Err(MuroError::InvalidPage);
         }
         if &header[0..8] != MAGIC {
@@ -320,14 +283,12 @@ impl Pager {
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        if version > FORMAT_VERSION {
+        if version != FORMAT_VERSION {
             return Err(MuroError::Wal(format!(
                 "unsupported database format version {}",
                 version
             )));
         }
-
-        let header_size = Self::header_size_for_version(version);
 
         let mut salt = [0u8; 16];
         salt.copy_from_slice(&header[12..28]);
@@ -336,48 +297,17 @@ impl Pager {
         let epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
         let freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
 
-        let (next_txid, encryption_suite) = match version {
-            1 => (1, EncryptionSuite::Aes256GcmSiv), // v1 has no header CRC/next_txid field.
-            2 => {
-                let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
-                let computed_crc = crc32(&header[0..60]);
-                if stored_crc != computed_crc {
-                    return Err(MuroError::Wal("header corrupted".into()));
-                }
-                (1, EncryptionSuite::Aes256GcmSiv)
-            }
-            3 => {
-                let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-                let computed_crc = crc32(&header[0..68]);
-                if stored_crc != computed_crc {
-                    return Err(MuroError::Wal("header corrupted".into()));
-                }
-                (
-                    u64::from_le_bytes(header[60..68].try_into().unwrap()),
-                    EncryptionSuite::Aes256GcmSiv,
-                )
-            }
-            _ => {
-                if bytes_read < PLAINTEXT_HEADER_SIZE as usize {
-                    return Err(MuroError::InvalidPage);
-                }
-                let suite_id = u32::from_le_bytes(header[68..72].try_into().unwrap());
-                let suite = EncryptionSuite::from_id(suite_id)?;
-                let stored_crc = u32::from_le_bytes(header[72..76].try_into().unwrap());
-                let computed_crc = crc32(&header[0..72]);
-                if stored_crc != computed_crc {
-                    return Err(MuroError::Wal("header corrupted".into()));
-                }
-                (
-                    u64::from_le_bytes(header[60..68].try_into().unwrap()),
-                    suite,
-                )
-            }
-        };
+        let suite_id = u32::from_le_bytes(header[68..72].try_into().unwrap());
+        let encryption_suite = EncryptionSuite::from_id(suite_id)?;
+        let stored_crc = u32::from_le_bytes(header[72..76].try_into().unwrap());
+        let computed_crc = crc32(&header[0..72]);
+        if stored_crc != computed_crc {
+            return Err(MuroError::Wal("header corrupted".into()));
+        }
+        let next_txid = u64::from_le_bytes(header[60..68].try_into().unwrap());
 
         Ok(HeaderSnapshot {
             version,
-            header_size,
             salt,
             catalog_root,
             page_count,
@@ -389,8 +319,6 @@ impl Pager {
     }
 
     fn apply_header_snapshot(&mut self, snapshot: HeaderSnapshot) {
-        self.header_version = snapshot.version;
-        self.header_size = snapshot.header_size;
         self.salt = snapshot.salt;
         self.catalog_root = snapshot.catalog_root;
         self.page_count = snapshot.page_count;
@@ -474,8 +402,7 @@ impl Pager {
             || snapshot.epoch != self.epoch
             || snapshot.freelist_page_id != self.freelist_page_id
             || snapshot.next_txid != self.next_txid
-            || snapshot.version != self.header_version
-            || snapshot.header_size != self.header_size;
+            || snapshot.version != FORMAT_VERSION;
         if !changed {
             return Ok(false);
         }
@@ -536,7 +463,7 @@ impl Pager {
     /// Read an encrypted page from disk and decrypt it.
     fn read_page_from_disk(&mut self, page_id: PageId) -> Result<Page> {
         let page_size_on_disk = self.page_size_on_disk();
-        let offset = self.header_size + page_id * page_size_on_disk as u64;
+        let offset = PLAINTEXT_HEADER_SIZE + page_id * page_size_on_disk as u64;
         self.file.seek(SeekFrom::Start(offset))?;
 
         let mut encrypted = vec![0u8; page_size_on_disk];
@@ -568,7 +495,7 @@ impl Pager {
             ));
         }
 
-        let offset = self.header_size + page_id * page_size_on_disk as u64;
+        let offset = PLAINTEXT_HEADER_SIZE + page_id * page_size_on_disk as u64;
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(&encrypted)?;
         Ok(())

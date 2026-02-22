@@ -9,10 +9,19 @@
 | INT | 4 bytes | -2,147,483,648 to 2,147,483,647 |
 | BIGINT | 8 bytes | -2^63 to 2^63-1 |
 | BOOLEAN | 1 byte | Alias for TINYINT |
+| DATE | 4 bytes | `YYYY-MM-DD` |
+| DATETIME | 8 bytes | `YYYY-MM-DD HH:MM:SS` |
+| TIMESTAMP | 8 bytes | `YYYY-MM-DD HH:MM:SS` (timezone-aware input, normalized to UTC) |
 | VARCHAR(n) | variable | max n bytes (optional) |
 | TEXT | variable | unbounded text |
 | VARBINARY(n) | variable | max n bytes (optional) |
 | NULL | 0 bytes | null value |
+
+Temporal semantics:
+- `DATE` stores calendar date only.
+- `DATETIME` stores date-time as provided (no timezone conversion).
+- `TIMESTAMP` accepts timezone offsets in string input (for example `+09:00`, `Z`) and stores UTC-normalized value.
+- Invalid calendar/time values are rejected.
 
 ## DDL (Data Definition Language)
 
@@ -559,7 +568,7 @@ SELECT CAST(42 AS VARCHAR);    -- '42'
 SELECT CAST(val AS BIGINT) FROM t;
 ```
 
-Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, VARCHAR, TEXT, VARBINARY.
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
 
 ## Aggregation & GROUP BY
 

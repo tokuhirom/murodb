@@ -80,7 +80,7 @@ MySQL-compatible scalar functions.
 ## Phase 6 — Types & Storage
 
 - [x] FLOAT / DOUBLE
-- [ ] DATE, DATETIME, TIMESTAMP
+- [x] DATE, DATETIME, TIMESTAMP
   - Scope: fully align parser/executor/CAST/default/literal behavior and edge-case validation.
   - Done when:
     - Temporal literals and string casts behave consistently across INSERT/UPDATE/WHERE.

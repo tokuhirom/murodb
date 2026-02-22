@@ -9,22 +9,13 @@ pub(super) fn validate_column_collation(
     if collation.is_none() {
         return Ok(());
     }
-    if !matches!(data_type, DataType::Varchar(_) | DataType::Text) {
-        return Err(MuroError::Schema(format!(
-            "COLLATE is only supported for VARCHAR/TEXT columns: '{}'",
-            column_name
-        )));
+    if matches!(data_type, DataType::Varchar(_) | DataType::Text) {
+        return Ok(());
     }
-
-    let name = collation.unwrap();
-    if name.eq_ignore_ascii_case("binary") {
-        Ok(())
-    } else {
-        Err(MuroError::Schema(format!(
-            "Unsupported collation '{}' for column '{}': currently only binary is supported",
-            name, column_name
-        )))
-    }
+    Err(MuroError::Schema(format!(
+        "COLLATE is only supported for VARCHAR/TEXT columns: '{}'",
+        column_name
+    )))
 }
 
 pub(super) fn exec_create_table(

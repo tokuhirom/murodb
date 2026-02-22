@@ -414,7 +414,7 @@ pub(super) fn exec_select(
 
         // ORDER BY
         if let Some(order_items) = &sel.order_by {
-            sort_rows_with_table(&mut rows, order_items, &table_def)?;
+            sort_rows(&mut rows, order_items);
         }
 
         // OFFSET
@@ -694,7 +694,7 @@ pub(super) fn exec_select(
 
         // ORDER BY
         if let Some(order_items) = &sel.order_by {
-            sort_rows_with_table(&mut rows, order_items, &table_def)?;
+            sort_rows(&mut rows, order_items);
         }
 
         // OFFSET
@@ -729,28 +729,6 @@ pub(super) fn exec_select_returning_rows(
     }
 }
 
-fn cmp_values_with_collation(
-    a: Option<&Value>,
-    b: Option<&Value>,
-    collation: Option<&str>,
-) -> Result<std::cmp::Ordering> {
-    let Some(collation) = collation else {
-        return Ok(cmp_values(a, b));
-    };
-    if !collation.eq_ignore_ascii_case("binary") {
-        return Err(MuroError::Execution(format!(
-            "Unsupported collation '{}' in ORDER BY: currently only binary is supported",
-            collation
-        )));
-    }
-    match (a, b) {
-        (Some(Value::Varchar(left)), Some(Value::Varchar(right))) => {
-            Ok(left.as_bytes().cmp(right.as_bytes()))
-        }
-        _ => Ok(cmp_values(a, b)),
-    }
-}
-
 pub(super) fn sort_rows(rows: &mut [Row], order_items: &[OrderByItem]) {
     rows.sort_by(|a, b| {
         for item in order_items {
@@ -765,43 +743,6 @@ pub(super) fn sort_rows(rows: &mut [Row], order_items: &[OrderByItem]) {
         }
         std::cmp::Ordering::Equal
     });
-}
-
-pub(super) fn sort_rows_with_table(
-    rows: &mut [Row],
-    order_items: &[OrderByItem],
-    table_def: &TableDef,
-) -> Result<()> {
-    let mut sort_error: Option<MuroError> = None;
-    rows.sort_by(|a, b| {
-        if sort_error.is_some() {
-            return std::cmp::Ordering::Equal;
-        }
-        for item in order_items {
-            if let Expr::ColumnRef(col) = &item.expr {
-                let va = a.get(col);
-                let vb = b.get(col);
-                let collation = table_def
-                    .column_index(col)
-                    .and_then(|i| table_def.columns[i].collation.as_deref());
-                let ord = match cmp_values_with_collation(va, vb, collation) {
-                    Ok(ord) => ord,
-                    Err(e) => {
-                        sort_error = Some(e);
-                        return std::cmp::Ordering::Equal;
-                    }
-                };
-                if ord != std::cmp::Ordering::Equal {
-                    return if item.descending { ord.reverse() } else { ord };
-                }
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
-    if let Some(err) = sort_error {
-        return Err(err);
-    }
-    Ok(())
 }
 
 pub(super) fn matches_where(

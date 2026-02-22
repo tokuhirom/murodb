@@ -81,19 +81,94 @@ MySQL-compatible scalar functions.
 
 - [x] FLOAT / DOUBLE
 - [ ] DATE, DATETIME, TIMESTAMP
+  - Scope: fully align parser/executor/CAST/default/literal behavior and edge-case validation.
+  - Done when:
+    - Temporal literals and string casts behave consistently across INSERT/UPDATE/WHERE.
+    - Arithmetic and comparison semantics are defined/documented for mixed temporal expressions.
+    - Timezone handling policy is explicit (especially TIMESTAMP input/output normalization).
+    - Invalid dates/times reject with deterministic errors.
 - [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
 - [ ] BLOB
+  - Why separate from VARBINARY:
+    - `VARBINARY(n)` remains row-oriented variable binary with optional inline size cap.
+    - `BLOB` is the large-object type with storage strategy optimized for large payloads.
+  - Done when:
+    - `BLOB` type is available in DDL/CAST/type display.
+    - DML/read path supports large payload round-trip with stable behavior.
+    - Operational limits are documented (max size, indexing restrictions, comparison semantics).
 - [ ] Overflow pages (posting list > 4096B)
+  - Scope: support values/postings that exceed single-page capacity.
+  - Done when:
+    - Overflow chain format is versioned and crash-safe.
+    - WAL/recovery covers partial-write and torn-tail scenarios for overflow chains.
+    - Vacuum/reclaim path correctly frees overflow pages without orphaning.
+    - Benchmarks show no severe regressions for small records.
 
 ## Phase 7 — Performance & Internals
 
 - [x] Auto-checkpoint (threshold-based WAL)
 - [ ] Composite index range scan
+  - Done when:
+    - Multi-column prefix ranges (`(a,b)` with predicates on `a`, optional range on `b`) use index scan.
+    - EXPLAIN shows index-range choice and estimated cardinality.
+    - Fallback path remains correct for unsupported predicate shapes.
 - [ ] Query optimizer improvements (cost-based)
+  - Done when:
+    - Planner compares at least full-scan vs single-index vs join-order alternatives.
+    - Basic column stats/histograms are persisted and refreshable.
+    - Plan choice is deterministic under identical stats.
 - [ ] FTS stop-ngram filtering
+  - Done when:
+    - Frequent low-information ngrams are skipped using configurable thresholds.
+    - Recall/precision tradeoff is documented with benchmark examples.
+    - Toggle exists for exact behavior compatibility.
 - [ ] fts_snippet acceleration (pos-to-offset map)
+  - Done when:
+    - Snippet generation avoids repeated UTF-8 rescans for long docs.
+    - Latency improvement is measured and documented on representative datasets.
+    - Memory overhead remains bounded and observable.
 
 ## Phase 8 — Security (Future)
 
 - [ ] Key rotation (epoch-based re-encryption)
+  - Done when:
+    - Online/offline rotation flow is available with resumable progress.
+    - WAL + data file epoch mismatch handling is crash-safe.
+    - Rotation metrics/events are visible via inspection commands.
 - [ ] Collation support (Japanese sort order, etc.)
+  - Done when:
+    - Collation can be selected per column/index.
+    - ORDER BY / comparison / LIKE behavior is deterministic per collation.
+    - Index key encoding respects collation sort rules.
+
+## Phase 9 — Practical Embedded DB (Next)
+
+Real-world deployment features to make MuroDB easier to embed and operate.
+
+- [ ] Encryption OFF mode
+  - Motivation: some embedded deployments prefer CPU savings and rely on disk/host-level protection.
+  - Done when:
+    - DB format can be created/opened in explicit plaintext mode.
+    - File header clearly records mode to avoid accidental mis-open.
+    - CLI/API require explicit opt-in (no silent downgrade from encrypted DB).
+- [ ] Pluggable encryption suite
+  - Motivation: allow policy-driven algorithm choice without forking storage engine.
+  - Done when:
+    - Algorithm + KDF are selected by explicit config at DB creation.
+    - Supported suites are versioned, discoverable, and recorded in metadata.
+    - Wrong-suite open errors are deterministic and actionable.
+- [ ] Rekey / algorithm migration
+  - Done when:
+    - Existing DB can migrate key and/or cipher suite safely.
+    - Migration is resumable and crash-recoverable.
+    - Rollback/retry procedure is documented and tested.
+- [ ] Backup API + consistent snapshot
+  - Done when:
+    - Online consistent backup without long writer stalls.
+    - Restore path validated by integration tests.
+    - Snapshot metadata includes format/security parameters.
+- [ ] Operational limits and safeguards
+  - Done when:
+    - Configurable caps for DB file size, WAL size, statement timeout, and memory budget.
+    - Error surfaces are clear and machine-parseable for host applications.
+    - Default limits are documented with recommended profiles (edge device / server / CI).

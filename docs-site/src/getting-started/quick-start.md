@@ -8,6 +8,12 @@ murodb mydb.db --create -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)
 
 You will be prompted for an encryption password.
 
+If you need plaintext mode, opt in explicitly:
+
+```bash
+murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
+```
+
 ## Insert data
 
 ```bash

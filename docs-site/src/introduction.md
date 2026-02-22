@@ -1,10 +1,10 @@
 # MuroDB
 
-Encrypted embedded SQL database with B+Tree (no leaf links) + Full-Text Search (Bigram), written in Rust.
+Embedded SQL database with B+Tree (no leaf links) + Full-Text Search (Bigram), written in Rust.
 
 ## Features
 
-- **Transparent encryption** - AES-256-GCM-SIV (nonce-misuse resistant) for all pages and WAL
+- **Pluggable at-rest mode** - `aes256-gcm-siv` (default) or explicit `off` plaintext mode
 - **B+tree storage (no leaf links)** - PRIMARY KEY (TINYINT/SMALLINT/INT/BIGINT), UNIQUE indexes (single column)
 - **Full-text search** - Bigram (n=2) with NFKC normalization
   - MySQL-style `MATCH(col) AGAINST(...)` syntax
@@ -20,9 +20,9 @@ Encrypted embedded SQL database with B+Tree (no leaf links) + Full-Text Search (
 | Component | Description |
 |---|---|
 | `crypto/` | AES-256-GCM-SIV page encryption, Argon2 KDF, HMAC-SHA256 term blinding |
-| `storage/` | 4096B slotted pages, encrypted pager with LRU cache, freelist |
+| `storage/` | 4096B slotted pages, pager with pluggable at-rest mode + LRU cache, freelist |
 | `btree/` | Insert/split, delete, search, scan, order-preserving key encoding |
-| `wal/` | Encrypted WAL records, writer/reader, crash recovery |
+| `wal/` | WAL records (suite-aligned with DB mode), writer/reader, crash recovery |
 | `tx/` | Transaction with dirty page buffer, commit/rollback |
 | `schema/` | System catalog, table/index definitions |
 | `sql/` | Hand-written lexer/parser, AST, rule-based planner, executor |

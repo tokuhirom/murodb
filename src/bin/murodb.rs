@@ -3,6 +3,7 @@ use std::process;
 
 use base64::Engine;
 use clap::{Parser, ValueEnum};
+use murodb::crypto::suite::EncryptionSuite;
 use murodb::sql::ast::Statement;
 use murodb::sql::executor::ExecResult;
 use murodb::sql::parser::parse_sql;
@@ -20,6 +21,12 @@ enum RecoveryModeArg {
 enum OutputFormatArg {
     Text,
     Json,
+}
+
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum EncryptionModeArg {
+    Aes256GcmSiv,
+    Off,
 }
 
 impl From<RecoveryModeArg> for RecoveryMode {
@@ -48,6 +55,10 @@ struct Cli {
     /// Password (if omitted, will prompt)
     #[arg(long)]
     password: Option<String>,
+
+    /// Encryption mode (must match database mode on open)
+    #[arg(long, value_enum, default_value = "aes256-gcm-siv")]
+    encryption: EncryptionModeArg,
 
     /// WAL recovery behavior when opening existing DB
     #[arg(long, value_enum, default_value = "strict")]
@@ -404,7 +415,6 @@ fn run_repl(db: &mut Database, format: &OutputFormatArg) {
 fn main() {
     let cli = Cli::parse();
 
-    let password = get_password(&cli.password);
     let recovery_mode: RecoveryMode = cli.recovery_mode.clone().into();
 
     let mut db = if cli.create {
@@ -416,10 +426,19 @@ fn main() {
             eprintln!("ERROR: File already exists: {}", db_path.display());
             process::exit(1);
         }
-        Database::create_with_password(db_path, &password).unwrap_or_else(|e| {
-            eprintln!("ERROR: Failed to create database: {}", e);
-            process::exit(1);
-        })
+        match cli.encryption {
+            EncryptionModeArg::Aes256GcmSiv => {
+                let password = get_password(&cli.password);
+                Database::create_with_password(db_path, &password).unwrap_or_else(|e| {
+                    eprintln!("ERROR: Failed to create database: {}", e);
+                    process::exit(1);
+                })
+            }
+            EncryptionModeArg::Off => Database::create_plaintext(db_path).unwrap_or_else(|e| {
+                eprintln!("ERROR: Failed to create plaintext database: {}", e);
+                process::exit(1);
+            }),
+        }
     } else {
         let db_path = cli.db_path.as_ref().unwrap_or_else(|| {
             eprintln!("ERROR: db_path is required");
@@ -430,11 +449,39 @@ fn main() {
             eprintln!("Use --create to create a new database");
             process::exit(1);
         }
-        let (db, report) = Database::open_with_password_and_recovery_mode_and_report(
-            db_path,
-            &password,
-            recovery_mode,
-        )
+        let info = murodb::storage::pager::Pager::read_encryption_info_from_file(db_path)
+            .unwrap_or_else(|e| {
+                eprintln!("ERROR: Failed to read database header: {}", e);
+                process::exit(1);
+            });
+        let requested_suite = match cli.encryption {
+            EncryptionModeArg::Aes256GcmSiv => EncryptionSuite::Aes256GcmSiv,
+            EncryptionModeArg::Off => EncryptionSuite::Plaintext,
+        };
+        if requested_suite != info.suite {
+            eprintln!(
+                "ERROR: Encryption mode mismatch. DB is {}, but --encryption={} was requested.",
+                info.suite.as_str(),
+                match cli.encryption {
+                    EncryptionModeArg::Aes256GcmSiv => "aes256-gcm-siv",
+                    EncryptionModeArg::Off => "off",
+                }
+            );
+            process::exit(1);
+        }
+        let (db, report) = match info.suite {
+            EncryptionSuite::Aes256GcmSiv => {
+                let password = get_password(&cli.password);
+                Database::open_with_password_and_recovery_mode_and_report(
+                    db_path,
+                    &password,
+                    recovery_mode,
+                )
+            }
+            EncryptionSuite::Plaintext => {
+                Database::open_plaintext_with_recovery_mode_and_report(db_path, recovery_mode)
+            }
+        }
         .unwrap_or_else(|e| {
             eprintln!("ERROR: Failed to open database: {}", e);
             process::exit(1);

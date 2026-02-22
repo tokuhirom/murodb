@@ -190,13 +190,13 @@ MySQL-compatible scalar functions.
 
 Real-world deployment features to make MuroDB easier to embed and operate.
 
-- [ ] Encryption OFF mode
+- [x] Encryption OFF mode
   - Motivation: some embedded deployments prefer CPU savings and rely on disk/host-level protection.
   - Done when:
     - DB format can be created/opened in explicit plaintext mode.
     - File header clearly records mode to avoid accidental mis-open.
     - CLI/API require explicit opt-in (no silent downgrade from encrypted DB).
-- [ ] Pluggable encryption suite
+- [x] Pluggable encryption suite
   - Motivation: allow policy-driven algorithm choice without forking storage engine.
   - Done when:
     - Algorithm + KDF are selected by explicit config at DB creation.

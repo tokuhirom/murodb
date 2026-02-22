@@ -17,11 +17,11 @@ pub(super) fn validate_column_collation(
     }
 
     let name = collation.unwrap();
-    if name.eq_ignore_ascii_case("binary") {
+    if name.eq_ignore_ascii_case("binary") || name.eq_ignore_ascii_case("nocase") {
         Ok(())
     } else {
         Err(MuroError::Schema(format!(
-            "Unsupported collation '{}' for column '{}': currently only binary is supported",
+            "Unsupported collation '{}' for column '{}': currently only binary and nocase are supported",
             name, column_name
         )))
     }

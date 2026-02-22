@@ -80,7 +80,8 @@ CREATE TABLE users (
   - `binary`: byte-wise comparison.
   - `nocase`: ASCII case-insensitive comparison.
 - `COLLATE` is valid only for `VARCHAR` / `TEXT`.
-- Current scope: collation is applied to `ORDER BY` on column references. Other paths (`WHERE` comparison, `LIKE`, index key ordering) are not collation-aware yet.
+- Current scope: collation is applied to `ORDER BY`, `WHERE` comparisons (`=`, `!=`, `<`, `<=`, `>`, `>=`), and `LIKE` / `NOT LIKE` on column references.
+- Not yet collation-aware: index key ordering/seek semantics.
 
 ### CREATE INDEX
 

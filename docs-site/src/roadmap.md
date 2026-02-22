@@ -173,9 +173,8 @@ MySQL-compatible scalar functions.
   - Progress:
     - Added column-level collation metadata (`COLLATE`) for `VARCHAR`/`TEXT`.
     - Current supported collations are `binary` (default) and `nocase` (ASCII case-insensitive).
-    - `ORDER BY` now consults column collation metadata.
+    - `ORDER BY`, `WHERE` comparisons, and `LIKE` now consult column collation metadata.
   - Remaining:
-    - Apply collation semantics to `WHERE` comparisons and `LIKE`.
     - Align index key encoding/order with collation rules.
   - Done when:
     - Collation can be selected per column/index.

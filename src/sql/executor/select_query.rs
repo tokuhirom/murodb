@@ -822,13 +822,44 @@ pub(super) fn matches_where(
     match where_clause {
         None => Ok(true),
         Some(expr) => {
-            let result = eval_expr(expr, &|name| {
-                table_def
-                    .column_index(name)
-                    .and_then(|i| values.get(i).cloned())
-            })?;
+            let result = eval_expr_with_collation(
+                expr,
+                &|name| {
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| values.get(i).cloned())
+                },
+                &|left, right| resolve_expr_collation(left, right, table_def),
+            )?;
             Ok(is_truthy(&result))
         }
+    }
+}
+
+fn expr_column_collation(expr: &Expr, table_def: &TableDef) -> Option<String> {
+    match expr {
+        Expr::ColumnRef(name) => table_def
+            .column_index(name)
+            .and_then(|i| table_def.columns[i].collation.clone()),
+        _ => None,
+    }
+}
+
+fn resolve_expr_collation(
+    left: &Expr,
+    right: &Expr,
+    table_def: &TableDef,
+) -> Result<Option<String>> {
+    let left_collation = expr_column_collation(left, table_def);
+    let right_collation = expr_column_collation(right, table_def);
+    match (left_collation, right_collation) {
+        (Some(a), Some(b)) if !a.eq_ignore_ascii_case(&b) => Err(MuroError::Execution(format!(
+            "Collation mismatch in expression: '{}' vs '{}'",
+            a, b
+        ))),
+        (Some(a), _) => Ok(Some(a)),
+        (_, Some(b)) => Ok(Some(b)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -898,11 +929,15 @@ pub(super) fn matches_where_with_fts(
         None => Ok(true),
         Some(expr) => {
             let expr = materialize_fts_expr(expr, table_def, values, fts_ctx);
-            let result = eval_expr(&expr, &|name| {
-                table_def
-                    .column_index(name)
-                    .and_then(|i| values.get(i).cloned())
-            })?;
+            let result = eval_expr_with_collation(
+                &expr,
+                &|name| {
+                    table_def
+                        .column_index(name)
+                        .and_then(|i| values.get(i).cloned())
+                },
+                &|left, right| resolve_expr_collation(left, right, table_def),
+            )?;
             Ok(is_truthy(&result))
         }
     }

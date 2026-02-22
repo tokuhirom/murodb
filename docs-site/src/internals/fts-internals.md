@@ -37,9 +37,14 @@ Phrase queries (e.g., `"東京タワー"`) verify consecutive bigram positions:
 
 ## Snippet Generation
 
-`fts_snippet()` uses a local scan approach:
+`fts_snippet()` uses a local scan approach with a UTF-8 offset map:
 
 1. Find matching positions in the document
-2. Select the best window around matches
-3. Apply highlight tags (open/close) around matched regions
-4. Truncate to the specified maximum length
+2. Build a char<->byte offset map for normalized text
+3. Convert match byte offsets to char windows via binary search
+4. Slice and apply highlight tags (open/close) around matched regions
+5. Truncate to the specified maximum length
+
+Memory note:
+
+- Offset map size is bounded by `(normalized_chars + 1) * sizeof(usize)` bytes per call.

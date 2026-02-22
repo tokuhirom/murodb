@@ -39,32 +39,52 @@ impl From<RecoveryModeArg> for RecoveryMode {
 }
 
 #[derive(Parser)]
-#[command(name = "murodb", about = "MuroDB - Encrypted embedded SQL database")]
+#[command(
+    name = "murodb",
+    about = "MuroDB - Encrypted embedded SQL database",
+    long_about = "MuroDB command-line interface for creating, opening, and querying an encrypted embedded SQL database.\n\nPrimary modes:\n- REPL mode: run interactive SQL when no `-e` is provided.\n- One-shot mode: run a single SQL statement with `-e` and exit.\n- Create mode: initialize a new database file with `--create`.\n\nOutput behavior:\n- `--format text`: human-readable table output.\n- `--format json`: stable JSON envelope for programmatic parsing.\n\nEncryption behavior:\n- `--encryption aes256-gcm-siv` (default): requires password.\n- `--encryption off`: plaintext database file, no password needed.\n\nIf `--password` is omitted in encrypted mode, the CLI prompts on TTY.",
+    after_long_help = "Examples:\n  murodb my.db\n  murodb my.db -e \"SELECT 1\"\n  murodb my.db --format json -e \"SELECT id, name FROM users\"\n  murodb my.db --create --encryption aes256-gcm-siv\n  murodb my.db --recovery-mode permissive\n\nDocumentation:\n  https://tokuhirom.github.io/murodb/"
+)]
 struct Cli {
-    /// Path to the database file
+    /// Path to the database file.
+    ///
+    /// If omitted, defaults to `muro.db` in the current working directory.
     db_path: Option<PathBuf>,
 
-    /// Execute SQL and exit
+    /// Execute one SQL statement and exit (non-interactive mode).
+    ///
+    /// Example: `-e "SELECT * FROM t LIMIT 10"`.
     #[arg(short = 'e')]
     execute: Option<String>,
 
-    /// Create a new database
+    /// Create a new database file before opening.
+    ///
+    /// Fails if the target path already exists.
     #[arg(long)]
     create: bool,
 
-    /// Password (if omitted, will prompt)
+    /// Password used for key derivation in encrypted mode.
+    ///
+    /// If omitted and encryption is enabled, the CLI prompts on TTY.
     #[arg(long)]
     password: Option<String>,
 
-    /// Encryption mode (must match database mode on open)
+    /// Encryption mode used for create/open.
+    ///
+    /// Must match the existing database encryption mode when opening.
     #[arg(long, value_enum, default_value = "aes256-gcm-siv")]
     encryption: EncryptionModeArg,
 
-    /// WAL recovery behavior when opening existing DB
+    /// WAL recovery behavior used when opening an existing database.
+    ///
+    /// `strict` aborts on malformed WAL records.
+    /// `permissive` skips malformed records where recovery can continue.
     #[arg(long, value_enum, default_value = "strict")]
     recovery_mode: RecoveryModeArg,
 
-    /// Output format for query results
+    /// Output format for query results and errors.
+    ///
+    /// `text` is human-readable; `json` is intended for tool integration.
     #[arg(long, value_enum, default_value = "text")]
     format: OutputFormatArg,
 }

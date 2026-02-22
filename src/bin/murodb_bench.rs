@@ -10,45 +10,60 @@ use rand::{Rng, SeedableRng};
 #[derive(Parser, Debug)]
 #[command(
     name = "murodb-bench",
-    about = "Embedded DB benchmark for typical OLTP-style workloads"
+    about = "Embedded DB benchmark for typical OLTP-style workloads",
+    long_about = "Run deterministic micro-benchmarks against a temporary MuroDB database.\n\nThe benchmark currently covers:\n- point selects and updates on a primary-key table (`kv`)\n- batched inserts\n- range scans\n- mixed read/write workloads\n- full-text search (FTS) point-select/update/mixed workloads\n\nResults include throughput and latency percentiles (p50/p95/p99) per scenario.\n\nThis is intended for local performance profiling and regression checks.",
+    after_long_help = "Examples:\n  murodb_bench\n  murodb_bench --initial-rows 50000 --batch-size 1000\n  murodb_bench --select-ops 100000 --mixed-ops 50000\n\nDocumentation:\n  https://tokuhirom.github.io/murodb/"
 )]
 struct Cli {
+    /// Number of rows preloaded into `kv` before measurements.
     #[arg(long, default_value_t = 20_000, value_parser = value_parser!(u64).range(1..))]
     initial_rows: u64,
 
+    /// Number of rows preloaded into `docs_fts` before FTS measurements.
     #[arg(long, default_value_t = 256, value_parser = value_parser!(u64).range(1..))]
     fts_initial_rows: u64,
 
+    /// Number of primary-key point SELECT operations.
     #[arg(long, default_value_t = 20_000)]
     select_ops: u64,
 
+    /// Number of primary-key point UPDATE operations.
     #[arg(long, default_value_t = 5_000)]
     update_ops: u64,
 
+    /// Number of INSERT operations for expansion workload.
     #[arg(long, default_value_t = 5_000)]
     insert_ops: u64,
 
+    /// Number of range-scan operations.
     #[arg(long, default_value_t = 2_000)]
     scan_ops: u64,
 
+    /// Number of mixed read/write operations on `kv`.
     #[arg(long, default_value_t = 10_000)]
     mixed_ops: u64,
 
+    /// Number of FTS query operations.
     #[arg(long, default_value_t = 5_000)]
     fts_select_ops: u64,
 
+    /// Number of FTS update operations.
     #[arg(long, default_value_t = 2_000)]
     fts_update_ops: u64,
 
+    /// Number of mixed FTS read/write operations.
     #[arg(long, default_value_t = 5_000)]
     fts_mixed_ops: u64,
 
+    /// Number of warmup point-select operations before measurements.
     #[arg(long, default_value_t = 200)]
     warmup_ops: u64,
 
+    /// Transaction batch size for preload and parts of mixed workload.
     #[arg(long, default_value_t = 500, value_parser = value_parser!(u64).range(1..))]
     batch_size: u64,
 
+    /// Keep the temporary benchmark database file under `/tmp` after run.
     #[arg(long)]
     keep_db: bool,
 }

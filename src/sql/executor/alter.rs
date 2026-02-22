@@ -71,6 +71,9 @@ pub(super) fn exec_alter_add_column(
     }
 
     let mut col = ColumnDef::new(&col_spec.name, col_spec.data_type);
+    if let Some(collation) = &col_spec.collation {
+        col = col.with_collation(collation);
+    }
     if col_spec.is_unique {
         col = col.unique();
     }
@@ -460,6 +463,7 @@ pub(super) fn validate_no_nulls_in_column(
 pub(super) fn update_column_def(col: &mut ColumnDef, spec: &ColumnSpec) {
     col.name = spec.name.clone();
     col.data_type = spec.data_type;
+    col.collation = spec.collation.clone();
     col.is_unique = spec.is_unique;
     col.is_nullable = spec.is_nullable;
     col.auto_increment = spec.auto_increment;

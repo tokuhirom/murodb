@@ -48,6 +48,9 @@ pub(super) fn exec_show_create_table(
     let total_items = visible_columns.len() + table_constraints.len();
     for (i, col) in visible_columns.iter().enumerate() {
         sql.push_str(&format!("  {} {}", col.name, col.data_type));
+        if let Some(collation) = &col.collation {
+            sql.push_str(&format!(" COLLATE {}", collation));
+        }
         if col.is_primary_key && !is_composite_pk {
             sql.push_str(" PRIMARY KEY");
         }
@@ -123,10 +126,11 @@ pub(super) fn exec_describe(
             Some(DefaultValue::Null) => "NULL".to_string(),
             None => "NULL".to_string(),
         };
-        let extra_str = if col.auto_increment {
-            "auto_increment"
-        } else {
-            ""
+        let extra_str = match (col.auto_increment, col.collation.as_deref()) {
+            (true, Some(collation)) => format!("auto_increment,collation={}", collation),
+            (true, None) => "auto_increment".to_string(),
+            (false, Some(collation)) => format!("collation={}", collation),
+            (false, None) => "".to_string(),
         };
 
         rows.push(Row {
@@ -139,7 +143,7 @@ pub(super) fn exec_describe(
                 ("Null".to_string(), Value::Varchar(null_str.to_string())),
                 ("Key".to_string(), Value::Varchar(key_str.to_string())),
                 ("Default".to_string(), Value::Varchar(default_str)),
-                ("Extra".to_string(), Value::Varchar(extra_str.to_string())),
+                ("Extra".to_string(), Value::Varchar(extra_str)),
             ],
         });
     }

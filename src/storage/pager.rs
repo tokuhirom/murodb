@@ -54,6 +54,8 @@ pub struct Pager {
     freelist_page_id: u64,
     next_txid: u64,
     cache: LruCache<PageId, Page>,
+    cache_hits: u64,
+    cache_misses: u64,
     /// Diagnostics from freelist sanitization during open.
     freelist_sanitize_report: Option<SanitizeReport>,
     #[cfg(any(test, feature = "test-utils"))]
@@ -85,6 +87,8 @@ impl Pager {
             freelist_page_id: 0,
             next_txid: 1,
             cache,
+            cache_hits: 0,
+            cache_misses: 0,
             freelist_sanitize_report: None,
             #[cfg(any(test, feature = "test-utils"))]
             inject_write_page_failure: None,
@@ -121,6 +125,8 @@ impl Pager {
             freelist_page_id: 0,
             next_txid: 1,
             cache,
+            cache_hits: 0,
+            cache_misses: 0,
             freelist_sanitize_report: None,
             #[cfg(any(test, feature = "test-utils"))]
             inject_write_page_failure: None,
@@ -371,8 +377,10 @@ impl Pager {
     /// Read a page (from cache or disk).
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
         if let Some(page) = self.cache.get(&page_id) {
+            self.cache_hits = self.cache_hits.saturating_add(1);
             return Ok(page.clone());
         }
+        self.cache_misses = self.cache_misses.saturating_add(1);
 
         let page = self.read_page_from_disk(page_id)?;
         self.cache.put(page_id, page.clone());
@@ -449,6 +457,16 @@ impl Pager {
     /// Get current page count.
     pub fn page_count(&self) -> u64 {
         self.page_count
+    }
+
+    /// Cache hit count since pager open/create.
+    pub fn cache_hits(&self) -> u64 {
+        self.cache_hits
+    }
+
+    /// Cache miss count since pager open/create.
+    pub fn cache_misses(&self) -> u64 {
+        self.cache_misses
     }
 
     /// Get current epoch.
@@ -680,6 +698,32 @@ mod tests {
         let p1 = pager.read_page(0).unwrap();
         let p2 = pager.read_page(0).unwrap();
         assert_eq!(p1.cell(0), p2.cell(0));
+        assert_eq!(pager.cache_hits(), 2);
+        assert_eq!(pager.cache_misses(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_cache_miss_then_hit_stats() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        std::fs::remove_file(&path).ok();
+
+        {
+            let mut pager = Pager::create(&path, &test_key()).unwrap();
+            let mut page = pager.allocate_page().unwrap();
+            page.insert_cell(b"x").unwrap();
+            pager.write_page(&page).unwrap();
+            pager.flush_meta().unwrap();
+        }
+
+        let mut pager = Pager::open(&path, &test_key()).unwrap();
+        let _ = pager.read_page(0).unwrap(); // miss
+        let _ = pager.read_page(0).unwrap(); // hit
+        assert_eq!(pager.cache_hits(), 1);
+        assert_eq!(pager.cache_misses(), 1);
 
         std::fs::remove_file(&path).ok();
     }

@@ -446,6 +446,14 @@ impl Session {
 
     fn handle_show_database_stats(&self) -> Result<ExecResult> {
         let stats = &self.stats;
+        let cache_hits = self.pager.cache_hits();
+        let cache_misses = self.pager.cache_misses();
+        let cache_total = cache_hits.saturating_add(cache_misses);
+        let cache_hit_rate_pct = if cache_total == 0 {
+            0.0
+        } else {
+            (cache_hits as f64 * 100.0) / (cache_total as f64)
+        };
         fn stat_row(name: &str, value: String) -> Row {
             Row {
                 values: vec![
@@ -494,6 +502,12 @@ impl Session {
             stat_row(
                 "freelist_duplicates_total",
                 stats.freelist_duplicates_total.to_string(),
+            ),
+            stat_row("pager_cache_hits", cache_hits.to_string()),
+            stat_row("pager_cache_misses", cache_misses.to_string()),
+            stat_row(
+                "pager_cache_hit_rate_pct",
+                format!("{:.2}", cache_hit_rate_pct),
             ),
         ];
         Ok(ExecResult::Rows(rows))
@@ -868,7 +882,7 @@ mod tests {
 
         match session.execute("SHOW DATABASE STATS").unwrap() {
             ExecResult::Rows(rows) => {
-                assert_eq!(rows.len(), 10);
+                assert_eq!(rows.len(), 13);
                 // Verify checkpoint stats
                 assert_eq!(
                     rows[0].get("stat"),
@@ -887,6 +901,18 @@ mod tests {
                     Some(&Value::Varchar("freelist_sanitize_count".to_string()))
                 );
                 assert_eq!(rows[7].get("value"), Some(&Value::Varchar("0".to_string())));
+                assert_eq!(
+                    rows[10].get("stat"),
+                    Some(&Value::Varchar("pager_cache_hits".to_string()))
+                );
+                assert_eq!(
+                    rows[11].get("stat"),
+                    Some(&Value::Varchar("pager_cache_misses".to_string()))
+                );
+                assert_eq!(
+                    rows[12].get("stat"),
+                    Some(&Value::Varchar("pager_cache_hit_rate_pct".to_string()))
+                );
             }
             _ => panic!("Expected rows from SHOW DATABASE STATS"),
         }

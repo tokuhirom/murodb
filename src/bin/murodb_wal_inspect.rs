@@ -34,24 +34,36 @@ impl From<RecoveryModeArg> for RecoveryMode {
 }
 
 #[derive(Parser)]
-#[command(name = "murodb-wal-inspect", about = "Inspect MuroDB WAL consistency")]
+#[command(
+    name = "murodb-wal-inspect",
+    about = "Inspect MuroDB WAL consistency",
+    long_about = "Inspect a MuroDB WAL file (or quarantine WAL file) without opening the database for normal SQL operations.\n\nThis command validates transaction boundaries and replay eligibility under a selected recovery policy.\n\nExit codes:\n- 0: inspection succeeded and no malformed transaction was skipped.\n- 10: inspection succeeded but malformed transaction(s) were skipped.\n- 20: fatal error (cannot inspect).",
+    after_long_help = "Examples:\n  murodb-wal-inspect my.db --wal my.db.wal\n  murodb-wal-inspect my.db --wal quarantine.wal --recovery-mode permissive\n  murodb-wal-inspect my.db --wal my.db.wal --format json\n\nDocumentation:\n  https://tokuhirom.github.io/murodb/"
+)]
 struct Cli {
-    /// Path to the database file
+    /// Path to the database file whose encryption metadata is used.
     db_path: PathBuf,
 
-    /// WAL file path (or quarantine file)
+    /// WAL file path (or quarantine WAL file) to inspect.
     #[arg(long, value_name = "PATH")]
     wal: PathBuf,
 
-    /// Password (if omitted, will prompt)
+    /// Password used to derive the database encryption key.
+    ///
+    /// If omitted, the CLI prompts on TTY.
     #[arg(long)]
     password: Option<String>,
 
-    /// WAL recovery behavior used during inspection
+    /// Recovery policy used by the WAL inspector.
+    ///
+    /// `strict` aborts on malformed data.
+    /// `permissive` reports and skips malformed transactions when possible.
     #[arg(long, value_enum, default_value = "strict")]
     recovery_mode: RecoveryModeArg,
 
-    /// Output format for inspection/reporting
+    /// Output format for the inspection report.
+    ///
+    /// `text` prints readable diagnostics; `json` emits machine-parseable output.
     #[arg(long, value_enum, default_value = "text")]
     format: OutputFormatArg,
 }

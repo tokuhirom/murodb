@@ -129,16 +129,18 @@ pub fn plan_select(
                         None
                     }
                 }) {
-                    consider(
-                        &mut best_candidate,
-                        Plan::IndexSeek {
-                            table_name: table_name.to_string(),
-                            index_name: idx_name.clone(),
-                            column_names: col_names.clone(),
-                            key_exprs: vec![key_expr],
-                        },
-                        format!("0:{}", idx_name),
-                    );
+                    if is_row_independent_expr(&key_expr) {
+                        consider(
+                            &mut best_candidate,
+                            Plan::IndexSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                key_exprs: vec![key_expr],
+                            },
+                            format!("0:{}", idx_name),
+                        );
+                    }
                 }
                 if let Some(range) = ranges.get(&col_names[0]) {
                     consider(
@@ -171,16 +173,18 @@ pub fn plan_select(
                     }
                 }
                 if prefix_len == col_names.len() {
-                    consider(
-                        &mut best_candidate,
-                        Plan::IndexSeek {
-                            table_name: table_name.to_string(),
-                            index_name: idx_name.clone(),
-                            column_names: col_names.clone(),
-                            key_exprs,
-                        },
-                        format!("0:{}", idx_name),
-                    );
+                    if key_exprs.iter().all(is_row_independent_expr) {
+                        consider(
+                            &mut best_candidate,
+                            Plan::IndexSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                key_exprs,
+                            },
+                            format!("0:{}", idx_name),
+                        );
+                    }
                     continue;
                 }
 

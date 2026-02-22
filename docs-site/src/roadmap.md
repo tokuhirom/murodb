@@ -134,11 +134,12 @@ MySQL-compatible scalar functions.
     - Planner compares at least full-scan vs single-index vs join-order alternatives.
     - Basic column stats/histograms are persisted and refreshable.
     - Plan choice is deterministic under identical stats.
-- [ ] FTS stop-ngram filtering
+- [x] FTS stop-ngram filtering
   - Progress:
     - Added FULLTEXT options `stop_filter` and `stop_df_ratio_ppm` (ppm threshold).
     - NATURAL LANGUAGE MODE now supports skipping high-DF ngrams when enabled.
     - Default remains OFF for exact-behavior compatibility.
+    - Recall/precision tradeoff example documented in Full-Text Search guide.
   - Done when:
     - Frequent low-information ngrams are skipped using configurable thresholds.
     - Recall/precision tradeoff is documented with benchmark examples.

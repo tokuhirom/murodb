@@ -83,10 +83,12 @@ CREATE UNIQUE INDEX idx_ab ON t(a, b);
 ```sql
 CREATE FULLTEXT INDEX t_body_fts ON t(body)
   WITH PARSER ngram
-  OPTIONS (n=2, normalize='nfkc');
+  OPTIONS (n=2, normalize='nfkc', stop_filter=off, stop_df_ratio_ppm=200000);
 ```
 
 `FULLTEXT` is usable with any primary-key type. Internally, MuroDB maintains a separate FTS `doc_id`.
+`stop_filter` supports `on`/`off` (quoted or unquoted), `1`/`0`, and `true`/`false`.
+`stop_df_ratio_ppm` range is `0..=1000000`.
 
 ### DROP TABLE / DROP INDEX
 
@@ -164,6 +166,19 @@ It also exposes checkpoint policy/runtime fields:
 - `checkpoint_policy_interval_ms`
 
 ## DML (Data Manipulation Language)
+
+### ANALYZE TABLE
+
+Refreshes persisted planner statistics.
+
+```sql
+ANALYZE TABLE t;
+```
+
+Current persisted stats include:
+
+- table row count
+- index distinct-key count
 
 ### INSERT
 
@@ -720,8 +735,10 @@ Output columns:
 | id | Always 1 (single-table queries) |
 | select_type | Always "SIMPLE" |
 | table | Table name |
-| type | Access type: `const` (PK lookup), `ref` (index lookup), `ALL` (full scan), `fulltext` (FTS) |
+| type | Access type: `const` (PK lookup), `ref` (index lookup), `range` (index range seek), `ALL` (full scan), `fulltext` (FTS) |
 | key | Index used (NULL for full scan) |
+| rows | Estimated rows |
+| cost | Heuristic plan cost |
 | Extra | Additional info: "Using where", "Using index", "Using fulltext" |
 
 `select_type` values:

@@ -1,5 +1,9 @@
 # MuroDB
 
+<p align="center">
+  <img src="docs-site/src/assets/murodb-logo.svg" alt="MuroDB logo" width="760">
+</p>
+
 Embedded SQL database written in Rust.
 
 ## Why Try MuroDB

@@ -88,14 +88,15 @@ MySQL-compatible scalar functions.
     - Timezone handling policy is explicit (especially TIMESTAMP input/output normalization).
     - Invalid dates/times reject with deterministic errors.
 - [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
-- [ ] BLOB
-  - Why separate from VARBINARY:
-    - `VARBINARY(n)` remains row-oriented variable binary with optional inline size cap.
-    - `BLOB` is the large-object type with storage strategy optimized for large payloads.
-  - Done when:
-    - `BLOB` type is available in DDL/CAST/type display.
-    - DML/read path supports large payload round-trip with stable behavior.
-    - Operational limits are documented (max size, indexing restrictions, comparison semantics).
+- [ ] BLOB (skipped for now)
+  - Decision (2026-02-22): defer and move focus to Phase 7 performance work.
+  - Why skipped now:
+    - Current product priorities are query/index performance and planner improvements, not large-object type expansion.
+    - `BLOB` adds non-trivial storage/operational surface area (limits, indexing semantics, comparison behavior) with low near-term user impact.
+    - Existing `VARBINARY(n)`/`TEXT` coverage is sufficient for current workloads.
+  - Revisit when:
+    - There is a concrete workload requiring large binary payloads that cannot be handled acceptably by current types.
+    - The performance roadmap items in Phase 7 are complete or no longer the bottleneck.
 - [x] Overflow pages (posting list > 4096B)
   - Scope: support values/postings that exceed single-page capacity.
   - Progress:

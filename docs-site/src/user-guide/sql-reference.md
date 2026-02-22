@@ -122,6 +122,15 @@ ALTER TABLE t CHANGE COLUMN name username VARCHAR;
 - `DROP COLUMN`, `MODIFY COLUMN` (with type change), and `CHANGE COLUMN` (with type change) perform a full table rewrite.
 - `MODIFY COLUMN` / `CHANGE COLUMN` without a type change is catalog-only (O(1)).
 
+**Behavior details:**
+- `ADD COLUMN ... NOT NULL` without `DEFAULT` fails if the table already has rows.
+- `ADD COLUMN ... UNIQUE` creates an automatic unique index (`auto_unique_<table>_<column>`).
+- `ADD COLUMN ... UNIQUE` with a non-`NULL` default fails for multi-row existing tables, because all rows would backfill to the same value.
+- `MODIFY COLUMN` / `CHANGE COLUMN` that adds `NOT NULL` validates existing rows and fails if `NULL` values are present.
+- `MODIFY COLUMN` / `CHANGE COLUMN` with a type change rewrites all rows and coerces values; conversion failures abort the statement.
+- `CHANGE COLUMN` updates index metadata to the new column name when indexes reference the old name.
+- `MODIFY COLUMN` / `CHANGE COLUMN` reconcile single-column `UNIQUE`: adding `UNIQUE` may create an index; removing `UNIQUE` drops the corresponding auto unique index.
+
 **Limitations:**
 - Cannot add a PRIMARY KEY column via ALTER TABLE.
 - Cannot drop a PRIMARY KEY column.

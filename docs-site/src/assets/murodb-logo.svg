@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="280" viewBox="0 0 960 280" role="img" aria-labelledby="title desc">
+  <title id="title">MuroDB Logo</title>
+  <desc id="desc">Stylized M icon with MURODB wordmark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="50%" stop-color="#111a2e"/>
+      <stop offset="100%" stop-color="#1a2743"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="accent2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#22c55e"/>
+    </linearGradient>
+    <pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse">
+      <path d="M22 0H0V22" fill="none" stroke="#2d3b5f" stroke-width="1"/>
+    </pattern>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <rect x="6" y="6" width="948" height="268" rx="26" fill="url(#bg)"/>
+  <rect x="6" y="6" width="948" height="268" rx="26" fill="url(#grid)" opacity="0.22"/>
+
+  <g transform="translate(56,44)">
+    <rect x="0" y="0" width="188" height="188" rx="30" fill="#0b1324"/>
+    <rect x="0" y="0" width="188" height="188" rx="30" fill="url(#grid)" opacity="0.25"/>
+    <rect x="18" y="18" width="152" height="152" rx="24" fill="#0f1a31"/>
+
+    <path d="M38 146V42h26l30 43 30-43h26v104h-25V82l-31 44-31-44v64z" fill="url(#accent)"/>
+    <path d="M18 18h152v152H18z" fill="none" stroke="#334a75" stroke-width="2"/>
+    <circle cx="160" cy="30" r="8" fill="url(#accent2)"/>
+    <circle cx="30" cy="160" r="6" fill="url(#accent2)"/>
+  </g>
+
+  <g transform="translate(290,68)">
+    <text x="0" y="78" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="82" font-weight="800" letter-spacing="4" fill="#e6f1ff">MURODB</text>
+    <text x="2" y="126" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="500" letter-spacing="1.4" fill="#8fb6dd">Embedded SQL Engine in Rust</text>
+    <rect x="2" y="144" width="430" height="4" rx="2" fill="url(#accent)" opacity="0.95"/>
+  </g>
+
+  <ellipse cx="476" cy="256" rx="390" ry="10" fill="#2dd4bf" opacity="0.24" filter="url(#soft)"/>
+</svg>

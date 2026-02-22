@@ -1,5 +1,7 @@
 # MuroDB
 
+![MuroDB Logo](assets/murodb-logo.svg)
+
 MuroDB is an embedded SQL database written in Rust.
 
 This documentation is designed for people who already know SQL and want to start building quickly.

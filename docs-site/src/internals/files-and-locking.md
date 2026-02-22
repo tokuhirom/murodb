@@ -2,6 +2,21 @@
 
 This chapter defines the on-disk files and lock behavior.
 
+## At a Glance
+
+For database path `<db_path>`, MuroDB uses three files:
+
+`<db_path>` (main state) + `<db_path>.wal` (durability log) + `<db_path>.lock` (OS advisory lock target)
+
+High-level flow:
+
+1. Append commit-intent records to `.wal` and `wal.sync()`.
+2. Commit is durable at this point.
+3. Main DB file is checkpointed/flushed later.
+4. `.lock` coordinates readers/writers across processes during API calls.
+
+The sections below expand each file in this order.
+
 ## File Set
 
 If you open database path `<db_path>`, MuroDB uses:
@@ -33,6 +48,7 @@ The main file starts with a 76-byte plaintext header (`src/storage/pager/mod.rs`
 | 72 | 4 | CRC32 over bytes `0..72` |
 
 Immediately after the header, pages are stored sequentially.
+For page-level internals, see [Storage](storage.md).
 
 ## `.wal` File Role
 

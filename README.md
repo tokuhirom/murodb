@@ -1,5 +1,9 @@
 # MuroDB
 
+<p align="center">
+  <img src="docs-site/src/assets/murodb-logo.svg" alt="MuroDB logo" width="760">
+</p>
+
 Embedded SQL database written in Rust.
 
 ## Why Try MuroDB
@@ -53,6 +57,7 @@ murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRI
 
 The detailed manual and internals docs are in `docs-site/`.
 
+- Published docs: https://tokuhirom.github.io/murodb/
 - Book source: `docs-site/src/`
 - Build locally:
 

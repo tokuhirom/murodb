@@ -1094,4 +1094,34 @@ mod tests {
             panic!("Expected rows");
         }
     }
+
+    #[test]
+    fn test_where_simple_case_when_keeps_collation_aware_comparison() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "SELECT id FROM t WHERE CASE name WHEN 'alice' THEN 1 ELSE 0 END = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
 }

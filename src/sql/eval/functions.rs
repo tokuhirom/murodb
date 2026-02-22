@@ -778,13 +778,14 @@ pub(super) fn eval_case_when_with(
     match operand {
         Some(op_expr) => {
             // Simple CASE: CASE expr WHEN val THEN result ...
-            let op_val = eval_fn(op_expr, columns)?;
             for (when_expr, then_expr) in when_clauses {
-                let when_val = eval_fn(when_expr, columns)?;
-                if !op_val.is_null()
-                    && !when_val.is_null()
-                    && value_cmp(&op_val, &when_val) == Some(std::cmp::Ordering::Equal)
-                {
+                let cmp_expr = Expr::BinaryOp {
+                    left: op_expr.clone(),
+                    op: crate::sql::ast::BinaryOp::Eq,
+                    right: Box::new(when_expr.clone()),
+                };
+                let cond_val = eval_fn(&cmp_expr, columns)?;
+                if is_truthy(&cond_val) {
                     return eval_fn(then_expr, columns);
                 }
             }

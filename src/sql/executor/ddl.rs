@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 pub(super) fn exec_create_table(
     ct: &CreateTable,
@@ -437,25 +438,22 @@ pub(super) fn exec_analyze_table(
 
         let idx_btree = BTree::open(idx.btree_root);
         let mut distinct_keys: u64 = 0;
-        let mut prev_idx_part: Option<Vec<u8>> = None;
+        let mut seen_idx_parts: HashSet<Vec<u8>> = HashSet::new();
         idx_btree.scan(pager, |k, v| {
-            let idx_part: Vec<u8> = if idx.is_unique {
-                k.to_vec()
-            } else if k.len() >= v.len() {
+            if idx.is_unique {
+                distinct_keys += 1;
+                return Ok(true);
+            }
+
+            let idx_part = if k.len() >= v.len() {
                 k[..k.len() - v.len()].to_vec()
             } else {
                 return Err(MuroError::Corruption(
                     "invalid non-unique index entry: key shorter than value".into(),
                 ));
             };
-
-            let is_new = prev_idx_part
-                .as_ref()
-                .map(|prev| prev.as_slice() != idx_part.as_slice())
-                .unwrap_or(true);
-            if is_new {
+            if seen_idx_parts.insert(idx_part) {
                 distinct_keys += 1;
-                prev_idx_part = Some(idx_part);
             }
             Ok(true)
         })?;

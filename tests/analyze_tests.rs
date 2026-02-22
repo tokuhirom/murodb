@@ -64,3 +64,45 @@ fn test_analyze_table_persists_basic_stats() {
     let idx = catalog.get_index(&mut pager, "idx_a").unwrap().unwrap();
     assert_eq!(idx.stats_distinct_keys, 3);
 }
+
+#[test]
+fn test_analyze_table_distinct_keys_non_unique_varchar_not_order_dependent() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id VARCHAR PRIMARY KEY, s VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_s ON t(s)", &mut pager, &mut catalog).unwrap();
+
+    // For non-unique index key encoding (s || pk), the same logical s='a'
+    // can appear in separate scan runs when pk bytes sort around other terms.
+    execute(
+        "INSERT INTO t (id, s) VALUES ('!', 'a')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO t (id, s) VALUES ('m', 'ab')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "INSERT INTO t (id, s) VALUES ('~', 'a')",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+
+    let idx = catalog.get_index(&mut pager, "idx_s").unwrap().unwrap();
+    assert_eq!(
+        idx.stats_distinct_keys, 2,
+        "distinct key count should be based on logical index key, not contiguous runs"
+    );
+}

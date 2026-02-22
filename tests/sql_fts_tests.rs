@@ -346,3 +346,36 @@ fn test_sql_fulltext_backfill_skips_null_values() {
         1
     );
 }
+
+#[test]
+fn test_sql_fulltext_insert_keeps_index_reachable_after_root_splits() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE docs (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft_body ON docs(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    );
+
+    for id in 1..=128u64 {
+        let body = format!("t{:016x}", id);
+        let sql = format!("INSERT INTO docs VALUES ({}, '{}')", id, body);
+        exec(&mut pager, &mut catalog, &sql);
+    }
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id FROM docs WHERE MATCH(body) AGAINST('t0000000000000001' IN NATURAL LANGUAGE MODE) > 0 ORDER BY id",
+    );
+    assert!(!rows.is_empty(), "expected at least one FTS hit");
+    assert!(
+        rows.iter().any(|r| r.get("id") == Some(&Value::Integer(1))),
+        "expected inserted row to remain searchable after index growth"
+    );
+}

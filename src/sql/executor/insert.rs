@@ -12,7 +12,7 @@ pub(super) fn exec_insert(
     // Upgrade v0 tables before writing v1-format rows
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
-    let indexes = catalog.get_indexes_for_table(pager, &ins.table_name)?;
+    let mut indexes = catalog.get_indexes_for_table(pager, &ins.table_name)?;
 
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut rows_inserted = 0u64;
@@ -128,7 +128,7 @@ pub(super) fn exec_insert(
                 )?;
                 delete_from_secondary_indexes(
                     &table_def,
-                    &indexes,
+                    &mut indexes,
                     &existing_values,
                     &conflict_pk,
                     pager,
@@ -171,7 +171,7 @@ pub(super) fn exec_insert(
                 // Delete old secondary index entries using original values
                 delete_from_secondary_indexes(
                     &table_def,
-                    &indexes,
+                    &mut indexes,
                     &original_values,
                     &conflict_pk,
                     pager,
@@ -186,7 +186,7 @@ pub(super) fn exec_insert(
                 // Insert new secondary index entries with updated values
                 insert_into_secondary_indexes(
                     &table_def,
-                    &indexes,
+                    &mut indexes,
                     &updated_values,
                     &conflict_pk,
                     pager,
@@ -195,6 +195,7 @@ pub(super) fn exec_insert(
                 // Update table_def
                 table_def.data_btree_root = data_btree.root_page_id();
                 catalog.update_table(pager, &table_def)?;
+                persist_indexes(catalog, pager, &indexes)?;
 
                 // MySQL reports 2 affected rows for ON DUPLICATE KEY UPDATE
                 rows_inserted += 2;
@@ -213,7 +214,13 @@ pub(super) fn exec_insert(
         // For REPLACE: also delete rows conflicting on other unique indexes
         // (handles case where PK is new but unique index conflicts with a different row)
         if ins.is_replace {
-            replace_delete_unique_conflicts(&table_def, &indexes, &values, pager, &mut data_btree)?;
+            replace_delete_unique_conflicts(
+                &table_def,
+                &mut indexes,
+                &values,
+                pager,
+                &mut data_btree,
+            )?;
         } else {
             check_unique_index_constraints(&table_def, &indexes, &values, pager)?;
         }
@@ -223,11 +230,12 @@ pub(super) fn exec_insert(
         data_btree.insert(pager, &pk_key, &row_data)?;
 
         // Update secondary indexes
-        insert_into_secondary_indexes(&table_def, &indexes, &values, &pk_key, pager)?;
+        insert_into_secondary_indexes(&table_def, &mut indexes, &values, &pk_key, pager)?;
 
         // Update table_def if btree root changed or next_rowid changed
         table_def.data_btree_root = data_btree.root_page_id();
         catalog.update_table(pager, &table_def)?;
+        persist_indexes(catalog, pager, &indexes)?;
 
         rows_inserted += 1;
     }

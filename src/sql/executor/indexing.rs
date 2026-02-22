@@ -247,12 +247,13 @@ pub(super) fn check_unique_index_constraints_excluding(
 /// MySQL's REPLACE deletes ALL conflicting rows (PK + all unique indexes).
 pub(super) fn replace_delete_unique_conflicts(
     table_def: &TableDef,
-    indexes: &[IndexDef],
+    indexes: &mut [IndexDef],
     new_values: &[Value],
     pager: &mut impl PageStore,
     data_btree: &mut BTree,
 ) -> Result<()> {
-    for idx in indexes {
+    for idx_pos in 0..indexes.len() {
+        let idx = indexes[idx_pos].clone();
         if idx.is_unique {
             let col_indices: Vec<usize> = idx
                 .column_names
@@ -301,12 +302,12 @@ pub(super) fn replace_delete_unique_conflicts(
 /// duplicate indexed values each get their own B-tree entry.
 pub(super) fn insert_into_secondary_indexes(
     table_def: &TableDef,
-    indexes: &[IndexDef],
+    indexes: &mut [IndexDef],
     values: &[Value],
     pk_key: &[u8],
     pager: &mut impl PageStore,
 ) -> Result<()> {
-    for idx in indexes {
+    for idx in indexes.iter_mut() {
         if idx.index_type == IndexType::BTree {
             let col_indices: Vec<usize> = idx
                 .column_names
@@ -329,6 +330,7 @@ pub(super) fn insert_into_secondary_indexes(
                     full_key.extend_from_slice(pk_key);
                     idx_btree.insert(pager, &full_key, pk_key)?;
                 }
+                idx.btree_root = idx_btree.root_page_id();
             }
         } else if idx.index_type == IndexType::Fulltext {
             let Some(col_name) = idx.column_names.first() else {
@@ -340,7 +342,8 @@ pub(super) fn insert_into_secondary_indexes(
             let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
                 continue;
             };
-            let mut meta_btree = BTree::open(idx.btree_root);
+            let mut root_page_id = idx.btree_root;
+            let mut meta_btree = BTree::open(root_page_id);
             let doc_id = match fts_get_doc_id(&meta_btree, pager, pk_key)? {
                 Some(id) => id,
                 None => {
@@ -349,8 +352,10 @@ pub(super) fn insert_into_secondary_indexes(
                     id
                 }
             };
-            let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
+            root_page_id = meta_btree.root_page_id();
+            let mut fts = FtsIndex::open(root_page_id, SQL_FTS_TERM_KEY);
             fts.apply_pending(pager, &[FtsPendingOp::Add { doc_id, text }])?;
+            idx.btree_root = fts.root_page_id();
         }
     }
     Ok(())
@@ -360,12 +365,12 @@ pub(super) fn insert_into_secondary_indexes(
 /// For non-unique indexes, the B-tree key is `index_key + pk_key`.
 pub(super) fn delete_from_secondary_indexes(
     table_def: &TableDef,
-    indexes: &[IndexDef],
+    indexes: &mut [IndexDef],
     values: &[Value],
     pk_key: &[u8],
     pager: &mut impl PageStore,
 ) -> Result<()> {
-    for idx in indexes {
+    for idx in indexes.iter_mut() {
         if idx.index_type == IndexType::BTree {
             let col_indices: Vec<usize> = idx
                 .column_names
@@ -387,6 +392,7 @@ pub(super) fn delete_from_secondary_indexes(
                     full_key.extend_from_slice(pk_key);
                     idx_btree.delete(pager, &full_key)?;
                 }
+                idx.btree_root = idx_btree.root_page_id();
             }
         } else if idx.index_type == IndexType::Fulltext {
             let Some(col_name) = idx.column_names.first() else {
@@ -398,13 +404,29 @@ pub(super) fn delete_from_secondary_indexes(
             let Some(text) = values.get(col_idx).and_then(value_to_fts_text) else {
                 continue;
             };
-            let mut meta_btree = BTree::open(idx.btree_root);
+            let mut root_page_id = idx.btree_root;
+            let mut meta_btree = BTree::open(root_page_id);
             if let Some(doc_id) = fts_get_doc_id(&meta_btree, pager, pk_key)? {
-                let mut fts = FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY);
+                root_page_id = meta_btree.root_page_id();
+                let mut fts = FtsIndex::open(root_page_id, SQL_FTS_TERM_KEY);
                 fts.apply_pending(pager, &[FtsPendingOp::Remove { doc_id, text }])?;
+                root_page_id = fts.root_page_id();
+                meta_btree = BTree::open(root_page_id);
                 fts_delete_doc_mapping(&mut meta_btree, pager, pk_key, doc_id)?;
+                idx.btree_root = meta_btree.root_page_id();
             }
         }
+    }
+    Ok(())
+}
+
+pub(super) fn persist_indexes(
+    catalog: &mut SystemCatalog,
+    pager: &mut impl PageStore,
+    indexes: &[IndexDef],
+) -> Result<()> {
+    for idx in indexes {
+        catalog.update_index(pager, idx)?;
     }
     Ok(())
 }

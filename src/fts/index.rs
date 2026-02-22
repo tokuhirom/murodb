@@ -11,7 +11,7 @@
 use crate::btree::ops::BTree;
 use crate::crypto::hmac_util::hmac_term_id;
 use crate::error::Result;
-use crate::fts::postings::PostingList;
+use crate::fts::postings::{Posting, PostingList};
 use crate::fts::tokenizer::tokenize_bigram;
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
@@ -65,7 +65,8 @@ const SEG_META_V2_VERSION: u8 = 2;
 const SEG_GC_HEAD_KEY: &[u8] = b"__seggc_head__";
 const SEG_GC_TAIL_KEY: &[u8] = b"__seggc_tail__";
 const SEG_GC_TASK_PREFIX: &[u8] = b"__seggc__";
-const MAX_POSTINGS_PER_SEGMENT: usize = 16;
+// Keep payloads comfortably below page-cell limits even with key/cell overhead.
+const MAX_SEGMENT_PAYLOAD_BYTES: usize = 3000;
 
 #[derive(Clone, Copy)]
 enum SegmentKeyFormat {
@@ -325,14 +326,12 @@ impl FtsIndex {
             crate::error::MuroError::Execution("segment generation exceeds u32 range".into())
         })?;
 
-        let seg_count_usize = pl.postings.len().div_ceil(MAX_POSTINGS_PER_SEGMENT);
+        let segments = split_postings_into_segments(pl, MAX_SEGMENT_PAYLOAD_BYTES)?;
+        let seg_count_usize = segments.len();
         let seg_count = u32::try_from(seg_count_usize).map_err(|_| {
             crate::error::MuroError::Execution("segmented posting count exceeds u32 range".into())
         })?;
-        for (idx, chunk) in pl.postings.chunks(MAX_POSTINGS_PER_SEGMENT).enumerate() {
-            let seg_pl = PostingList {
-                postings: chunk.to_vec(),
-            };
+        for (idx, seg_pl) in segments.iter().enumerate() {
             let seg_idx = u32::try_from(idx).map_err(|_| {
                 crate::error::MuroError::Execution("segment index exceeds u32 range".into())
             })?;
@@ -448,6 +447,96 @@ impl FtsIndex {
         self.btree
             .insert(pager, &seg_generation_key(tid), &generation.to_le_bytes())
     }
+}
+
+fn posting_list_encoded_len(postings: &[Posting]) -> usize {
+    PostingList {
+        postings: postings.to_vec(),
+    }
+    .serialize()
+    .len()
+}
+
+fn split_posting_into_sized_entries(
+    posting: &Posting,
+    max_payload_bytes: usize,
+) -> Result<Vec<Posting>> {
+    let single_len = posting_list_encoded_len(std::slice::from_ref(posting));
+    if single_len <= max_payload_bytes {
+        return Ok(vec![posting.clone()]);
+    }
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < posting.positions.len() {
+        let mut low = 1usize;
+        let mut high = posting.positions.len() - start;
+        let mut best = 0usize;
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let candidate = Posting {
+                doc_id: posting.doc_id,
+                positions: posting.positions[start..start + mid].to_vec(),
+            };
+            if posting_list_encoded_len(std::slice::from_ref(&candidate)) <= max_payload_bytes {
+                best = mid;
+                low = mid + 1;
+            } else if mid == 1 {
+                break;
+            } else {
+                high = mid - 1;
+            }
+        }
+        if best == 0 {
+            return Err(crate::error::MuroError::Execution(
+                "posting entry cannot fit into segmented payload".into(),
+            ));
+        }
+        out.push(Posting {
+            doc_id: posting.doc_id,
+            positions: posting.positions[start..start + best].to_vec(),
+        });
+        start += best;
+    }
+    Ok(out)
+}
+
+fn split_postings_into_segments(
+    pl: &PostingList,
+    max_payload_bytes: usize,
+) -> Result<Vec<PostingList>> {
+    let mut expanded = Vec::new();
+    for posting in &pl.postings {
+        expanded.extend(split_posting_into_sized_entries(
+            posting,
+            max_payload_bytes,
+        )?);
+    }
+
+    let mut segments: Vec<PostingList> = Vec::new();
+    let mut current = PostingList::new();
+    for posting in expanded {
+        let mut trial = current.postings.clone();
+        trial.push(posting.clone());
+        if posting_list_encoded_len(&trial) <= max_payload_bytes {
+            current.postings.push(posting);
+            continue;
+        }
+
+        if current.postings.is_empty() {
+            return Err(crate::error::MuroError::Execution(
+                "posting entry cannot fit into empty segment".into(),
+            ));
+        }
+        segments.push(current);
+        current = PostingList {
+            postings: vec![posting],
+        };
+    }
+    if !current.postings.is_empty() {
+        segments.push(current);
+    }
+    Ok(segments)
 }
 
 fn seg_meta_key(tid: &[u8; 32]) -> Vec<u8> {
@@ -730,6 +819,34 @@ mod tests {
 
         let pl = idx.get_postings(&mut pager, "aa").unwrap();
         assert_eq!(pl.df(), 80);
+    }
+
+    #[test]
+    fn test_store_postings_splits_large_single_doc_positions_without_pageoverflow() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
+        let tid = idx.term_id("東京");
+
+        let mut pl = PostingList::new();
+        let positions: Vec<u32> = (0..5000u32).collect();
+        pl.add(1, positions.clone());
+        idx.store_postings_by_tid(&mut pager, &tid, &pl).unwrap();
+
+        let loaded = idx.load_postings_by_tid(&mut pager, &tid).unwrap();
+        assert_eq!(loaded.df(), 1);
+        assert_eq!(loaded.get(1).unwrap().positions, positions);
+
+        let meta = idx
+            .btree
+            .search(&mut pager, &seg_meta_key(&tid))
+            .unwrap()
+            .unwrap();
+        match decode_segment_meta(&meta).unwrap() {
+            SegmentMeta::V2 { seg_count, .. } => assert!(seg_count > 1),
+            SegmentMeta::V1 { .. } => panic!("expected v2 segment metadata"),
+        }
     }
 
     #[test]

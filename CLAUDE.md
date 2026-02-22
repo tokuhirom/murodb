@@ -100,7 +100,6 @@ subagent には「あなたはDB/SQLの専門家です」というペルソナ�
 
 ## Known Limitations
 
-- Posting list が 4096B ページを超えるとエラー (大量文書の共通bigramで発生しうる)
 - Subquery は非相関サブクエリのみ対応 (外部行参照は未対応)
 - ALTER TABLE ADD/DROP PRIMARY KEY 未対応
 - ALTER TABLE はトランザクション非対応 (DDL全般と同様)

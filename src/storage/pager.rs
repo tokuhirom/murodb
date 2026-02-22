@@ -229,20 +229,24 @@ impl Pager {
         let epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
         let freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
 
-        let next_txid = if version >= 3 {
-            let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-            let computed_crc = crc32(&header[0..68]);
-            if stored_crc != computed_crc {
-                return Err(MuroError::Wal("header corrupted".into()));
+        let next_txid = match version {
+            1 => 1, // v1 has no header CRC/next_txid field.
+            2 => {
+                let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
+                let computed_crc = crc32(&header[0..60]);
+                if stored_crc != computed_crc {
+                    return Err(MuroError::Wal("header corrupted".into()));
+                }
+                1
             }
-            u64::from_le_bytes(header[60..68].try_into().unwrap())
-        } else {
-            let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
-            let computed_crc = crc32(&header[0..60]);
-            if stored_crc != computed_crc {
-                return Err(MuroError::Wal("header corrupted".into()));
+            _ => {
+                let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
+                let computed_crc = crc32(&header[0..68]);
+                if stored_crc != computed_crc {
+                    return Err(MuroError::Wal("header corrupted".into()));
+                }
+                u64::from_le_bytes(header[60..68].try_into().unwrap())
             }
-            1
         };
 
         Ok(HeaderSnapshot {

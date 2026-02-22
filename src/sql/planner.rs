@@ -151,14 +151,16 @@ pub fn plan_select(
                 if prefix_len < col_names.len() && prefix_len + 1 == col_names.len() {
                     let range_col = &col_names[prefix_len];
                     if let Some(range) = ranges.get(range_col) {
-                        return Plan::IndexRangeSeek {
-                            table_name: table_name.to_string(),
-                            index_name: idx_name.clone(),
-                            column_names: col_names.clone(),
-                            prefix_key_exprs,
-                            lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
-                            upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
-                        };
+                        if prefix_key_exprs.iter().all(is_row_independent_expr) {
+                            return Plan::IndexRangeSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                prefix_key_exprs,
+                                lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                                upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                            };
+                        }
                     }
                 }
             }

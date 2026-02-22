@@ -174,17 +174,6 @@ MySQL-compatible scalar functions.
     - Online/offline rotation flow is available with resumable progress.
     - WAL + data file epoch mismatch handling is crash-safe.
     - Rotation metrics/events are visible via inspection commands.
-- [ ] Collation support (Japanese sort order, etc.)
-  - Decision (2026-02-22):
-    - Deferred for now; reverted the in-progress SQL `COLLATE` implementation due high complexity/maintenance cost relative to current user value.
-    - For now, use function-based handling in queries (for example `LOWER(col) = LOWER(?)`, `ORDER BY LOWER(col)`).
-  - Revisit when:
-    - There is clear demand for locale-aware ordering/comparison beyond function-based workarounds.
-    - We are ready to align planner/index key encoding with collation semantics end-to-end.
-  - Done when:
-    - Collation can be selected per column/index.
-    - ORDER BY / comparison / LIKE behavior is deterministic per collation.
-    - Index key encoding respects collation sort rules.
 
 ## Phase 9 — Practical Embedded DB (Next)
 
@@ -208,6 +197,11 @@ Real-world deployment features to make MuroDB easier to embed and operate.
     - Migration is resumable and crash-recoverable.
     - Rollback/retry procedure is documented and tested.
 - [ ] Backup API + consistent snapshot
+  - Decision (2026-02-22):
+    - Prioritize early in Phase 9 so embedded apps can take consistent backups without full writer quiesce windows.
+  - Why now:
+    - File-copy backup while writes are active is error-prone operationally.
+    - A first-class API can provide deterministic snapshot semantics and simpler restore contracts.
   - Done when:
     - Online consistent backup without long writer stalls.
     - Restore path validated by integration tests.

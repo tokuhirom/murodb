@@ -14,15 +14,22 @@ Workloads:
 - `insert_autocommit`: single-row insert per transaction (auto-commit)
 - `range_scan_limit_100`: range read (`WHERE id >= ? ORDER BY id LIMIT 100`)
 - `mixed_80r_15u_5i`: mixed OLTP-like workload (80% read / 15% update / 5% insert)
+- `fts_select_natural`: fulltext natural-language search (`MATCH(body) AGAINST(... IN NATURAL LANGUAGE MODE)`)
+- `fts_update_point`: point update on FTS-indexed `TEXT` column
+- `fts_mixed_70q_30u`: FTS-focused mixed workload (70% search / 30% update)
 
 Default dataset/config:
 
 - initial rows: `20,000`
+- fts initial rows: `256`
 - select ops: `20,000`
 - update ops: `5,000`
 - insert ops: `5,000`
 - scan ops: `2,000`
 - mixed ops: `10,000`
+- fts select ops: `5,000`
+- fts update ops: `2,000`
+- fts mixed ops: `5,000`
 - warmup ops: `200`
 - batch size (initial load): `500`
 
@@ -31,6 +38,9 @@ Run command:
 ```bash
 cargo run --release --bin murodb_bench
 ```
+
+> Migration note: as of 2026-02-22, benchmark scope includes additional FTS workloads.
+> Older entries without FTS metrics are not directly comparable on total runtime.
 
 ## Versioned Results
 

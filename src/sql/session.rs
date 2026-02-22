@@ -103,6 +103,7 @@ impl Session {
         }
 
         self.check_poisoned()?;
+        self.refresh_from_disk_if_needed()?;
 
         match &stmt {
             Statement::Begin => self.handle_begin(),
@@ -137,6 +138,7 @@ impl Session {
         }
 
         self.check_poisoned()?;
+        self.refresh_from_disk_if_needed()?;
 
         if !Self::is_read_only_statement(&stmt) {
             return Err(MuroError::Execution(
@@ -189,6 +191,17 @@ impl Session {
             | Statement::Commit
             | Statement::Rollback => false,
         }
+    }
+
+    fn refresh_from_disk_if_needed(&mut self) -> Result<()> {
+        if self.active_tx.is_some() {
+            return Ok(());
+        }
+        if self.pager.refresh_from_disk_if_changed()? {
+            self.catalog = SystemCatalog::open(self.pager.catalog_root());
+            self.next_txid = self.next_txid.max(self.pager.next_txid());
+        }
+        Ok(())
     }
 
     fn handle_begin(&mut self) -> Result<ExecResult> {

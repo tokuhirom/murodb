@@ -142,6 +142,11 @@ SHOW DATABASE STATS;
 
 Both commands return two columns: `stat` and `value`.
 
+`SHOW DATABASE STATS` includes cache observability fields:
+- `pager_cache_hits`
+- `pager_cache_misses`
+- `pager_cache_hit_rate_pct`
+
 ## DML (Data Manipulation Language)
 
 ### INSERT

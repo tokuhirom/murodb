@@ -95,3 +95,11 @@ This is how a process observes committed changes from other processes.
 - main DB file: stable state and efficient reads.
 - `.wal`: sequential append for crash-safe commit protocol.
 - `.lock`: avoids embedding lock bytes into data format and delegates arbitration to OS advisory locks.
+
+Why `.lock` is separated from the main DB file:
+
+- Keep data format clean: lock state is operational state, not database state.
+- Avoid extra data-file churn: lock acquire/release does not force DB header/page writes.
+- Better crash behavior: lock lifetime is tied to OS file-lock semantics; stale lock bytes do not need cleanup from the DB payload.
+- Portability and tooling: advisory locking APIs (`flock`/`fcntl`-style via `fs4`) naturally target a lock file descriptor.
+- Lower format coupling: lock strategy can evolve without changing on-disk table/page format.

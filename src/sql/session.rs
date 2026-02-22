@@ -1032,13 +1032,26 @@ mod tests {
         // SHOW DATABASE STATS must still work on poisoned session
         match session.execute("SHOW DATABASE STATS").unwrap() {
             ExecResult::Rows(rows) => {
-                assert_eq!(rows.len(), 10);
+                assert_eq!(rows.len(), 13);
                 // commit_in_doubt_count should be 1
                 assert_eq!(
                     rows[4].get("stat"),
                     Some(&Value::Varchar("commit_in_doubt_count".to_string()))
                 );
                 assert_eq!(rows[4].get("value"), Some(&Value::Varchar("1".to_string())));
+                // Pager cache stats should be present
+                assert_eq!(
+                    rows[10].get("stat"),
+                    Some(&Value::Varchar("pager_cache_hits".to_string()))
+                );
+                assert_eq!(
+                    rows[11].get("stat"),
+                    Some(&Value::Varchar("pager_cache_misses".to_string()))
+                );
+                assert_eq!(
+                    rows[12].get("stat"),
+                    Some(&Value::Varchar("pager_cache_hit_rate_pct".to_string()))
+                );
             }
             _ => panic!("Expected rows from SHOW DATABASE STATS"),
         }

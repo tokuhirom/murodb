@@ -2,7 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::crypto::aead::{MasterKey, PageCrypto};
+use crate::crypto::aead::MasterKey;
+use crate::crypto::suite::{EncryptionSuite, PageCipher};
 use crate::error::{MuroError, Result};
 use crate::wal::record::{crc32, Lsn, WalRecord};
 use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
@@ -16,7 +17,7 @@ use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 pub struct WalWriter {
     file: File,
     path: PathBuf,
-    crypto: PageCrypto,
+    crypto: PageCipher,
     current_lsn: Lsn,
     #[cfg(test)]
     inject_write_failure: Option<std::io::ErrorKind>,
@@ -28,6 +29,18 @@ pub struct WalWriter {
 
 impl WalWriter {
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
+        Self::create_with_suite(path, EncryptionSuite::Aes256GcmSiv, Some(master_key))
+    }
+
+    pub fn create_plaintext(path: &Path) -> Result<Self> {
+        Self::create_with_suite(path, EncryptionSuite::Plaintext, None)
+    }
+
+    pub fn create_with_suite(
+        path: &Path,
+        suite: EncryptionSuite,
+        master_key: Option<&MasterKey>,
+    ) -> Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -41,7 +54,7 @@ impl WalWriter {
         Ok(WalWriter {
             file,
             path: path.to_path_buf(),
-            crypto: PageCrypto::new(master_key),
+            crypto: PageCipher::new(suite, master_key)?,
             current_lsn: 0,
             #[cfg(test)]
             inject_write_failure: None,
@@ -53,6 +66,24 @@ impl WalWriter {
     }
 
     pub fn open(path: &Path, master_key: &MasterKey, start_lsn: Lsn) -> Result<Self> {
+        Self::open_with_suite(
+            path,
+            EncryptionSuite::Aes256GcmSiv,
+            Some(master_key),
+            start_lsn,
+        )
+    }
+
+    pub fn open_plaintext(path: &Path, start_lsn: Lsn) -> Result<Self> {
+        Self::open_with_suite(path, EncryptionSuite::Plaintext, None, start_lsn)
+    }
+
+    pub fn open_with_suite(
+        path: &Path,
+        suite: EncryptionSuite,
+        master_key: Option<&MasterKey>,
+        start_lsn: Lsn,
+    ) -> Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -79,7 +110,7 @@ impl WalWriter {
         Ok(WalWriter {
             file,
             path: path.to_path_buf(),
-            crypto: PageCrypto::new(master_key),
+            crypto: PageCipher::new(suite, master_key)?,
             current_lsn: start_lsn,
             #[cfg(test)]
             inject_write_failure: None,

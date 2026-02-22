@@ -1,5 +1,7 @@
 /// Tests for database format version migration policy.
-use murodb::crypto::aead::MasterKey;
+use murodb::crypto::aead::{MasterKey, PageCrypto};
+use murodb::crypto::suite::EncryptionSuite;
+use murodb::storage::page::Page;
 use murodb::storage::pager::Pager;
 use murodb::wal::record::crc32;
 use std::io::{Seek, SeekFrom, Write};
@@ -36,40 +38,33 @@ fn write_v1_header(
     file.sync_all().unwrap();
 }
 
-/// Helper: read the raw header from a file (v3 = 72 bytes).
+/// Helper: read the raw header bytes from a file.
 fn read_raw_header(path: &std::path::Path) -> Vec<u8> {
-    let mut file = std::fs::File::open(path).unwrap();
-    let mut header = vec![0u8; 72];
     use std::io::Read;
-    file.read_exact(&mut header).unwrap();
-    header
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    bytes
 }
 
 #[test]
-fn test_v1_header_auto_upgrades_to_v3() {
+fn test_v1_header_is_preserved() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
     // Write a v1 header with page_count=0 (no pages needed for key verification)
     write_v1_header(&db_path, [0u8; 16], 0, 0, 0);
 
-    // Open should succeed and auto-upgrade to v3
+    // Open should succeed without changing header format/size.
     {
         let _pager = Pager::open(&db_path, &test_key()).unwrap();
     }
 
-    // Verify the header was upgraded to v3
+    // Verify v1 header format is preserved.
     let header = read_raw_header(&db_path);
+    assert_eq!(header.len(), 64);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 3, "v1 header should be auto-upgraded to v3");
-
-    // Verify CRC is now present and valid (v3: CRC over 0..68 at offset 68..72)
-    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-    let computed_crc = murodb::wal::record::crc32(&header[0..68]);
-    assert_eq!(
-        stored_crc, computed_crc,
-        "upgraded header should have valid CRC"
-    );
+    assert_eq!(version, 1, "v1 header version should be preserved");
 
     // Reopen should succeed without issues
     {
@@ -83,7 +78,7 @@ fn test_future_version_rejected() {
     let db_path = dir.path().join("test.db");
 
     // Write a header with version=99
-    let mut header = [0u8; 72];
+    let mut header = [0u8; 76];
     header[0..8].copy_from_slice(b"MURODB01");
     header[8..12].copy_from_slice(&99u32.to_le_bytes());
 
@@ -112,11 +107,11 @@ fn test_future_version_rejected() {
 }
 
 #[test]
-fn test_v3_roundtrip() {
+fn test_v4_roundtrip() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    // Create a v3 database with some metadata
+    // Create a v4 database with some metadata
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
         pager.set_catalog_root(42);
@@ -130,15 +125,17 @@ fn test_v3_roundtrip() {
         assert_eq!(pager.page_count(), 0);
     }
 
-    // Verify header is v3
+    // Verify header is v4
     let header = read_raw_header(&db_path);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
-    // Verify CRC is valid (v3: CRC over 0..68 at offset 68..72)
-    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-    let computed_crc = murodb::wal::record::crc32(&header[0..68]);
+    // Verify CRC is valid (v4: CRC over 0..72 at offset 72..76)
+    let stored_crc = u32::from_le_bytes(header[72..76].try_into().unwrap());
+    let computed_crc = murodb::wal::record::crc32(&header[0..72]);
     assert_eq!(stored_crc, computed_crc);
+    let suite_id = u32::from_le_bytes(header[68..72].try_into().unwrap());
+    assert_eq!(suite_id, EncryptionSuite::Aes256GcmSiv.id());
 }
 
 /// Helper: write a raw v2 header (with freelist_page_id and CRC over 0..60).
@@ -186,7 +183,7 @@ fn write_raw(path: &std::path::Path, data: &[u8]) {
 // ── Crash-interruption tests for header format auto-migration ──
 
 #[test]
-fn test_v2_header_auto_upgrades_to_v3() {
+fn test_v2_header_is_preserved() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -197,11 +194,12 @@ fn test_v2_header_auto_upgrades_to_v3() {
     }
 
     let header = read_raw_header(&db_path);
+    assert_eq!(header.len(), 64);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 3, "v2 header should be auto-upgraded to v3");
+    assert_eq!(version, 2, "v2 header version should be preserved");
 
-    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-    let computed_crc = crc32(&header[0..68]);
+    let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
+    let computed_crc = crc32(&header[0..60]);
     assert_eq!(stored_crc, computed_crc);
 }
 
@@ -240,7 +238,7 @@ fn test_v2_header_crc_mismatch_rejected() {
 }
 
 #[test]
-fn test_v3_header_crc_mismatch_rejected() {
+fn test_v4_header_crc_mismatch_rejected() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -272,7 +270,7 @@ fn test_v3_header_crc_mismatch_rejected() {
     );
     assert!(
         err.contains("header corrupted"),
-        "v3 CRC mismatch should report corruption, got: {}",
+        "v4 CRC mismatch should report corruption, got: {}",
         err
     );
 }
@@ -442,7 +440,7 @@ fn test_v1_to_v3_upgrade_file_not_extended() {
     );
 }
 
-/// Successful v1→v3 upgrade followed by reopen proves deterministic behavior.
+/// Successful v1→v4 upgrade followed by reopen proves deterministic behavior.
 #[test]
 fn test_v1_upgrade_then_reopen_is_deterministic() {
     let dir = TempDir::new().unwrap();
@@ -450,13 +448,13 @@ fn test_v1_upgrade_then_reopen_is_deterministic() {
 
     write_v1_header(&db_path, [0u8; 16], 10, 0, 0);
 
-    // First open: auto-upgrades v1→v3
+    // First open: auto-upgrades v1→v4
     {
         let pager = Pager::open(&db_path, &test_key()).unwrap();
         assert_eq!(pager.catalog_root(), 10);
     }
 
-    // Second open: should work with v3 header
+    // Second open: should work with v4 header
     {
         let pager = Pager::open(&db_path, &test_key()).unwrap();
         assert_eq!(pager.catalog_root(), 10);
@@ -469,7 +467,7 @@ fn test_v1_upgrade_then_reopen_is_deterministic() {
     }
 }
 
-/// Successful v2→v3 upgrade preserves metadata fields.
+/// Successful v2 open preserves metadata fields.
 #[test]
 fn test_v2_upgrade_preserves_metadata() {
     let dir = TempDir::new().unwrap();
@@ -483,17 +481,18 @@ fn test_v2_upgrade_preserves_metadata() {
         assert_eq!(pager.freelist_page_id(), 0);
     }
 
-    // Verify upgraded to v3 and fields preserved in raw header
+    // Verify v2 header and fields are preserved in raw header
     let header = read_raw_header(&db_path);
+    assert_eq!(header.len(), 64);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 3);
+    assert_eq!(version, 2);
     let catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
     assert_eq!(catalog_root, 7);
     let fl_pid = u64::from_le_bytes(header[52..60].try_into().unwrap());
     assert_eq!(fl_pid, 0);
-    // CRC is valid
-    let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
-    let computed_crc = crc32(&header[0..68]);
+    // v2 CRC is valid
+    let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
+    let computed_crc = crc32(&header[0..60]);
     assert_eq!(stored_crc, computed_crc);
 }
 
@@ -530,4 +529,53 @@ fn test_v2_freelist_page_id_corruption_detected() {
         "corrupted v2 freelist_page_id should fail CRC, got: {}",
         err
     );
+}
+
+#[test]
+fn test_v3_non_empty_db_preserves_page_offsets_on_open_and_flush() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test_v3_non_empty.db");
+    let key = test_key();
+    let crypto = PageCrypto::new(&key);
+
+    // Build a valid v3 header (72 bytes).
+    let mut header = [0u8; 72];
+    header[0..8].copy_from_slice(b"MURODB01");
+    header[8..12].copy_from_slice(&3u32.to_le_bytes());
+    header[28..36].copy_from_slice(&0u64.to_le_bytes()); // catalog_root
+    header[36..44].copy_from_slice(&1u64.to_le_bytes()); // page_count
+    header[44..52].copy_from_slice(&0u64.to_le_bytes()); // epoch
+    header[52..60].copy_from_slice(&0u64.to_le_bytes()); // freelist_page_id
+    header[60..68].copy_from_slice(&1u64.to_le_bytes()); // next_txid
+    let header_crc = crc32(&header[0..68]);
+    header[68..72].copy_from_slice(&header_crc.to_le_bytes());
+
+    let page0 = Page::new(0);
+    let encrypted_page0 = crypto.encrypt(0, 0, page0.as_bytes()).unwrap();
+    assert_eq!(encrypted_page0.len(), 4124);
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&db_path)
+        .unwrap();
+    f.write_all(&header).unwrap();
+    f.write_all(&encrypted_page0).unwrap();
+    f.sync_all().unwrap();
+
+    // Open + flush must not rewrite to a larger header that shifts page offsets.
+    {
+        let mut pager = Pager::open(&db_path, &key).unwrap();
+        let p0 = pager.read_page(0).unwrap();
+        assert_eq!(p0.page_id(), 0);
+        pager.flush_meta().unwrap();
+    }
+
+    // Reopen and read page0 again; should still decrypt correctly.
+    {
+        let mut pager = Pager::open(&db_path, &key).unwrap();
+        let p0 = pager.read_page(0).unwrap();
+        assert_eq!(p0.page_id(), 0);
+    }
 }

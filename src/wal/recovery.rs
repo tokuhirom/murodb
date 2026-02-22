@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::crypto::aead::MasterKey;
+use crate::crypto::suite::EncryptionSuite;
 use crate::error::{MuroError, Result};
 use crate::storage::page::{Page, PageId, PAGE_SIZE};
 use crate::storage::pager::Pager;
@@ -87,7 +88,23 @@ pub fn recover_with_mode(
     master_key: &MasterKey,
     mode: RecoveryMode,
 ) -> Result<RecoveryResult> {
-    recover_with_mode_internal(Some(db_path), wal_path, master_key, mode, true)
+    recover_with_mode_and_suite(
+        db_path,
+        wal_path,
+        EncryptionSuite::Aes256GcmSiv,
+        Some(master_key),
+        mode,
+    )
+}
+
+pub fn recover_with_mode_and_suite(
+    db_path: &Path,
+    wal_path: &Path,
+    suite: EncryptionSuite,
+    master_key: Option<&MasterKey>,
+    mode: RecoveryMode,
+) -> Result<RecoveryResult> {
+    recover_with_mode_internal(Some(db_path), wal_path, suite, master_key, mode, true)
 }
 
 /// Inspect WAL consistency without applying pages to a DB file.
@@ -98,13 +115,28 @@ pub fn inspect_wal(
     master_key: &MasterKey,
     mode: RecoveryMode,
 ) -> Result<RecoveryResult> {
-    recover_with_mode_internal(None, wal_path, master_key, mode, false)
+    inspect_wal_with_suite(
+        wal_path,
+        EncryptionSuite::Aes256GcmSiv,
+        Some(master_key),
+        mode,
+    )
+}
+
+pub fn inspect_wal_with_suite(
+    wal_path: &Path,
+    suite: EncryptionSuite,
+    master_key: Option<&MasterKey>,
+    mode: RecoveryMode,
+) -> Result<RecoveryResult> {
+    recover_with_mode_internal(None, wal_path, suite, master_key, mode, false)
 }
 
 fn recover_with_mode_internal(
     db_path: Option<&Path>,
     wal_path: &Path,
-    master_key: &MasterKey,
+    suite: EncryptionSuite,
+    master_key: Option<&MasterKey>,
     mode: RecoveryMode,
     apply_to_db: bool,
 ) -> Result<RecoveryResult> {
@@ -118,7 +150,7 @@ fn recover_with_mode_internal(
         });
     }
 
-    let mut reader = WalReader::open(wal_path, master_key)?;
+    let mut reader = WalReader::open_with_suite(wal_path, suite, master_key)?;
     let records = reader.read_all()?;
 
     if records.is_empty() {
@@ -346,7 +378,11 @@ fn recover_with_mode_internal(
 
     // Phase 3: Validate/collect replayable page updates and optionally apply to DB.
     let mut pager = if apply_to_db {
-        Some(Pager::open(db_path.expect("db path required"), master_key)?)
+        Some(Pager::open_with_suite(
+            db_path.expect("db path required"),
+            Some(suite),
+            master_key,
+        )?)
     } else {
         None
     };

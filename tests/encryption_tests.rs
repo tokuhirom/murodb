@@ -1,5 +1,6 @@
 use murodb::crypto::aead::{MasterKey, PageCrypto};
 use murodb::crypto::kdf;
+use murodb::crypto::suite::EncryptionSuite;
 use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult};
 use murodb::storage::pager::Pager;
@@ -130,4 +131,68 @@ fn test_data_persists_across_reopen() {
             panic!("Expected rows");
         }
     }
+}
+
+#[test]
+fn test_plaintext_mode_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("plain.db");
+
+    {
+        let mut pager = Pager::create_plaintext(&db_path).unwrap();
+        let mut catalog = SystemCatalog::create(&mut pager).unwrap();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'plain')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        pager.flush_meta().unwrap();
+    }
+
+    {
+        let info = Pager::read_encryption_info_from_file(&db_path).unwrap();
+        assert_eq!(info.suite, EncryptionSuite::Plaintext);
+    }
+
+    {
+        let mut pager = Pager::open_plaintext(&db_path).unwrap();
+        let mut catalog = SystemCatalog::open(pager.catalog_root());
+        let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::Varchar("plain".into())));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+}
+
+#[test]
+fn test_encryption_suite_mismatch_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("mismatch.db");
+    let key = MasterKey::new([0x42; 32]);
+
+    {
+        let mut pager = Pager::create(&db_path, &key).unwrap();
+        pager.flush_meta().unwrap();
+    }
+
+    let result = Pager::open_plaintext(&db_path);
+    assert!(result.is_err());
+    let msg = format!(
+        "{}",
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        }
+    );
+    assert!(msg.contains("encryption suite mismatch"));
 }

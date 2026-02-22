@@ -1,7 +1,7 @@
-//! MuroDB: Encrypted Embedded SQL Database with B+Tree (no leaf links) + FTS (Bigram)
+//! MuroDB: Embedded SQL Database with B+Tree (no leaf links) + FTS (Bigram)
 //!
-//! A single-file encrypted database with:
-//! - AES-256-GCM-SIV transparent encryption
+//! A single-file database with:
+//! - Pluggable at-rest mode (AES-256-GCM-SIV or plaintext)
 //! - B-tree based storage with PRIMARY KEY and UNIQUE indexes
 //! - Full-text search with bigram tokenization
 //! - WAL-based crash recovery
@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::concurrency::LockManager;
 use crate::crypto::aead::MasterKey;
 use crate::crypto::kdf;
+use crate::crypto::suite::EncryptionSuite;
 use crate::error::Result;
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
@@ -38,9 +39,17 @@ pub struct Database {
     session: Session,
     lock_manager: LockManager,
     #[allow(dead_code)]
-    master_key: MasterKey,
+    master_key: Option<MasterKey>,
     #[allow(dead_code)]
     db_path: PathBuf,
+    #[allow(dead_code)]
+    encryption_suite: EncryptionSuite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseEncryption {
+    Encrypted,
+    Plaintext,
 }
 
 fn wal_path(db_path: &Path) -> PathBuf {
@@ -139,14 +148,47 @@ impl Database {
         Ok(Database {
             session,
             lock_manager,
-            master_key: master_key.clone(),
+            master_key: Some(master_key.clone()),
             db_path: path.to_path_buf(),
+            encryption_suite: EncryptionSuite::Aes256GcmSiv,
+        })
+    }
+
+    pub fn create_plaintext(path: &Path) -> Result<Self> {
+        let mut pager = Pager::create_plaintext(path)?;
+        let catalog = SystemCatalog::create(&mut pager)?;
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta()?;
+
+        sync_dir(path);
+
+        let wal = WalWriter::create_plaintext(&wal_path(path))?;
+        let lock_manager = LockManager::new(path)?;
+        let session = Session::new(pager, catalog, wal);
+
+        Ok(Database {
+            session,
+            lock_manager,
+            master_key: None,
+            db_path: path.to_path_buf(),
+            encryption_suite: EncryptionSuite::Plaintext,
         })
     }
 
     /// Open an existing database.
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
         Ok(Self::open_with_recovery_mode_and_report(path, master_key, RecoveryMode::Strict)?.0)
+    }
+
+    pub fn open_plaintext(path: &Path) -> Result<Self> {
+        Ok(Self::open_plaintext_with_recovery_mode_and_report(path, RecoveryMode::Strict)?.0)
+    }
+
+    pub fn open_plaintext_with_recovery_mode(
+        path: &Path,
+        recovery_mode: RecoveryMode,
+    ) -> Result<Self> {
+        Ok(Self::open_plaintext_with_recovery_mode_and_report(path, recovery_mode)?.0)
     }
 
     /// Open an existing database with configurable WAL recovery behavior.
@@ -169,8 +211,13 @@ impl Database {
 
         // Run WAL recovery before opening
         if wp.exists() {
-            let mut report =
-                crate::wal::recovery::recover_with_mode(path, &wp, master_key, recovery_mode)?;
+            let mut report = crate::wal::recovery::recover_with_mode_and_suite(
+                path,
+                &wp,
+                EncryptionSuite::Aes256GcmSiv,
+                Some(master_key),
+                recovery_mode,
+            )?;
             if recovery_mode == RecoveryMode::Permissive && !report.skipped.is_empty() {
                 let quarantine = quarantine_wal_durably(&wp)?;
                 report.wal_quarantine_path = Some(quarantine.display().to_string());
@@ -192,8 +239,52 @@ impl Database {
             Database {
                 session,
                 lock_manager,
-                master_key: master_key.clone(),
+                master_key: Some(master_key.clone()),
                 db_path: path.to_path_buf(),
+                encryption_suite: EncryptionSuite::Aes256GcmSiv,
+            },
+            recovery_report,
+        ))
+    }
+
+    pub fn open_plaintext_with_recovery_mode_and_report(
+        path: &Path,
+        recovery_mode: RecoveryMode,
+    ) -> Result<(Self, Option<RecoveryResult>)> {
+        let wp = wal_path(path);
+        let mut recovery_report = None;
+
+        if wp.exists() {
+            let mut report = crate::wal::recovery::recover_with_mode_and_suite(
+                path,
+                &wp,
+                EncryptionSuite::Plaintext,
+                None,
+                recovery_mode,
+            )?;
+            if recovery_mode == RecoveryMode::Permissive && !report.skipped.is_empty() {
+                let quarantine = quarantine_wal_durably(&wp)?;
+                report.wal_quarantine_path = Some(quarantine.display().to_string());
+            } else {
+                truncate_wal_durably(&wp)?;
+            }
+            recovery_report = Some(report);
+        }
+
+        let pager = Pager::open_plaintext(path)?;
+        let catalog_root = pager.catalog_root();
+        let catalog = SystemCatalog::open(catalog_root);
+        let wal = WalWriter::create_plaintext(&wp)?;
+        let lock_manager = LockManager::new(path)?;
+        let session = Session::new(pager, catalog, wal);
+
+        Ok((
+            Database {
+                session,
+                lock_manager,
+                master_key: None,
+                db_path: path.to_path_buf(),
+                encryption_suite: EncryptionSuite::Plaintext,
             },
             recovery_report,
         ))
@@ -218,14 +309,22 @@ impl Database {
         Ok(Database {
             session,
             lock_manager,
-            master_key,
+            master_key: Some(master_key),
             db_path: path.to_path_buf(),
+            encryption_suite: EncryptionSuite::Aes256GcmSiv,
         })
     }
 
     /// Open an existing database with a password.
     pub fn open_with_password(path: &Path, password: &str) -> Result<Self> {
-        let salt = Pager::read_salt_from_file(path)?;
+        let info = Pager::read_encryption_info_from_file(path)?;
+        if info.suite != EncryptionSuite::Aes256GcmSiv {
+            return Err(crate::error::MuroError::Encryption(format!(
+                "database uses {}; open with plaintext mode",
+                info.suite.as_str()
+            )));
+        }
+        let salt = info.salt;
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         Self::open(path, &master_key)
     }
@@ -245,7 +344,14 @@ impl Database {
         password: &str,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
-        let salt = Pager::read_salt_from_file(path)?;
+        let info = Pager::read_encryption_info_from_file(path)?;
+        if info.suite != EncryptionSuite::Aes256GcmSiv {
+            return Err(crate::error::MuroError::Encryption(format!(
+                "database uses {}; open with plaintext mode",
+                info.suite.as_str()
+            )));
+        }
+        let salt = info.salt;
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         Self::open_with_recovery_mode_and_report(path, &master_key, recovery_mode)
     }

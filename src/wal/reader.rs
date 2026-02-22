@@ -2,7 +2,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::crypto::aead::{MasterKey, PageCrypto};
+use crate::crypto::aead::MasterKey;
+use crate::crypto::suite::{EncryptionSuite, PageCipher};
 use crate::error::{MuroError, Result};
 use crate::wal::record::{crc32, Lsn, WalRecord};
 use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
@@ -10,13 +11,25 @@ use crate::wal::{MAX_WAL_FRAME_LEN, WAL_HEADER_SIZE, WAL_MAGIC, WAL_VERSION};
 /// WAL reader: iterate through WAL records for recovery/snapshot.
 pub struct WalReader {
     file: File,
-    crypto: PageCrypto,
+    crypto: PageCipher,
     current_lsn: Lsn,
     file_len: u64,
 }
 
 impl WalReader {
     pub fn open(path: &Path, master_key: &MasterKey) -> Result<Self> {
+        Self::open_with_suite(path, EncryptionSuite::Aes256GcmSiv, Some(master_key))
+    }
+
+    pub fn open_plaintext(path: &Path) -> Result<Self> {
+        Self::open_with_suite(path, EncryptionSuite::Plaintext, None)
+    }
+
+    pub fn open_with_suite(
+        path: &Path,
+        suite: EncryptionSuite,
+        master_key: Option<&MasterKey>,
+    ) -> Result<Self> {
         let mut file = File::open(path)?;
         let file_len = file.metadata()?.len();
 
@@ -43,7 +56,7 @@ impl WalReader {
 
         Ok(WalReader {
             file,
-            crypto: PageCrypto::new(master_key),
+            crypto: PageCipher::new(suite, master_key)?,
             current_lsn: 0,
             file_len,
         })

@@ -12,7 +12,8 @@ murodb <database-file> [options]
 |---|---|
 | `-e <SQL>` | Execute SQL and exit |
 | `--create` | Create a new database |
-| `--password <PW>` | Password (prompts if omitted) |
+| `--encryption <aes256-gcm-siv\|off>` | Encryption suite (`off` = plaintext, explicit opt-in) |
+| `--password <PW>` | Password for `aes256-gcm-siv` mode (prompts if omitted) |
 | `--recovery-mode <strict\|permissive>` | WAL recovery policy for open |
 | `--format <text\|json>` | Output format for query results |
 
@@ -21,6 +22,9 @@ murodb <database-file> [options]
 ```bash
 # Create a new database
 murodb mydb.db --create -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
+
+# Create plaintext DB (explicit)
+murodb mydb_plain.db --create --encryption off -e "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)"
 
 # Insert data
 murodb mydb.db -e "INSERT INTO t (id, name) VALUES (1, 'hello')"

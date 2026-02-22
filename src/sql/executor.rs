@@ -836,7 +836,7 @@ mod tests {
     fn test_create_table_rejects_collate_on_non_text_column() {
         let (mut pager, mut catalog, _dir) = setup();
         let err = execute(
-            "CREATE TABLE t (id BIGINT COLLATE utf8mb4_bin PRIMARY KEY)",
+            "CREATE TABLE t (id BIGINT COLLATE binary PRIMARY KEY)",
             &mut pager,
             &mut catalog,
         )
@@ -856,12 +856,53 @@ mod tests {
         .unwrap();
 
         let err = execute(
-            "ALTER TABLE t MODIFY COLUMN v INT COLLATE utf8mb4_bin",
+            "ALTER TABLE t MODIFY COLUMN v INT COLLATE binary",
             &mut pager,
             &mut catalog,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("COLLATE is only supported for VARCHAR/TEXT columns"));
+    }
+
+    #[test]
+    fn test_create_table_rejects_unsupported_collation_name() {
+        let (mut pager, mut catalog, _dir) = setup();
+        let err = execute(
+            "CREATE TABLE t (name VARCHAR COLLATE utf8mb4_bin)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Unsupported collation"));
+        assert!(err.contains("only binary is supported"));
+    }
+
+    #[test]
+    fn test_order_by_uses_binary_collation_path() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE binary)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (1, 'b')", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (2, 'a')", &mut pager, &mut catalog).unwrap();
+
+        let result = execute(
+            "SELECT id FROM t ORDER BY name ASC",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(2)));
+            assert_eq!(rows[1].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
     }
 }

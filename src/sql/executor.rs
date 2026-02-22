@@ -8,7 +8,7 @@ use crate::btree::key_encoding::{
 use crate::btree::ops::BTree;
 use crate::error::{MuroError, Result};
 use crate::fts::index::{FtsIndex, FtsPendingOp};
-use crate::fts::query::{query_boolean, query_natural, FtsResult};
+use crate::fts::query::{query_boolean, query_natural_with_config, FtsQueryConfig, FtsResult};
 use crate::fts::snippet::fts_snippet;
 use crate::schema::catalog::{SystemCatalog, TableDef};
 use crate::schema::column::{ColumnDef, DefaultValue};

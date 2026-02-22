@@ -143,6 +143,8 @@ pub(super) fn exec_create_table(
             is_unique: true,
             btree_root: idx_btree.root_page_id(),
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
         catalog.create_index(pager, idx_def)?;
     }
@@ -159,6 +161,8 @@ pub(super) fn exec_create_table(
                 is_unique: true,
                 btree_root: idx_btree.root_page_id(),
                 stats_distinct_keys: 0,
+                fts_stop_filter: false,
+                fts_stop_df_ratio_ppm: 0,
             };
             catalog.create_index(pager, idx_def)?;
         }
@@ -312,6 +316,8 @@ pub(super) fn exec_create_index(
         is_unique: ci.is_unique,
         btree_root: idx_btree_mut.root_page_id(),
         stats_distinct_keys: 0,
+        fts_stop_filter: false,
+        fts_stop_df_ratio_ppm: 0,
     };
     catalog.create_index(pager, idx_def)?;
 
@@ -397,6 +403,8 @@ pub(super) fn exec_create_fulltext_index(
         is_unique: false,
         btree_root: fts_root,
         stats_distinct_keys: 0,
+        fts_stop_filter: fi.stop_filter,
+        fts_stop_df_ratio_ppm: fi.stop_df_ratio_ppm,
     };
     catalog.create_index(pager, idx_def)?;
 

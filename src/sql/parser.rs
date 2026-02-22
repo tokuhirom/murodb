@@ -496,6 +496,8 @@ impl Parser {
         let mut parser = "ngram".to_string();
         let mut ngram_n = 2;
         let mut normalize = "nfkc".to_string();
+        let mut stop_filter = false;
+        let mut stop_df_ratio_ppm = 200_000u32;
 
         if self.peek() == Some(&Token::With) {
             self.advance();
@@ -521,6 +523,33 @@ impl Parser {
                             normalize = s;
                         }
                     }
+                    "stop_filter" => match self.advance() {
+                        Some(Token::Integer(n)) => stop_filter = n != 0,
+                        Some(Token::StringLit(s)) | Some(Token::Ident(s)) => {
+                            let v = s.to_ascii_lowercase();
+                            stop_filter = match v.as_str() {
+                                "on" | "true" | "1" => true,
+                                "off" | "false" | "0" => false,
+                                _ => return Err(format!("Invalid stop_filter value: {}", s)),
+                            };
+                        }
+                        Some(tok) => {
+                            return Err(format!("Invalid stop_filter token: {:?}", tok));
+                        }
+                        None => return Err("Expected stop_filter value".into()),
+                    },
+                    "stop_df_ratio_ppm" => match self.advance() {
+                        Some(Token::Integer(n)) if n >= 0 => {
+                            stop_df_ratio_ppm = n as u32;
+                        }
+                        Some(Token::Integer(_)) => {
+                            return Err("stop_df_ratio_ppm must be >= 0".into());
+                        }
+                        Some(tok) => {
+                            return Err(format!("Invalid stop_df_ratio_ppm token: {:?}", tok));
+                        }
+                        None => return Err("Expected stop_df_ratio_ppm value".into()),
+                    },
                     _ => return Err(format!("Unknown option: {}", key)),
                 }
                 if self.peek() == Some(&Token::Comma) {
@@ -539,6 +568,8 @@ impl Parser {
             parser,
             ngram_n,
             normalize,
+            stop_filter,
+            stop_df_ratio_ppm,
         })
     }
 
@@ -1898,12 +1929,27 @@ mod tests {
     #[test]
     fn test_parse_create_fulltext_index() {
         let stmt = parse_sql(
-            "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+            "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter='on', stop_df_ratio_ppm=150000)",
         ).unwrap();
         if let Statement::CreateFulltextIndex(fi) = stmt {
             assert_eq!(fi.index_name, "ft_body");
             assert_eq!(fi.column_name, "body");
             assert_eq!(fi.ngram_n, 2);
+            assert!(fi.stop_filter);
+            assert_eq!(fi.stop_df_ratio_ppm, 150_000);
+        } else {
+            panic!("Expected CreateFulltextIndex");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_index_defaults_stop_filter_options() {
+        let stmt =
+            parse_sql("CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2)")
+                .unwrap();
+        if let Statement::CreateFulltextIndex(fi) = stmt {
+            assert!(!fi.stop_filter);
+            assert_eq!(fi.stop_df_ratio_ppm, 200_000);
         } else {
             panic!("Expected CreateFulltextIndex");
         }

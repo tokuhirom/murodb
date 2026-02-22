@@ -18,11 +18,27 @@ pub struct FtsResult {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FtsQueryConfig {
+    pub stop_filter: bool,
+    pub stop_df_ratio_ppm: u32,
+}
+
 /// Execute a NATURAL LANGUAGE MODE query.
 pub fn query_natural(
     fts_index: &FtsIndex,
     pager: &mut impl PageStore,
     query: &str,
+) -> Result<Vec<FtsResult>> {
+    query_natural_with_config(fts_index, pager, query, FtsQueryConfig::default())
+}
+
+/// Execute a NATURAL LANGUAGE MODE query with additional planner/index options.
+pub fn query_natural_with_config(
+    fts_index: &FtsIndex,
+    pager: &mut impl PageStore,
+    query: &str,
+    config: FtsQueryConfig,
 ) -> Result<Vec<FtsResult>> {
     let query_tokens = tokenize_bigram(query);
     if query_tokens.is_empty() {
@@ -39,8 +55,14 @@ pub fn query_natural(
     for token in &query_tokens {
         if seen_terms.insert(token.text.clone()) {
             let pl = fts_index.get_postings(pager, &token.text)?;
+            if should_skip_stop_ngram(&stats, &pl, config) {
+                continue;
+            }
             term_postings.push((token.text.clone(), pl));
         }
+    }
+    if term_postings.is_empty() {
+        return Ok(Vec::new());
     }
 
     // Collect all matching doc_ids
@@ -92,6 +114,19 @@ pub fn query_natural(
     });
 
     Ok(results)
+}
+
+fn should_skip_stop_ngram(
+    stats: &crate::fts::index::FtsStats,
+    pl: &PostingList,
+    config: FtsQueryConfig,
+) -> bool {
+    if !config.stop_filter || stats.total_docs == 0 {
+        return false;
+    }
+    let threshold = config.stop_df_ratio_ppm.min(1_000_000);
+    let ratio_ppm = ((pl.df() as u128) * 1_000_000u128) / (stats.total_docs as u128);
+    ratio_ppm >= threshold as u128
 }
 
 /// Parsed boolean query element.

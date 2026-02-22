@@ -42,7 +42,15 @@ pub(super) fn execute_fts_scan_rows(
             ))
         })?;
     let results = match mode {
-        MatchMode::NaturalLanguage => query_natural(&fts, pager, query)?,
+        MatchMode::NaturalLanguage => query_natural_with_config(
+            &fts,
+            pager,
+            query,
+            FtsQueryConfig {
+                stop_filter: idx.fts_stop_filter,
+                stop_df_ratio_ppm: idx.fts_stop_df_ratio_ppm,
+            },
+        )?,
         MatchMode::Boolean => query_boolean(&fts, pager, query)?,
     };
 
@@ -134,9 +142,18 @@ pub(super) fn build_fts_eval_context(
 
     let mut score_maps: HashMap<MatchExprKey, HashMap<u64, i64>> = HashMap::new();
     for key in keys {
+        let idx = find_fulltext_index(indexes, table_name, &key.column)?;
         let fts = open_fulltext_index(indexes, table_name, &key.column)?;
         let results = match key.mode {
-            MatchMode::NaturalLanguage => query_natural(&fts, pager, &key.query)?,
+            MatchMode::NaturalLanguage => query_natural_with_config(
+                &fts,
+                pager,
+                &key.query,
+                FtsQueryConfig {
+                    stop_filter: idx.fts_stop_filter,
+                    stop_df_ratio_ppm: idx.fts_stop_df_ratio_ppm,
+                },
+            )?,
             MatchMode::Boolean => query_boolean(&fts, pager, &key.query)?,
         };
         let mut scores = HashMap::new();
@@ -470,6 +487,12 @@ pub(super) fn validate_fulltext_parser(fi: &CreateFulltextIndex) -> Result<()> {
         return Err(MuroError::Execution(format!(
             "Unsupported normalize='{}'; currently only 'nfkc' is available",
             fi.normalize
+        )));
+    }
+    if fi.stop_df_ratio_ppm > 1_000_000 {
+        return Err(MuroError::Execution(format!(
+            "stop_df_ratio_ppm={} is out of range (0..=1000000)",
+            fi.stop_df_ratio_ppm
         )));
     }
     Ok(())

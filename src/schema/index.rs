@@ -16,6 +16,10 @@ pub struct IndexDef {
     pub btree_root: PageId,
     /// Last analyzed distinct key count (0 means unknown / not analyzed).
     pub stats_distinct_keys: u64,
+    /// FULLTEXT-only: whether stop-ngram filtering is enabled in NATURAL mode.
+    pub fts_stop_filter: bool,
+    /// FULLTEXT-only: df/total_docs threshold in ppm (0..=1_000_000).
+    pub fts_stop_df_ratio_ppm: u32,
 }
 
 impl IndexDef {
@@ -60,6 +64,9 @@ impl IndexDef {
         }
         // stats_distinct_keys
         buf.extend_from_slice(&self.stats_distinct_keys.to_le_bytes());
+        // fts_stop_filter + fts_stop_df_ratio_ppm (optional extension)
+        buf.push(if self.fts_stop_filter { 1 } else { 0 });
+        buf.extend_from_slice(&self.fts_stop_df_ratio_ppm.to_le_bytes());
         buf
     }
 
@@ -160,6 +167,22 @@ impl IndexDef {
             0
         };
 
+        // FULLTEXT stop-ngram settings (optional extension)
+        let fts_stop_filter = if data.len() > offset {
+            let b = data[offset];
+            offset += 1;
+            b != 0
+        } else {
+            false
+        };
+        let fts_stop_df_ratio_ppm = if data.len() >= offset + 4 {
+            let n = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+            n
+        } else {
+            0
+        };
+
         Some((
             IndexDef {
                 name,
@@ -169,6 +192,8 @@ impl IndexDef {
                 is_unique,
                 btree_root,
                 stats_distinct_keys,
+                fts_stop_filter,
+                fts_stop_df_ratio_ppm,
             },
             offset,
         ))
@@ -189,6 +214,8 @@ mod tests {
             is_unique: true,
             btree_root: 42,
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
         let bytes = idx.serialize();
         let (idx2, _) = IndexDef::deserialize(&bytes).unwrap();
@@ -210,6 +237,8 @@ mod tests {
             is_unique: false,
             btree_root: 99,
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
         let bytes = idx.serialize();
         let (idx2, _) = IndexDef::deserialize(&bytes).unwrap();

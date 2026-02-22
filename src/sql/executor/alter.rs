@@ -128,6 +128,8 @@ pub(super) fn exec_alter_add_column(
             is_unique: true,
             btree_root: idx_btree_mut.root_page_id(),
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
         catalog.create_index(pager, idx_def)?;
     }
@@ -414,6 +416,8 @@ pub(super) fn reconcile_unique_index(
             is_unique: true,
             btree_root: idx_btree_mut.root_page_id(),
             stats_distinct_keys: 0,
+            fts_stop_filter: false,
+            fts_stop_df_ratio_ppm: 0,
         };
         catalog.create_index(pager, idx_def)?;
     } else if !col_spec.is_unique {

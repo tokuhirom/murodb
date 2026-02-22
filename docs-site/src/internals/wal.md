@@ -8,7 +8,7 @@ MuroDB uses a Write-Ahead Log (WAL) for crash recovery. All writes go through th
 |---|---|
 | BEGIN | Start of a transaction |
 | PAGE_PUT | Write a page (page_id + page data) |
-| META_UPDATE | Metadata update (catalog_root, freelist_page_id, page_count) |
+| META_UPDATE | Metadata update (catalog_root, freelist_page_id, page_count, epoch) |
 | COMMIT | Transaction commit marker |
 | ABORT | Transaction abort marker |
 
@@ -58,7 +58,7 @@ COMMIT
   → tx.commit(&mut pager, &mut wal)   ← WAL-first commit
     1. Write Begin record to WAL
     2. Write PagePut record for each dirty page
-    3. Write MetaUpdate (catalog_root, freelist_page_id, page_count)
+    3. Write MetaUpdate (catalog_root, freelist_page_id, page_count, epoch)
     4. Write Commit record
     5. wal.sync()                      ← fsync WAL
     6. Write dirty pages to data file

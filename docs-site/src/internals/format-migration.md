@@ -65,3 +65,4 @@ In format version 2, the freelist may span multiple pages linked as a chain:
 |---|---|
 | v1 | Initial: Begin, PagePut, MetaUpdate(catalog_root, page_count), Commit, Abort |
 | v2 | MetaUpdate adds `freelist_page_id` field. Data file header adds CRC32. Legacy v1 MetaUpdate (25 bytes) decoded with `freelist_page_id=0` (backward compatible) |
+| v3 | MetaUpdate adds `epoch` field. Legacy v1/v2 MetaUpdate records decode with `epoch=0` (backward compatible) |

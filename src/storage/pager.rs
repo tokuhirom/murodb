@@ -474,6 +474,11 @@ impl Pager {
         self.epoch
     }
 
+    /// Set current epoch (used by WAL recovery / key rotation paths).
+    pub fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
     /// Get catalog root page ID.
     pub fn catalog_root(&self) -> u64 {
         self.catalog_root

@@ -23,6 +23,8 @@ pub struct TableDef {
     /// Row format version: 0 = legacy (no prefix), 1 = u16 column count prefix.
     /// Defaults to 0 for tables created before this field was added (backward compat).
     pub row_format_version: u8,
+    /// Last analyzed approximate row count (0 means unknown / not analyzed).
+    pub stats_row_count: u64,
 }
 
 impl TableDef {
@@ -66,6 +68,8 @@ impl TableDef {
         buf.extend_from_slice(&self.next_rowid.to_le_bytes());
         // row_format_version
         buf.push(self.row_format_version);
+        // stats_row_count
+        buf.extend_from_slice(&self.stats_row_count.to_le_bytes());
         buf
     }
 
@@ -164,6 +168,16 @@ impl TableDef {
 
         // row_format_version (optional, defaults to 0 for old tables)
         let row_format_version = if data.len() > offset { data[offset] } else { 0 };
+        if data.len() > offset {
+            offset += 1;
+        }
+
+        // stats_row_count (optional, defaults to 0 for old tables)
+        let stats_row_count = if data.len() >= offset + 8 {
+            u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+        } else {
+            0
+        };
 
         Some(TableDef {
             name,
@@ -172,6 +186,7 @@ impl TableDef {
             data_btree_root,
             next_rowid,
             row_format_version,
+            stats_row_count,
         })
     }
 
@@ -276,6 +291,7 @@ impl SystemCatalog {
             data_btree_root,
             next_rowid: 0,
             row_format_version: 1,
+            stats_row_count: 0,
         };
 
         // Store in catalog
@@ -489,6 +505,7 @@ mod tests {
             data_btree_root: 42,
             next_rowid: 0,
             row_format_version: 1,
+            stats_row_count: 0,
         };
 
         let bytes = table.serialize();
@@ -552,6 +569,7 @@ mod tests {
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: 99,
+            stats_distinct_keys: 0,
         };
 
         catalog.create_index(&mut pager, idx).unwrap();

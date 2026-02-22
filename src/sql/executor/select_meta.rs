@@ -48,6 +48,7 @@ pub(super) fn exec_explain(
         where_clause,
     );
     let estimated_rows = estimate_plan_rows(&plan, &table_def, &indexes, pager)?;
+    let estimated_cost = plan_cost_hint(&plan) as i64;
 
     let (access_type, key_name, extra) = match &plan {
         Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
@@ -104,6 +105,7 @@ pub(super) fn exec_explain(
                 },
             ),
             ("rows".to_string(), Value::Integer(estimated_rows as i64)),
+            ("cost".to_string(), Value::Integer(estimated_cost)),
             (
                 "Extra".to_string(),
                 if extra.is_empty() {
@@ -197,6 +199,9 @@ fn estimate_plan_rows(
 }
 
 fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Result<u64> {
+    if table_def.stats_row_count > 0 {
+        return Ok(table_def.stats_row_count);
+    }
     let data_btree = BTree::open(table_def.data_btree_root);
     let mut cnt: u64 = 0;
     data_btree.scan(pager, |_k, _v| {

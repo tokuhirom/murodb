@@ -885,6 +885,40 @@ fn test_composite_range_seek_does_not_plan_row_dependent_prefix() {
 }
 
 #[test]
+fn test_index_seek_skips_row_dependent_equality_candidate() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c INT)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+    exec("CREATE INDEX idx_b ON t (b)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 10, 1, 10)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (2, 20, 1, 30)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // a = c is row-dependent, while b = 1 is constant.
+    // Planner must not choose idx_a seek with key "c".
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a = c AND b = 1 ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].1, Value::Integer(1));
+}
+
+#[test]
 fn test_non_unique_index_delete_preserves_others() {
     let (mut pager, mut catalog, _dir) = setup();
 

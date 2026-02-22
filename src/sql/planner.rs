@@ -6,6 +6,7 @@
 ///   FullScan          - Full table scan
 ///   FtsScan(col, query, mode) - FTS search
 use crate::sql::ast::*;
+use crate::sql::eval::eval_expr;
 
 #[derive(Debug)]
 pub enum Plan {
@@ -38,6 +39,19 @@ pub enum Plan {
     },
 }
 
+/// Stable heuristic cost used by the planner for deterministic plan selection.
+pub fn plan_cost_hint(plan: &Plan) -> u64 {
+    match plan {
+        Plan::PkSeek { .. } => 100,
+        Plan::IndexSeek { key_exprs, .. } => 3000u64.saturating_sub((key_exprs.len() as u64) * 900),
+        Plan::IndexRangeSeek {
+            prefix_key_exprs, ..
+        } => 3200u64.saturating_sub(((prefix_key_exprs.len() as u64) + 1) * 800),
+        Plan::FtsScan { .. } => 2000,
+        Plan::FullScan { .. } => 10_000,
+    }
+}
+
 /// Analyze a WHERE clause and determine the access plan.
 pub fn plan_select(
     table_name: &str,
@@ -45,6 +59,16 @@ pub fn plan_select(
     index_columns: &[(String, Vec<String>)], // (index_name, column_names)
     where_clause: &Option<Expr>,
 ) -> Plan {
+    let mut best_candidate: Option<(u64, String, Plan)> = None;
+    let consider = |best: &mut Option<(u64, String, Plan)>, plan: Plan, tie_key: String| {
+        let cost = plan_cost_hint(&plan);
+        match best {
+            Some((best_cost, best_tie, _)) if *best_cost < cost => {}
+            Some((best_cost, best_tie, _)) if *best_cost == cost && *best_tie <= tie_key => {}
+            _ => *best = Some((cost, tie_key, plan)),
+        }
+    };
+
     if let Some(expr) = where_clause {
         // Check for FTS MATCH...AGAINST
         if let Some((column, query, mode)) = extract_fts_match(expr) {
@@ -106,22 +130,32 @@ pub fn plan_select(
                         None
                     }
                 }) {
-                    return Plan::IndexSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        key_exprs: vec![key_expr],
-                    };
+                    if is_row_independent_expr(&key_expr) {
+                        consider(
+                            &mut best_candidate,
+                            Plan::IndexSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                key_exprs: vec![key_expr],
+                            },
+                            format!("0:{}", idx_name),
+                        );
+                    }
                 }
                 if let Some(range) = ranges.get(&col_names[0]) {
-                    return Plan::IndexRangeSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        prefix_key_exprs: Vec::new(),
-                        lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
-                        upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
-                    };
+                    consider(
+                        &mut best_candidate,
+                        Plan::IndexRangeSeek {
+                            table_name: table_name.to_string(),
+                            index_name: idx_name.clone(),
+                            column_names: col_names.clone(),
+                            prefix_key_exprs: Vec::new(),
+                            lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                            upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                        },
+                        format!("1:{}", idx_name),
+                    );
                 }
             } else {
                 // Composite index:
@@ -140,31 +174,46 @@ pub fn plan_select(
                     }
                 }
                 if prefix_len == col_names.len() {
-                    return Plan::IndexSeek {
-                        table_name: table_name.to_string(),
-                        index_name: idx_name.clone(),
-                        column_names: col_names.clone(),
-                        key_exprs,
-                    };
+                    if key_exprs.iter().all(is_row_independent_expr) {
+                        consider(
+                            &mut best_candidate,
+                            Plan::IndexSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                key_exprs,
+                            },
+                            format!("0:{}", idx_name),
+                        );
+                    }
+                    continue;
                 }
 
                 if prefix_len < col_names.len() && prefix_len + 1 == col_names.len() {
                     let range_col = &col_names[prefix_len];
                     if let Some(range) = ranges.get(range_col) {
                         if prefix_key_exprs.iter().all(is_row_independent_expr) {
-                            return Plan::IndexRangeSeek {
-                                table_name: table_name.to_string(),
-                                index_name: idx_name.clone(),
-                                column_names: col_names.clone(),
-                                prefix_key_exprs,
-                                lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
-                                upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
-                            };
+                            consider(
+                                &mut best_candidate,
+                                Plan::IndexRangeSeek {
+                                    table_name: table_name.to_string(),
+                                    index_name: idx_name.clone(),
+                                    column_names: col_names.clone(),
+                                    prefix_key_exprs,
+                                    lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                                    upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                                },
+                                format!("1:{}", idx_name),
+                            );
                         }
                     }
                 }
             }
         }
+    }
+
+    if let Some((_, _, plan)) = best_candidate {
+        return plan;
     }
 
     Plan::FullScan {
@@ -268,10 +317,10 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
                     }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
-                        BinaryOp::Gt => entry.lower = Some((*right.clone(), false)),
-                        BinaryOp::Ge => entry.lower = Some((*right.clone(), true)),
-                        BinaryOp::Lt => entry.upper = Some((*right.clone(), false)),
-                        BinaryOp::Le => entry.upper = Some((*right.clone(), true)),
+                        BinaryOp::Gt => merge_lower(entry, *right.clone(), false),
+                        BinaryOp::Ge => merge_lower(entry, *right.clone(), true),
+                        BinaryOp::Lt => merge_upper(entry, *right.clone(), false),
+                        BinaryOp::Le => merge_upper(entry, *right.clone(), true),
                         _ => {}
                     }
                 } else if let Expr::ColumnRef(col) = right.as_ref() {
@@ -280,10 +329,10 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
                     }
                     let entry = result.entry(col.clone()).or_default();
                     match op {
-                        BinaryOp::Gt => entry.upper = Some((*left.clone(), false)),
-                        BinaryOp::Ge => entry.upper = Some((*left.clone(), true)),
-                        BinaryOp::Lt => entry.lower = Some((*left.clone(), false)),
-                        BinaryOp::Le => entry.lower = Some((*left.clone(), true)),
+                        BinaryOp::Gt => merge_upper(entry, *left.clone(), false),
+                        BinaryOp::Ge => merge_upper(entry, *left.clone(), true),
+                        BinaryOp::Lt => merge_lower(entry, *left.clone(), false),
+                        BinaryOp::Le => merge_lower(entry, *left.clone(), true),
                         _ => {}
                     }
                 }
@@ -299,12 +348,76 @@ fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, Co
             if let Expr::ColumnRef(col) = expr.as_ref() {
                 if is_row_independent_expr(low) && is_row_independent_expr(high) {
                     let entry = result.entry(col.clone()).or_default();
-                    entry.lower = Some((*low.clone(), true));
-                    entry.upper = Some((*high.clone(), true));
+                    merge_lower(entry, *low.clone(), true);
+                    merge_upper(entry, *high.clone(), true);
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn merge_lower(entry: &mut ColumnRange, expr: Expr, inclusive: bool) {
+    match &entry.lower {
+        None => entry.lower = Some((expr, inclusive)),
+        Some((cur_expr, cur_inclusive)) => match compare_const_expr(cur_expr, &expr) {
+            Some(std::cmp::Ordering::Less) => entry.lower = Some((expr, inclusive)),
+            Some(std::cmp::Ordering::Equal) => {
+                entry.lower = Some((cur_expr.clone(), *cur_inclusive && inclusive))
+            }
+            Some(std::cmp::Ordering::Greater) | None => {}
+        },
+    }
+}
+
+fn merge_upper(entry: &mut ColumnRange, expr: Expr, inclusive: bool) {
+    match &entry.upper {
+        None => entry.upper = Some((expr, inclusive)),
+        Some((cur_expr, cur_inclusive)) => match compare_const_expr(cur_expr, &expr) {
+            Some(std::cmp::Ordering::Greater) => entry.upper = Some((expr, inclusive)),
+            Some(std::cmp::Ordering::Equal) => {
+                entry.upper = Some((cur_expr.clone(), *cur_inclusive && inclusive))
+            }
+            Some(std::cmp::Ordering::Less) | None => {}
+        },
+    }
+}
+
+fn compare_const_expr(left: &Expr, right: &Expr) -> Option<std::cmp::Ordering> {
+    let lt = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Lt,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&lt)? {
+        return Some(std::cmp::Ordering::Less);
+    }
+
+    let gt = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Gt,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&gt)? {
+        return Some(std::cmp::Ordering::Greater);
+    }
+
+    let eq = Expr::BinaryOp {
+        left: Box::new(left.clone()),
+        op: BinaryOp::Eq,
+        right: Box::new(right.clone()),
+    };
+    if eval_to_true(&eq)? {
+        return Some(std::cmp::Ordering::Equal);
+    }
+
+    None
+}
+
+fn eval_to_true(expr: &Expr) -> Option<bool> {
+    match eval_expr(expr, &|_| None).ok()? {
+        crate::types::Value::Integer(n) => Some(n != 0),
+        _ => None,
     }
 }
 
@@ -354,7 +467,7 @@ fn is_row_independent_expr(expr: &Expr) -> bool {
             .unwrap_or(true),
         Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
         Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
-        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => false,
         Expr::IntLiteral(_)
         | Expr::FloatLiteral(_)
         | Expr::StringLiteral(_)

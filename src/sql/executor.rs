@@ -16,7 +16,7 @@ use crate::schema::index::{IndexDef, IndexType};
 use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
-use crate::sql::planner::{plan_select, Plan};
+use crate::sql::planner::{plan_cost_hint, plan_select, Plan};
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
 use crate::types::{
@@ -103,6 +103,7 @@ pub fn execute_statement(
         Statement::CreateTable(ct) => exec_create_table(ct, pager, catalog),
         Statement::CreateIndex(ci) => exec_create_index(ci, pager, catalog),
         Statement::CreateFulltextIndex(fi) => exec_create_fulltext_index(fi, pager, catalog),
+        Statement::AnalyzeTable(table_name) => exec_analyze_table(table_name, pager, catalog),
         Statement::DropTable(dt) => exec_drop_table(dt, pager, catalog),
         Statement::DropIndex(di) => exec_drop_index(di, pager, catalog),
         Statement::AlterTable(at) => exec_alter_table(at, pager, catalog),

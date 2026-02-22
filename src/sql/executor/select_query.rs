@@ -65,6 +65,7 @@ pub(super) fn exec_select_without_table_inner(sel: &Select) -> Result<ExecResult
             data_btree_root: PageId::default(),
             next_rowid: 0,
             row_format_version: 0,
+            stats_row_count: 0,
         };
         let raw_rows = if where_passed {
             vec![vec![]]
@@ -808,7 +809,7 @@ pub(super) fn is_row_independent_expr(expr: &Expr) -> bool {
             .unwrap_or(true),
         Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
         Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
-        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => false,
         Expr::IntLiteral(_)
         | Expr::FloatLiteral(_)
         | Expr::StringLiteral(_)

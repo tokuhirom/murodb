@@ -124,6 +124,12 @@ MySQL-compatible scalar functions.
     - EXPLAIN shows index-range choice and estimated cardinality.
     - Fallback path remains correct for unsupported predicate shapes.
 - [ ] Query optimizer improvements (cost-based)
+  - Progress:
+    - Added deterministic heuristic cost hints for `PkSeek` / `IndexSeek` / `IndexRangeSeek` / `FullScan`.
+    - Planner now compares index candidates by cost instead of choosing the first matching index.
+    - EXPLAIN now reports a `cost` column for the chosen plan.
+    - Added persisted stats via `ANALYZE TABLE` (`table_rows`, `index_distinct_keys`) in catalog metadata.
+    - EXPLAIN row estimation now prefers persisted `table_rows` when available.
   - Done when:
     - Planner compares at least full-scan vs single-index vs join-order alternatives.
     - Basic column stats/histograms are persisted and refreshable.

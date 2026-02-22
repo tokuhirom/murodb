@@ -142,6 +142,7 @@ pub(super) fn exec_create_table(
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: idx_btree.root_page_id(),
+            stats_distinct_keys: 0,
         };
         catalog.create_index(pager, idx_def)?;
     }
@@ -157,6 +158,7 @@ pub(super) fn exec_create_table(
                 index_type: IndexType::BTree,
                 is_unique: true,
                 btree_root: idx_btree.root_page_id(),
+                stats_distinct_keys: 0,
             };
             catalog.create_index(pager, idx_def)?;
         }
@@ -309,6 +311,7 @@ pub(super) fn exec_create_index(
         index_type: IndexType::BTree,
         is_unique: ci.is_unique,
         btree_root: idx_btree_mut.root_page_id(),
+        stats_distinct_keys: 0,
     };
     catalog.create_index(pager, idx_def)?;
 
@@ -393,8 +396,65 @@ pub(super) fn exec_create_fulltext_index(
         index_type: IndexType::Fulltext,
         is_unique: false,
         btree_root: fts_root,
+        stats_distinct_keys: 0,
     };
     catalog.create_index(pager, idx_def)?;
+
+    Ok(ExecResult::Ok)
+}
+
+pub(super) fn exec_analyze_table(
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let mut table_def = catalog
+        .get_table(pager, table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
+
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut row_count: u64 = 0;
+    data_btree.scan(pager, |_k, _v| {
+        row_count += 1;
+        Ok(true)
+    })?;
+    table_def.stats_row_count = row_count;
+    catalog.update_table(pager, &table_def)?;
+
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    for mut idx in indexes {
+        if idx.index_type != IndexType::BTree {
+            continue;
+        }
+
+        let idx_btree = BTree::open(idx.btree_root);
+        let mut distinct_keys: u64 = 0;
+        let mut prev_idx_part: Option<Vec<u8>> = None;
+        idx_btree.scan(pager, |k, v| {
+            let idx_part: Vec<u8> = if idx.is_unique {
+                k.to_vec()
+            } else if k.len() >= v.len() {
+                k[..k.len() - v.len()].to_vec()
+            } else {
+                return Err(MuroError::Corruption(
+                    "invalid non-unique index entry: key shorter than value".into(),
+                ));
+            };
+
+            let is_new = prev_idx_part
+                .as_ref()
+                .map(|prev| prev.as_slice() != idx_part.as_slice())
+                .unwrap_or(true);
+            if is_new {
+                distinct_keys += 1;
+                prev_idx_part = Some(idx_part);
+            }
+            Ok(true)
+        })?;
+
+        idx.stats_distinct_keys = distinct_keys;
+        catalog.update_index(pager, &idx)?;
+    }
 
     Ok(ExecResult::Ok)
 }

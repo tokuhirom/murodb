@@ -127,6 +127,7 @@ pub(super) fn exec_alter_add_column(
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: idx_btree_mut.root_page_id(),
+            stats_distinct_keys: 0,
         };
         catalog.create_index(pager, idx_def)?;
     }
@@ -412,6 +413,7 @@ pub(super) fn reconcile_unique_index(
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: idx_btree_mut.root_page_id(),
+            stats_distinct_keys: 0,
         };
         catalog.create_index(pager, idx_def)?;
     } else if !col_spec.is_unique {

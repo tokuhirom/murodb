@@ -586,15 +586,29 @@ fn numeric_hist_bin_index(v: i64, min_v: i64, max_v: i64, bins: usize) -> Option
         return None;
     }
     if max_v == min_v {
-        return Some(0);
+        return Some(bins - 1);
     }
     let span = (max_v as i128 - min_v as i128 + 1) as u128;
-    let pos = (v as i128 - min_v as i128) as u128;
-    let mut idx = (pos.saturating_mul(bins as u128) / span) as usize;
-    if idx >= bins {
-        idx = bins - 1;
+    let bin_count = bins as u128;
+
+    // Use the same boundary reconstruction as planner::estimate_from_histogram_bins
+    // so collected counts and interpreted bins stay consistent even when span < bins.
+    for i in 0..bins {
+        let i_u = i as u128;
+        let bin_lo = (min_v as i128 + ((span.saturating_mul(i_u)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let next_lo = (min_v as i128 + ((span.saturating_mul(i_u + 1)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let bin_hi = if i + 1 == bins {
+            max_v
+        } else {
+            next_lo.saturating_sub(1)
+        };
+        if bin_hi >= bin_lo && v >= bin_lo && v <= bin_hi {
+            return Some(i);
+        }
     }
-    Some(idx)
+    Some(bins - 1)
 }
 
 pub(super) fn exec_drop_table(

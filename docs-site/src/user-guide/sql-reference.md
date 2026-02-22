@@ -465,6 +465,35 @@ Returns `base` raised to the power of `exp`.
 SELECT POWER(2, 10);  -- 1024
 ```
 
+### Date/Time Functions
+
+#### NOW() / CURRENT_TIMESTAMP[()]
+
+Returns the current UTC datetime as a `DATETIME` value.
+
+```sql
+SELECT NOW();
+SELECT CURRENT_TIMESTAMP();
+SELECT CURRENT_TIMESTAMP; -- parentheses are optional
+```
+
+#### DATE_FORMAT(dt, format)
+
+Formats a date/datetime/timestamp string/value using MySQL-style format specifiers.
+
+```sql
+SELECT DATE_FORMAT('2026-02-22 13:04:05', '%Y/%m/%d %H:%i:%s');
+-- '2026/02/22 13:04:05'
+```
+
+Common specifiers:
+- `%Y` year (4 digits), `%y` year (2 digits)
+- `%m` month (01-12), `%c` month (1-12), `%M` month name, `%b` month abbreviation
+- `%d` day (01-31), `%e` day (1-31)
+- `%H` hour (00-23), `%h`/`%I` hour (01-12), `%i` minute, `%s` second
+- `%W` weekday name, `%a` weekday abbreviation
+- `%T` `HH:MM:SS`, `%r` 12-hour time with AM/PM, `%%` literal percent
+
 ### NULL Handling & Conditional
 
 #### COALESCE(a, b, ...)

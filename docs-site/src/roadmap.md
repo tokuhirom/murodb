@@ -81,7 +81,7 @@ MySQL-compatible scalar functions.
 
 - [x] FLOAT / DOUBLE
 - [ ] DATE, DATETIME, TIMESTAMP
-- [ ] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
+- [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
 - [ ] BLOB
 - [ ] Overflow pages (posting list > 4096B)
 

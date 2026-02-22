@@ -5,6 +5,7 @@ use crate::types::{
     format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
     DataType, Value,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Evaluate an expression given a row's column values.
 /// `columns` maps column name -> Value.
@@ -350,6 +351,25 @@ fn eval_function_call(
     columns: &dyn Fn(&str) -> Option<Value>,
 ) -> Result<Value> {
     match name {
+        // Date/time functions
+        "NOW" | "CURRENT_TIMESTAMP" => {
+            check_args(name, args, 0)?;
+            Ok(Value::DateTime(current_utc_datetime_packed()?))
+        }
+        "DATE_FORMAT" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let format = vals[1].to_string();
+            match format_datetime_with_mysql_spec(&vals[0], &format) {
+                Some(s) => Ok(Value::Varchar(s)),
+                None => Ok(Value::Null),
+            }
+        }
+
         // NULL handling & conditional (these have special NULL semantics)
         "COALESCE" => {
             for arg in args {
@@ -841,6 +861,194 @@ fn eval_function_call(
 
         _ => Err(MuroError::Execution(format!("Unknown function: {}", name))),
     }
+}
+
+fn current_utc_datetime_packed() -> Result<i64> {
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| MuroError::Execution("System time is before UNIX_EPOCH".into()))?
+        .as_secs() as i64;
+    unix_to_datetime(unix).ok_or_else(|| {
+        MuroError::Execution("Current system time is outside supported DATETIME range".into())
+    })
+}
+
+fn format_datetime_with_mysql_spec(value: &Value, format: &str) -> Option<String> {
+    let (y, m, d, hh, mm, ss) = extract_datetime_parts(value)?;
+
+    let month_names = [
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month_abbr = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let weekday_names = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let weekday_abbr = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    let weekday = weekday_sunday0(y, m, d) as usize;
+    let day_of_year = day_of_year(y, m, d);
+    let hour12 = match hh % 12 {
+        0 => 12,
+        v => v,
+    };
+    let ampm = if hh < 12 { "AM" } else { "PM" };
+
+    let mut out = String::with_capacity(format.len() + 16);
+    let mut chars = format.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            out.push('%');
+            break;
+        };
+        match spec {
+            'Y' => out.push_str(&format!("{:04}", y)),
+            'y' => out.push_str(&format!("{:02}", y % 100)),
+            'm' => out.push_str(&format!("{:02}", m)),
+            'c' => out.push_str(&m.to_string()),
+            'M' => out.push_str(month_names[m as usize]),
+            'b' => out.push_str(month_abbr[m as usize]),
+            'd' => out.push_str(&format!("{:02}", d)),
+            'e' => out.push_str(&d.to_string()),
+            'H' => out.push_str(&format!("{:02}", hh)),
+            'k' => out.push_str(&hh.to_string()),
+            'h' | 'I' => out.push_str(&format!("{:02}", hour12)),
+            'l' => out.push_str(&hour12.to_string()),
+            'i' => out.push_str(&format!("{:02}", mm)),
+            's' | 'S' => out.push_str(&format!("{:02}", ss)),
+            'T' => out.push_str(&format!("{:02}:{:02}:{:02}", hh, mm, ss)),
+            'r' => out.push_str(&format!("{:02}:{:02}:{:02} {}", hour12, mm, ss, ampm)),
+            'p' => out.push_str(ampm),
+            'W' => out.push_str(weekday_names[weekday]),
+            'a' => out.push_str(weekday_abbr[weekday]),
+            'w' => out.push_str(&weekday.to_string()),
+            'j' => out.push_str(&format!("{:03}", day_of_year)),
+            'f' => out.push_str("000000"), // microseconds are not stored
+            '%' => out.push('%'),
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+fn extract_datetime_parts(value: &Value) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    match value {
+        Value::Date(d) => Some(unpack_date(*d)),
+        Value::DateTime(dt) | Value::Timestamp(dt) => Some(unpack_datetime(*dt)),
+        Value::Varchar(s) => {
+            if let Some(dt) = parse_timestamp_string(s) {
+                Some(unpack_datetime(dt))
+            } else {
+                parse_date_string(s).map(unpack_date)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unpack_date(packed: i32) -> (i32, i32, i32, i32, i32, i32) {
+    let y = packed / 10000;
+    let m = (packed / 100) % 100;
+    let d = packed % 100;
+    (y, m, d, 0, 0, 0)
+}
+
+fn unpack_datetime(packed: i64) -> (i32, i32, i32, i32, i32, i32) {
+    let y = (packed / 10000000000) as i32;
+    let m = ((packed / 100000000) % 100) as i32;
+    let d = ((packed / 1000000) % 100) as i32;
+    let hh = ((packed / 10000) % 100) as i32;
+    let mm = ((packed / 100) % 100) as i32;
+    let ss = (packed % 100) as i32;
+    (y, m, d, hh, mm, ss)
+}
+
+fn day_of_year(y: i32, m: i32, d: i32) -> i32 {
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut total = 0;
+    for month in 1..m {
+        total += month_days[(month - 1) as usize];
+        if month == 2 && is_leap_year(y) {
+            total += 1;
+        }
+    }
+    total + d
+}
+
+fn is_leap_year(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+fn weekday_sunday0(y: i32, m: i32, d: i32) -> i32 {
+    let days = days_from_civil(y, m, d);
+    (((days + 4) % 7 + 7) % 7) as i32
+}
+
+fn unix_to_datetime(unix: i64) -> Option<i64> {
+    let days = unix.div_euclid(86_400);
+    let sod = unix.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    if !(1..=9999).contains(&y) {
+        return None;
+    }
+    let hh = sod / 3_600;
+    let mm = (sod % 3_600) / 60;
+    let ss = sod % 60;
+    Some(
+        (y as i64) * 10000000000
+            + (m as i64) * 100000000
+            + (d as i64) * 1000000
+            + hh * 10000
+            + mm * 100
+            + ss,
+    )
+}
+
+fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
+    let y = y as i64 - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = m as i64;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i32, i32, i32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let y = y + if m <= 2 { 1 } else { 0 };
+    (y as i32, m as i32, d as i32)
 }
 
 fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<()> {

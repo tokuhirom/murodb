@@ -1556,6 +1556,11 @@ impl Parser {
                         let col = self.expect_ident()?;
                         Ok(Expr::ColumnRef(format!("{}.{}", name, col)))
                     }
+                } else if name.eq_ignore_ascii_case("CURRENT_TIMESTAMP") {
+                    Ok(Expr::FunctionCall {
+                        name: "CURRENT_TIMESTAMP".to_string(),
+                        args: Vec::new(),
+                    })
                 } else {
                     Ok(Expr::ColumnRef(name))
                 }

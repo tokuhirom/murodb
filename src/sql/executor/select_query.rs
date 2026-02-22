@@ -737,28 +737,18 @@ fn cmp_values_with_collation(
     let Some(collation) = collation else {
         return Ok(cmp_values(a, b));
     };
-    if collation.eq_ignore_ascii_case("binary") {
-        return match (a, b) {
-            (Some(Value::Varchar(left)), Some(Value::Varchar(right))) => {
-                Ok(left.as_bytes().cmp(right.as_bytes()))
-            }
-            _ => Ok(cmp_values(a, b)),
-        };
+    if !collation.eq_ignore_ascii_case("binary") {
+        return Err(MuroError::Execution(format!(
+            "Unsupported collation '{}' in ORDER BY: currently only binary is supported",
+            collation
+        )));
     }
-    if collation.eq_ignore_ascii_case("nocase") {
-        return match (a, b) {
-            (Some(Value::Varchar(left)), Some(Value::Varchar(right))) => {
-                let left_folded: Vec<u8> = left.bytes().map(|c| c.to_ascii_lowercase()).collect();
-                let right_folded: Vec<u8> = right.bytes().map(|c| c.to_ascii_lowercase()).collect();
-                Ok(left_folded.cmp(&right_folded))
-            }
-            _ => Ok(cmp_values(a, b)),
-        };
+    match (a, b) {
+        (Some(Value::Varchar(left)), Some(Value::Varchar(right))) => {
+            Ok(left.as_bytes().cmp(right.as_bytes()))
+        }
+        _ => Ok(cmp_values(a, b)),
     }
-    Err(MuroError::Execution(format!(
-        "Unsupported collation '{}' in ORDER BY: currently only binary and nocase are supported",
-        collation
-    )))
 }
 
 pub(super) fn sort_rows(rows: &mut [Row], order_items: &[OrderByItem]) {

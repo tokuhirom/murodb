@@ -32,6 +32,17 @@ const FORMAT_VERSION: u32 = 3;
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeaderSnapshot {
+    version: u32,
+    salt: [u8; 16],
+    catalog_root: u64,
+    page_count: u64,
+    epoch: u64,
+    freelist_page_id: u64,
+    next_txid: u64,
+}
+
 pub struct Pager {
     file: File,
     crypto: PageCrypto,
@@ -124,53 +135,7 @@ impl Pager {
             let _page0 = pager.read_page_from_disk(0)?;
         }
 
-        // Load persisted freelist if present (supports multi-page chain)
-        if pager.freelist_page_id != 0 {
-            let first_page = pager.read_page_from_disk(pager.freelist_page_id)?;
-            let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
-
-            if FreeList::is_multi_page_format(data_area) {
-                // Multi-page chain: walk the chain with cycle detection
-                let mut visited = std::collections::HashSet::new();
-                visited.insert(pager.freelist_page_id);
-                let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
-                pages_data_owned.push(data_area.to_vec());
-                // Read next pointer from first page (offset 4, after 4-byte magic)
-                let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
-                while next_page_id != 0 {
-                    if !visited.insert(next_page_id) {
-                        return Err(MuroError::Corruption(format!(
-                            "freelist chain cycle detected at page {}",
-                            next_page_id
-                        )));
-                    }
-                    if next_page_id >= pager.page_count {
-                        return Err(MuroError::Corruption(format!(
-                            "freelist chain references page {} beyond page_count {}",
-                            next_page_id, pager.page_count
-                        )));
-                    }
-                    let next_page = pager.read_page_from_disk(next_page_id)?;
-                    let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
-                    next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
-                    pages_data_owned.push(next_data.to_vec());
-                }
-                let pages_refs: Vec<&[u8]> =
-                    pages_data_owned.iter().map(|v| v.as_slice()).collect();
-                pager.freelist = FreeList::deserialize_pages(&pages_refs);
-            } else {
-                // Legacy single-page format
-                pager.freelist = FreeList::deserialize(data_area);
-            }
-
-            // Sanitize freelist: remove entries beyond page_count and duplicates.
-            // After crash recovery, the freelist may contain stale entries that
-            // reference pages beyond the current page_count.
-            let report = pager.freelist.sanitize(pager.page_count);
-            if !report.is_clean() {
-                pager.freelist_sanitize_report = Some(report);
-            }
-        }
+        pager.reload_freelist_from_disk()?;
 
         Ok(pager)
     }
@@ -213,6 +178,19 @@ impl Pager {
 
     /// Read the plaintext file header.
     fn read_plaintext_header(&mut self) -> Result<()> {
+        let snapshot = self.read_plaintext_header_snapshot()?;
+        self.apply_header_snapshot(snapshot);
+
+        // Auto-upgrade v1/v2 → v3: rewrite header with new format
+        if snapshot.version < FORMAT_VERSION {
+            self.write_plaintext_header()?;
+            self.file.sync_all()?;
+        }
+
+        Ok(())
+    }
+
+    fn read_plaintext_header_snapshot(&mut self) -> Result<HeaderSnapshot> {
         // Read max possible header size; older versions have smaller headers.
         let mut header = [0u8; PLAINTEXT_HEADER_SIZE as usize];
         self.file.seek(SeekFrom::Start(0))?;
@@ -232,14 +210,11 @@ impl Pager {
         if bytes_read < 64 {
             return Err(MuroError::InvalidPage);
         }
-
         if &header[0..8] != MAGIC {
             return Err(MuroError::InvalidPage);
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-
-        // Reject future versions we don't understand
         if version > FORMAT_VERSION {
             return Err(MuroError::Wal(format!(
                 "unsupported database format version {}",
@@ -247,35 +222,126 @@ impl Pager {
             )));
         }
 
-        self.salt.copy_from_slice(&header[12..28]);
-        self.catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
-        self.page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
-        self.epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&header[12..28]);
+        let catalog_root = u64::from_le_bytes(header[28..36].try_into().unwrap());
+        let page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
+        let epoch = u64::from_le_bytes(header[44..52].try_into().unwrap());
+        let freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
 
-        if version == 2 {
-            self.freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
-            let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
-            let computed_crc = crc32(&header[0..60]);
-            if stored_crc != computed_crc {
-                return Err(MuroError::Wal("header corrupted".into()));
-            }
-        } else if version >= 3 {
-            self.freelist_page_id = u64::from_le_bytes(header[52..60].try_into().unwrap());
-            self.next_txid = u64::from_le_bytes(header[60..68].try_into().unwrap());
+        let next_txid = if version >= 3 {
             let stored_crc = u32::from_le_bytes(header[68..72].try_into().unwrap());
             let computed_crc = crc32(&header[0..68]);
             if stored_crc != computed_crc {
                 return Err(MuroError::Wal("header corrupted".into()));
             }
+            u64::from_le_bytes(header[60..68].try_into().unwrap())
+        } else {
+            let stored_crc = u32::from_le_bytes(header[60..64].try_into().unwrap());
+            let computed_crc = crc32(&header[0..60]);
+            if stored_crc != computed_crc {
+                return Err(MuroError::Wal("header corrupted".into()));
+            }
+            1
+        };
+
+        Ok(HeaderSnapshot {
+            version,
+            salt,
+            catalog_root,
+            page_count,
+            epoch,
+            freelist_page_id,
+            next_txid,
+        })
+    }
+
+    fn apply_header_snapshot(&mut self, snapshot: HeaderSnapshot) {
+        self.salt = snapshot.salt;
+        self.catalog_root = snapshot.catalog_root;
+        self.page_count = snapshot.page_count;
+        self.epoch = snapshot.epoch;
+        self.freelist_page_id = snapshot.freelist_page_id;
+        self.next_txid = snapshot.next_txid;
+    }
+
+    fn reload_freelist_from_disk(&mut self) -> Result<()> {
+        self.freelist = FreeList::new();
+        self.freelist_sanitize_report = None;
+
+        if self.freelist_page_id == 0 {
+            return Ok(());
         }
 
-        // Auto-upgrade v1/v2 → v3: rewrite header with new format
-        if version < FORMAT_VERSION {
-            self.write_plaintext_header()?;
-            self.file.sync_all()?;
+        let first_page = self.read_page_from_disk(self.freelist_page_id)?;
+        let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+
+        if FreeList::is_multi_page_format(data_area) {
+            // Multi-page chain: walk the chain with cycle detection
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(self.freelist_page_id);
+            let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
+            pages_data_owned.push(data_area.to_vec());
+            // Read next pointer from first page (offset 4, after 4-byte magic)
+            let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
+            while next_page_id != 0 {
+                if !visited.insert(next_page_id) {
+                    return Err(MuroError::Corruption(format!(
+                        "freelist chain cycle detected at page {}",
+                        next_page_id
+                    )));
+                }
+                if next_page_id >= self.page_count {
+                    return Err(MuroError::Corruption(format!(
+                        "freelist chain references page {} beyond page_count {}",
+                        next_page_id, self.page_count
+                    )));
+                }
+                let next_page = self.read_page_from_disk(next_page_id)?;
+                let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+                next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
+                pages_data_owned.push(next_data.to_vec());
+            }
+            let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
+            self.freelist = FreeList::deserialize_pages(&pages_refs);
+        } else {
+            // Legacy single-page format
+            self.freelist = FreeList::deserialize(data_area);
+        }
+
+        // Remove out-of-range and duplicated freelist entries.
+        let report = self.freelist.sanitize(self.page_count);
+        if !report.is_clean() {
+            self.freelist_sanitize_report = Some(report);
         }
 
         Ok(())
+    }
+
+    /// Refresh in-memory metadata and page cache if another process committed changes.
+    ///
+    /// Returns `Ok(true)` when metadata changed and local cache was invalidated.
+    pub fn refresh_from_disk_if_changed(&mut self) -> Result<bool> {
+        let snapshot = self.read_plaintext_header_snapshot()?;
+        if snapshot.salt != self.salt {
+            return Err(MuroError::Corruption(
+                "database salt changed unexpectedly".into(),
+            ));
+        }
+
+        let changed = snapshot.catalog_root != self.catalog_root
+            || snapshot.page_count != self.page_count
+            || snapshot.epoch != self.epoch
+            || snapshot.freelist_page_id != self.freelist_page_id
+            || snapshot.next_txid != self.next_txid;
+        if !changed {
+            return Ok(false);
+        }
+
+        self.apply_header_snapshot(snapshot);
+        self.cache.clear();
+        self.reload_freelist_from_disk()?;
+        Ok(true)
     }
 
     /// Allocate a new page. Returns a fresh Page with the assigned page_id.

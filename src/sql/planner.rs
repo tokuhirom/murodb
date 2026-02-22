@@ -16,6 +16,7 @@ pub struct IndexPlanStat {
     pub stats_distinct_keys: u64,
     pub stats_num_min: Option<i64>,
     pub stats_num_max: Option<i64>,
+    pub stats_num_hist_bins: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -408,6 +409,18 @@ fn estimate_numeric_range_rows(
         return Some(1);
     }
 
+    if !idx.stats_num_hist_bins.is_empty() {
+        let est = estimate_from_histogram_bins(
+            prefix_rows,
+            min_v,
+            max_v,
+            clamped_lo,
+            clamped_hi,
+            &idx.stats_num_hist_bins,
+        )?;
+        return Some(est.max(1));
+    }
+
     let covered = span_inclusive_u128(clamped_lo, clamped_hi)?;
     let total = span_inclusive_u128(min_v, max_v)?;
     let scaled = div_ceil_u128((prefix_rows as u128).saturating_mul(covered), total);
@@ -438,6 +451,62 @@ fn div_ceil_u128(num: u128, den: u128) -> u128 {
     num.saturating_add(den - 1) / den
 }
 
+fn estimate_from_histogram_bins(
+    prefix_rows: u64,
+    min_v: i64,
+    max_v: i64,
+    query_lo: i64,
+    query_hi: i64,
+    bins: &[u32],
+) -> Option<u64> {
+    let span = span_inclusive_u128(min_v, max_v)?;
+    if bins.is_empty() {
+        return None;
+    }
+    let bin_count = bins.len() as u128;
+    let total_hist: u128 = bins.iter().map(|c| *c as u128).sum();
+    if total_hist == 0 {
+        return None;
+    }
+
+    let mut covered_mass: u128 = 0;
+    for (i, count) in bins.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let i_u = i as u128;
+        let bin_lo = (min_v as i128 + ((span.saturating_mul(i_u)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let next_lo = (min_v as i128 + ((span.saturating_mul(i_u + 1)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let bin_hi = if i + 1 == bins.len() {
+            max_v
+        } else {
+            next_lo.saturating_sub(1)
+        };
+        if bin_hi < bin_lo {
+            continue;
+        }
+
+        let ov_lo = query_lo.max(bin_lo);
+        let ov_hi = query_hi.min(bin_hi);
+        if ov_hi < ov_lo {
+            continue;
+        }
+
+        let ov = span_inclusive_u128(ov_lo, ov_hi)?;
+        let bin_span = span_inclusive_u128(bin_lo, bin_hi)?;
+        covered_mass =
+            covered_mass.saturating_add((*count as u128).saturating_mul(ov) / bin_span.max(1));
+    }
+
+    let scaled = div_ceil_u128(
+        (prefix_rows as u128).saturating_mul(covered_mass),
+        total_hist,
+    );
+    Some((scaled as u64).max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,10 +520,27 @@ mod tests {
             stats_distinct_keys: 0,
             stats_num_min: Some(i64::MIN),
             stats_num_max: Some(i64::MAX),
+            stats_num_hist_bins: Vec::new(),
         };
         let lower = Some((Box::new(Expr::IntLiteral(0)), true));
         let rows = estimate_numeric_range_rows(1000, &lower, &None, Some(&idx)).unwrap();
         assert_eq!(rows, 500);
+    }
+
+    #[test]
+    fn test_numeric_range_estimator_uses_histogram_bins() {
+        let idx = IndexPlanStat {
+            name: "idx_a".to_string(),
+            column_names: vec!["a".to_string()],
+            is_unique: false,
+            stats_distinct_keys: 0,
+            stats_num_min: Some(0),
+            stats_num_max: Some(99),
+            stats_num_hist_bins: vec![1000, 0],
+        };
+        let lower = Some((Box::new(Expr::IntLiteral(50)), true));
+        let rows = estimate_numeric_range_rows(1000, &lower, &None, Some(&idx)).unwrap();
+        assert!(rows <= 10);
     }
 
     #[test]

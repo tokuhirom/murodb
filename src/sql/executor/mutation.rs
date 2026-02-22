@@ -23,6 +23,7 @@ pub(super) fn exec_update(
             stats_distinct_keys: idx.stats_distinct_keys,
             stats_num_min: idx.stats_num_bounds_known.then_some(idx.stats_num_min),
             stats_num_max: idx.stats_num_bounds_known.then_some(idx.stats_num_max),
+            stats_num_hist_bins: idx.stats_num_hist_bins.clone(),
         })
         .collect();
     let plan = plan_select(
@@ -218,6 +219,7 @@ pub(super) fn exec_delete(
             stats_distinct_keys: idx.stats_distinct_keys,
             stats_num_min: idx.stats_num_bounds_known.then_some(idx.stats_num_min),
             stats_num_max: idx.stats_num_bounds_known.then_some(idx.stats_num_max),
+            stats_num_hist_bins: idx.stats_num_hist_bins.clone(),
         })
         .collect();
     let plan = plan_select(

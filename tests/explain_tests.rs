@@ -397,3 +397,58 @@ fn test_explain_date_range_rows_improve_after_analyze() {
 
     assert!(after_rows < before_rows);
 }
+
+#[test]
+fn test_explain_histogram_improves_skewed_numeric_range_estimate() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    // Two dense edge clusters with an empty middle range.
+    for i in 1..=100 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+    for i in 101..=200 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, 900 + (i - 100)),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let before = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 500 AND a <= 600",
+        &mut pager,
+        &mut catalog,
+    );
+    let before_rows = match before[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+    let after = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 500 AND a <= 600",
+        &mut pager,
+        &mut catalog,
+    );
+    let after_rows = match after[0][5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    assert!(after_rows < before_rows);
+    assert!(after_rows <= 5);
+}

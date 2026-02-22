@@ -573,6 +573,7 @@ mod tests {
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };

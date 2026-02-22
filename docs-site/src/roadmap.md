@@ -87,7 +87,7 @@ MySQL-compatible scalar functions.
 
 ## Phase 7 — Performance & Internals
 
-- [ ] Auto-checkpoint (threshold-based WAL)
+- [x] Auto-checkpoint (threshold-based WAL)
 - [ ] Composite index range scan
 - [ ] Query optimizer improvements (cost-based)
 - [ ] FTS stop-ngram filtering

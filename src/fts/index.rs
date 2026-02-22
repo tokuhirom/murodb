@@ -61,6 +61,9 @@ const SEG_META_PREFIX: &[u8] = b"__segmeta__";
 const SEG_DATA_PREFIX: &[u8] = b"__segdata__";
 const SEG_DATA_V2_PREFIX: &[u8] = b"__segv2__";
 const SEG_META_V2_VERSION: u8 = 2;
+const SEG_GC_HEAD_KEY: &[u8] = b"__seggc_head__";
+const SEG_GC_TAIL_KEY: &[u8] = b"__seggc_tail__";
+const SEG_GC_TASK_PREFIX: &[u8] = b"__seggc__";
 const MAX_POSTINGS_PER_SEGMENT: usize = 16;
 
 #[derive(Clone, Copy)]
@@ -79,6 +82,13 @@ enum SegmentMeta {
         generation: u32,
         seg_count: u32,
     },
+}
+
+#[derive(Clone, Copy)]
+struct SegmentGcTask {
+    tid: [u8; 32],
+    old_meta: Option<SegmentMeta>,
+    delete_legacy_single: bool,
 }
 
 /// Pending FTS operation (accumulated during a transaction).
@@ -215,6 +225,42 @@ impl FtsIndex {
         self.apply_pending(pager, &ops)
     }
 
+    /// Vacuum stale segmented payloads left behind by generation switching.
+    /// Returns the number of GC tasks processed.
+    pub fn vacuum_stale_segments(
+        &mut self,
+        pager: &mut impl PageStore,
+        max_tasks: usize,
+    ) -> Result<usize> {
+        if max_tasks == 0 {
+            return Ok(0);
+        }
+
+        let mut head = self.load_gc_counter(pager, SEG_GC_HEAD_KEY)?;
+        let tail = self.load_gc_counter(pager, SEG_GC_TAIL_KEY)?;
+        let mut processed = 0usize;
+        while head < tail && processed < max_tasks {
+            let task_key = seg_gc_task_key(head);
+            if let Some(raw) = self.btree.search(pager, &task_key)? {
+                let task = decode_segment_gc_task(&raw)?;
+                self.delete_postings_from_meta(pager, &task.tid, task.old_meta)?;
+                if task.delete_legacy_single && self.btree.search(pager, &task.tid)?.is_some() {
+                    self.btree.delete(pager, &task.tid)?;
+                }
+                self.btree.delete(pager, &task_key)?;
+            }
+            head = head.saturating_add(1);
+            processed = processed.saturating_add(1);
+        }
+        self.store_gc_counter(pager, SEG_GC_HEAD_KEY, head)?;
+        if head >= tail {
+            // Keep counters bounded once queue is drained.
+            self.store_gc_counter(pager, SEG_GC_HEAD_KEY, 0)?;
+            self.store_gc_counter(pager, SEG_GC_TAIL_KEY, 0)?;
+        }
+        Ok(processed)
+    }
+
     fn load_postings_by_tid(
         &self,
         pager: &mut impl PageStore,
@@ -263,6 +309,7 @@ impl FtsIndex {
             .search(pager, &seg_meta_key(tid))?
             .map(|meta| decode_segment_meta(&meta))
             .transpose()?;
+        let had_legacy_single = self.btree.search(pager, tid)?.is_some();
         let new_generation = old_meta
             .and_then(|meta| match meta {
                 SegmentMeta::V2 { generation, .. } => Some(generation),
@@ -294,6 +341,15 @@ impl FtsIndex {
         meta_buf.extend_from_slice(&new_generation.to_le_bytes());
         meta_buf.extend_from_slice(&seg_count.to_le_bytes());
         self.btree.insert(pager, &seg_meta_key(tid), &meta_buf)?;
+
+        if old_meta.is_some() || had_legacy_single {
+            let task = SegmentGcTask {
+                tid: *tid,
+                old_meta,
+                delete_legacy_single: had_legacy_single,
+            };
+            self.enqueue_segment_gc_task(pager, task)?;
+        }
         Ok(())
     }
 
@@ -330,6 +386,39 @@ impl FtsIndex {
         }
         Ok(())
     }
+
+    fn enqueue_segment_gc_task(
+        &mut self,
+        pager: &mut impl PageStore,
+        task: SegmentGcTask,
+    ) -> Result<()> {
+        let tail = self.load_gc_counter(pager, SEG_GC_TAIL_KEY)?;
+        self.btree
+            .insert(pager, &seg_gc_task_key(tail), &encode_segment_gc_task(task))?;
+        self.store_gc_counter(pager, SEG_GC_TAIL_KEY, tail.saturating_add(1))?;
+        Ok(())
+    }
+
+    fn load_gc_counter(&self, pager: &mut impl PageStore, key: &[u8]) -> Result<u64> {
+        match self.btree.search(pager, key)? {
+            Some(raw) if raw.len() == 8 => Ok(u64::from_le_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ])),
+            Some(_) => Err(crate::error::MuroError::Corruption(
+                "invalid segmented GC counter".into(),
+            )),
+            None => Ok(0),
+        }
+    }
+
+    fn store_gc_counter(
+        &mut self,
+        pager: &mut impl PageStore,
+        key: &[u8],
+        value: u64,
+    ) -> Result<()> {
+        self.btree.insert(pager, key, &value.to_le_bytes())
+    }
 }
 
 fn seg_meta_key(tid: &[u8; 32]) -> Vec<u8> {
@@ -361,6 +450,13 @@ fn seg_data_key_v2(tid: &[u8; 32], generation: u32, idx: u32) -> Vec<u8> {
     key.extend_from_slice(tid);
     key.extend_from_slice(&generation.to_le_bytes());
     key.extend_from_slice(&idx.to_le_bytes());
+    key
+}
+
+fn seg_gc_task_key(seq: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SEG_GC_TASK_PREFIX.len() + 8);
+    key.extend_from_slice(SEG_GC_TASK_PREFIX);
+    key.extend_from_slice(&seq.to_be_bytes());
     key
 }
 
@@ -404,6 +500,76 @@ fn decode_segment_meta(meta: &[u8]) -> Result<SegmentMeta> {
             "invalid segmented posting metadata".into(),
         )),
     }
+}
+
+fn encode_segment_gc_task(task: SegmentGcTask) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 1 + 32 + 1 + 8);
+    out.push(1); // task format version
+    out.push(u8::from(task.delete_legacy_single));
+    out.extend_from_slice(&task.tid);
+    match task.old_meta {
+        None => out.push(0),
+        Some(SegmentMeta::V1 {
+            seg_count,
+            key_format: SegmentKeyFormat::LegacyU16,
+        }) => {
+            out.push(1);
+            out.extend_from_slice(&(seg_count as u16).to_le_bytes());
+        }
+        Some(SegmentMeta::V1 {
+            seg_count,
+            key_format: SegmentKeyFormat::U32,
+        }) => {
+            out.push(2);
+            out.extend_from_slice(&seg_count.to_le_bytes());
+        }
+        Some(SegmentMeta::V2 {
+            generation,
+            seg_count,
+        }) => {
+            out.push(3);
+            out.extend_from_slice(&generation.to_le_bytes());
+            out.extend_from_slice(&seg_count.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn decode_segment_gc_task(raw: &[u8]) -> Result<SegmentGcTask> {
+    if raw.len() < 35 || raw[0] != 1 {
+        return Err(crate::error::MuroError::Corruption(
+            "invalid segmented GC task".into(),
+        ));
+    }
+    let delete_legacy_single = raw[1] != 0;
+    let mut tid = [0u8; 32];
+    tid.copy_from_slice(&raw[2..34]);
+    let tag = raw[34];
+    let old_meta = match tag {
+        0 => None,
+        1 if raw.len() == 37 => Some(SegmentMeta::V1 {
+            seg_count: u16::from_le_bytes([raw[35], raw[36]]) as u32,
+            key_format: SegmentKeyFormat::LegacyU16,
+        }),
+        2 if raw.len() == 39 => Some(SegmentMeta::V1 {
+            seg_count: u32::from_le_bytes([raw[35], raw[36], raw[37], raw[38]]),
+            key_format: SegmentKeyFormat::U32,
+        }),
+        3 if raw.len() == 43 => Some(SegmentMeta::V2 {
+            generation: u32::from_le_bytes([raw[35], raw[36], raw[37], raw[38]]),
+            seg_count: u32::from_le_bytes([raw[39], raw[40], raw[41], raw[42]]),
+        }),
+        _ => {
+            return Err(crate::error::MuroError::Corruption(
+                "invalid segmented GC task payload".into(),
+            ))
+        }
+    };
+    Ok(SegmentGcTask {
+        tid,
+        old_meta,
+        delete_legacy_single,
+    })
 }
 
 #[cfg(test)]
@@ -627,5 +793,65 @@ mod tests {
             }
             SegmentMeta::V1 { .. } => panic!("expected v2 segment metadata"),
         }
+    }
+
+    #[test]
+    fn test_vacuum_stale_segments_removes_previous_generation_payload() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
+        let tid = idx.term_id("東京");
+
+        let mut pl1 = PostingList::new();
+        pl1.add(1, vec![0]);
+        idx.store_postings_by_tid(&mut pager, &tid, &pl1).unwrap();
+
+        let mut pl2 = PostingList::new();
+        pl2.add(2, vec![1]);
+        idx.store_postings_by_tid(&mut pager, &tid, &pl2).unwrap();
+
+        assert!(idx
+            .btree
+            .search(&mut pager, &seg_data_key_v2(&tid, 1, 0))
+            .unwrap()
+            .is_some());
+
+        let processed = idx.vacuum_stale_segments(&mut pager, 16).unwrap();
+        assert!(processed >= 1);
+        assert!(idx
+            .btree
+            .search(&mut pager, &seg_data_key_v2(&tid, 1, 0))
+            .unwrap()
+            .is_none());
+        assert!(idx
+            .btree
+            .search(&mut pager, &seg_data_key_v2(&tid, 2, 0))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_vacuum_stale_segments_removes_legacy_single_value() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
+        let tid = idx.term_id("東京");
+
+        let mut legacy = PostingList::new();
+        legacy.add(1, vec![0]);
+        idx.btree
+            .insert(&mut pager, &tid, &legacy.serialize())
+            .unwrap();
+
+        let mut next = PostingList::new();
+        next.add(5, vec![3]);
+        idx.store_postings_by_tid(&mut pager, &tid, &next).unwrap();
+
+        assert!(idx.btree.search(&mut pager, &tid).unwrap().is_some());
+        let processed = idx.vacuum_stale_segments(&mut pager, 16).unwrap();
+        assert!(processed >= 1);
+        assert!(idx.btree.search(&mut pager, &tid).unwrap().is_none());
     }
 }

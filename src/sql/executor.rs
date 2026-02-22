@@ -17,6 +17,7 @@ use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{plan_select, Plan};
+use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
 use crate::types::{
     format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
@@ -1800,11 +1801,151 @@ fn materialize_select_subqueries(
     })
 }
 
+fn exec_select_without_table(
+    sel: &Select,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    if sel.table_name.is_some() {
+        return Err(MuroError::Execution(
+            "exec_select_without_table called with FROM clause".into(),
+        ));
+    }
+
+    let has_subqueries = sel
+        .where_clause
+        .as_ref()
+        .is_some_and(expr_contains_subquery)
+        || select_columns_contain_subquery(&sel.columns)
+        || sel.having.as_ref().is_some_and(expr_contains_subquery);
+
+    if has_subqueries {
+        let materialized = materialize_select_subqueries(sel, pager, catalog)?;
+        return exec_select_without_table_inner(&materialized);
+    }
+
+    exec_select_without_table_inner(sel)
+}
+
+fn exec_select_without_table_inner(sel: &Select) -> Result<ExecResult> {
+    if sel.table_name.is_some() {
+        return Err(MuroError::Execution(
+            "exec_select_without_table_inner called with FROM clause".into(),
+        ));
+    }
+
+    if sel.columns.iter().any(|c| matches!(c, SelectColumn::Star)) {
+        return Err(MuroError::Execution(
+            "SELECT * requires a FROM clause".into(),
+        ));
+    }
+
+    if !sel.joins.is_empty() {
+        return Err(MuroError::Execution(
+            "SELECT without FROM cannot include JOIN".into(),
+        ));
+    }
+
+    let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();
+
+    let mut where_passed = true;
+    if let Some(where_expr) = &sel.where_clause {
+        let val = eval_expr(where_expr, &|_| None)?;
+        where_passed = is_truthy(&val);
+    }
+
+    if !where_passed && !need_aggregation {
+        return Ok(ExecResult::Rows(Vec::new()));
+    }
+
+    if need_aggregation {
+        let table_def = TableDef {
+            name: "<expr>".to_string(),
+            columns: Vec::new(),
+            pk_columns: Vec::new(),
+            data_btree_root: PageId::default(),
+            next_rowid: 0,
+            row_format_version: 0,
+        };
+        let raw_rows = if where_passed {
+            vec![vec![]]
+        } else {
+            Vec::new()
+        };
+        let mut rows = execute_aggregation(raw_rows, &table_def, sel)?;
+        if let Some(order_items) = &sel.order_by {
+            sort_rows(&mut rows, order_items);
+        }
+        if let Some(offset) = sel.offset {
+            let offset = offset as usize;
+            if offset >= rows.len() {
+                rows.clear();
+            } else {
+                rows = rows.into_iter().skip(offset).collect();
+            }
+        }
+        if let Some(limit) = sel.limit {
+            rows.truncate(limit as usize);
+        }
+        return Ok(ExecResult::Rows(rows));
+    }
+
+    let mut rows = Vec::new();
+    let mut row_values = Vec::new();
+    for col in &sel.columns {
+        if let SelectColumn::Expr(expr, alias) = col {
+            let val = eval_expr(expr, &|_| None)?;
+            let name = alias.clone().unwrap_or_else(|| match expr {
+                Expr::ColumnRef(n) => n.clone(),
+                _ => "?column?".to_string(),
+            });
+            row_values.push((name, val));
+        }
+    }
+    rows.push(Row { values: row_values });
+
+    if sel.distinct {
+        let mut seen = HashSet::new();
+        rows.retain(|row| {
+            let key: Vec<ValueKey> = row
+                .values
+                .iter()
+                .map(|(_, v)| ValueKey(v.clone()))
+                .collect();
+            seen.insert(key)
+        });
+    }
+
+    if let Some(order_items) = &sel.order_by {
+        sort_rows(&mut rows, order_items);
+    }
+
+    if let Some(offset) = sel.offset {
+        let offset = offset as usize;
+        if offset >= rows.len() {
+            rows.clear();
+        } else {
+            rows = rows.into_iter().skip(offset).collect();
+        }
+    }
+
+    if let Some(limit) = sel.limit {
+        rows.truncate(limit as usize);
+    }
+
+    Ok(ExecResult::Rows(rows))
+}
+
 fn exec_select(
     sel: &Select,
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    if sel.table_name.is_none() {
+        return exec_select_without_table(sel, pager, catalog);
+    }
+    let table_name = sel.table_name.as_ref().unwrap();
+
     // Pre-materialize subqueries if any exist
     let has_subqueries = sel
         .where_clause
@@ -1819,15 +1960,15 @@ fn exec_select(
     }
 
     let table_def = catalog
-        .get_table(pager, &sel.table_name)?
-        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", sel.table_name)))?;
+        .get_table(pager, table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
 
     // If there are JOINs, use the join execution path
     if !sel.joins.is_empty() {
-        return exec_select_join(sel, &table_def, pager, catalog);
+        return exec_select_join(sel, table_name, &table_def, pager, catalog);
     }
 
-    let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
@@ -1835,7 +1976,7 @@ fn exec_select(
         .collect();
 
     let plan = plan_select(
-        &sel.table_name,
+        table_name,
         &table_def.pk_columns,
         &index_columns,
         &sel.where_clause,
@@ -2257,12 +2398,13 @@ fn eval_join_expr(expr: &Expr, row: &[(String, Value)]) -> Result<Value> {
 
 fn exec_select_join(
     sel: &Select,
+    base_table_name: &str,
     base_table_def: &TableDef,
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     // Collect hidden qualified column names for Star expansion filtering
-    let base_qualifier = sel.table_alias.as_deref().unwrap_or(&sel.table_name);
+    let base_qualifier = sel.table_alias.as_deref().unwrap_or(base_table_name);
     let mut hidden_columns: Vec<String> = base_table_def
         .columns
         .iter()
@@ -2272,7 +2414,7 @@ fn exec_select_join(
 
     // 1. Scan the base (FROM) table
     let mut joined_rows = scan_table_qualified(
-        &sel.table_name,
+        base_table_name,
         sel.table_alias.as_deref(),
         base_table_def,
         pager,
@@ -2586,11 +2728,14 @@ fn exec_explain(
         }
     };
 
+    let table_name = sel.table_name.as_ref().ok_or_else(|| {
+        MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
+    })?;
     let table_def = catalog
-        .get_table(pager, &sel.table_name)?
-        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", sel.table_name)))?;
+        .get_table(pager, table_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
 
-    let indexes = catalog.get_indexes_for_table(pager, &sel.table_name)?;
+    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
@@ -2598,7 +2743,7 @@ fn exec_explain(
         .collect();
 
     let plan = plan_select(
-        &sel.table_name,
+        table_name,
         &table_def.pk_columns,
         &index_columns,
         &sel.where_clause,
@@ -2643,7 +2788,7 @@ fn exec_explain(
                 "select_type".to_string(),
                 Value::Varchar("SIMPLE".to_string()),
             ),
-            ("table".to_string(), Value::Varchar(sel.table_name.clone())),
+            ("table".to_string(), Value::Varchar(table_name.clone())),
             ("type".to_string(), Value::Varchar(access_type.to_string())),
             (
                 "key".to_string(),

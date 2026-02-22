@@ -664,87 +664,92 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        self.expect(&Token::From)?;
-        let table_name = self.expect_ident()?;
-
-        // Optional table alias
-        let table_alias = if self.peek() == Some(&Token::As) {
+        let (table_name, table_alias) = if self.peek() == Some(&Token::From) {
             self.advance();
-            Some(self.expect_ident()?)
-        } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
-            Some(self.expect_ident()?)
+            let table_name = self.expect_ident()?;
+            let alias = if self.peek() == Some(&Token::As) {
+                self.advance();
+                Some(self.expect_ident()?)
+            } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            (Some(table_name), alias)
         } else {
-            None
+            (None, None)
         };
 
         // Parse JOIN clauses
         let mut joins = Vec::new();
-        loop {
-            let join_type = match self.peek() {
-                Some(Token::Join) => {
-                    self.advance();
-                    Some(JoinType::Inner)
-                }
-                Some(Token::Inner) => {
-                    self.advance();
-                    self.expect(&Token::Join)?;
-                    Some(JoinType::Inner)
-                }
-                Some(Token::Left) => {
-                    self.advance();
-                    // optional OUTER keyword (not a token, but could be an ident)
-                    if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
-                    {
+        if table_name.is_some() {
+            loop {
+                let join_type = match self.peek() {
+                    Some(Token::Join) => {
                         self.advance();
+                        Some(JoinType::Inner)
                     }
-                    self.expect(&Token::Join)?;
-                    Some(JoinType::Left)
-                }
-                Some(Token::Right) => {
-                    self.advance();
-                    // optional OUTER keyword (not a token, but could be an ident)
-                    if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
-                    {
+                    Some(Token::Inner) => {
                         self.advance();
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Inner)
                     }
-                    self.expect(&Token::Join)?;
-                    Some(JoinType::Right)
-                }
-                Some(Token::Cross) => {
-                    self.advance();
-                    self.expect(&Token::Join)?;
-                    Some(JoinType::Cross)
-                }
-                _ => None,
-            };
+                    Some(Token::Left) => {
+                        self.advance();
+                        // optional OUTER keyword (not a token, but could be an ident)
+                        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                        {
+                            self.advance();
+                        }
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Left)
+                    }
+                    Some(Token::Right) => {
+                        self.advance();
+                        // optional OUTER keyword (not a token, but could be an ident)
+                        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                        {
+                            self.advance();
+                        }
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Right)
+                    }
+                    Some(Token::Cross) => {
+                        self.advance();
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Cross)
+                    }
+                    _ => None,
+                };
 
-            match join_type {
-                Some(jt) => {
-                    let jt_table = self.expect_ident()?;
-                    let jt_alias = if self.peek() == Some(&Token::As) {
-                        self.advance();
-                        Some(self.expect_ident()?)
-                    } else if matches!(self.peek(), Some(Token::Ident(_)))
-                        && !self.is_keyword_ahead()
-                    {
-                        Some(self.expect_ident()?)
-                    } else {
-                        None
-                    };
-                    let on_condition = if jt == JoinType::Cross {
-                        None
-                    } else {
-                        self.expect(&Token::On)?;
-                        Some(self.parse_expr()?)
-                    };
-                    joins.push(JoinClause {
-                        join_type: jt,
-                        table_name: jt_table,
-                        alias: jt_alias,
-                        on_condition,
-                    });
+                match join_type {
+                    Some(jt) => {
+                        let jt_table = self.expect_ident()?;
+                        let jt_alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_ident()?)
+                        } else if matches!(self.peek(), Some(Token::Ident(_)))
+                            && !self.is_keyword_ahead()
+                        {
+                            Some(self.expect_ident()?)
+                        } else {
+                            None
+                        };
+                        let on_condition = if jt == JoinType::Cross {
+                            None
+                        } else {
+                            self.expect(&Token::On)?;
+                            Some(self.parse_expr()?)
+                        };
+                        joins.push(JoinClause {
+                            join_type: jt,
+                            table_name: jt_table,
+                            alias: jt_alias,
+                            on_condition,
+                        });
+                    }
+                    None => break,
                 }
-                None => break,
             }
         }
 
@@ -827,6 +832,10 @@ impl Parser {
         } else {
             None
         };
+
+        if table_name.is_none() && columns.iter().any(|c| matches!(c, SelectColumn::Star)) {
+            return Err("SELECT * requires a FROM clause".into());
+        }
 
         Ok(Select {
             distinct,
@@ -1204,17 +1213,91 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        self.expect(&Token::From)?;
-        let table_name = self.expect_ident()?;
-
-        let table_alias = if self.peek() == Some(&Token::As) {
+        let (table_name, table_alias) = if self.peek() == Some(&Token::From) {
             self.advance();
-            Some(self.expect_ident()?)
-        } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
-            Some(self.expect_ident()?)
+            let table_name = self.expect_ident()?;
+            let alias = if self.peek() == Some(&Token::As) {
+                self.advance();
+                Some(self.expect_ident()?)
+            } else if matches!(self.peek(), Some(Token::Ident(_))) && !self.is_keyword_ahead() {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            (Some(table_name), alias)
         } else {
-            None
+            (None, None)
         };
+
+        let mut joins = Vec::new();
+        if table_name.is_some() {
+            loop {
+                let join_type = match self.peek() {
+                    Some(Token::Join) => {
+                        self.advance();
+                        Some(JoinType::Inner)
+                    }
+                    Some(Token::Inner) => {
+                        self.advance();
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Inner)
+                    }
+                    Some(Token::Left) => {
+                        self.advance();
+                        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                        {
+                            self.advance();
+                        }
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Left)
+                    }
+                    Some(Token::Right) => {
+                        self.advance();
+                        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("OUTER"))
+                        {
+                            self.advance();
+                        }
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Right)
+                    }
+                    Some(Token::Cross) => {
+                        self.advance();
+                        self.expect(&Token::Join)?;
+                        Some(JoinType::Cross)
+                    }
+                    _ => None,
+                };
+
+                match join_type {
+                    Some(jt) => {
+                        let jt_table = self.expect_ident()?;
+                        let jt_alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_ident()?)
+                        } else if matches!(self.peek(), Some(Token::Ident(_)))
+                            && !self.is_keyword_ahead()
+                        {
+                            Some(self.expect_ident()?)
+                        } else {
+                            None
+                        };
+                        let on_condition = if jt == JoinType::Cross {
+                            None
+                        } else {
+                            self.expect(&Token::On)?;
+                            Some(self.parse_expr()?)
+                        };
+                        joins.push(JoinClause {
+                            join_type: jt,
+                            table_name: jt_table,
+                            alias: jt_alias,
+                            on_condition,
+                        });
+                    }
+                    None => break,
+                }
+            }
+        }
 
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
@@ -1294,12 +1377,16 @@ impl Parser {
             None
         };
 
+        if table_name.is_none() && columns.iter().any(|c| matches!(c, SelectColumn::Star)) {
+            return Err("SELECT * requires a FROM clause".into());
+        }
+
         Ok(Select {
             distinct,
             columns,
             table_name,
             table_alias,
-            joins: Vec::new(),
+            joins,
             where_clause,
             group_by,
             having,
@@ -1741,7 +1828,7 @@ mod tests {
     fn test_parse_select() {
         let stmt = parse_sql("SELECT * FROM t WHERE id = 42 ORDER BY id ASC LIMIT 10").unwrap();
         if let Statement::Select(sel) = stmt {
-            assert_eq!(sel.table_name, "t");
+            assert_eq!(sel.table_name.as_deref(), Some("t"));
             assert!(sel.where_clause.is_some());
             assert!(sel.order_by.is_some());
             assert_eq!(sel.limit, Some(10));

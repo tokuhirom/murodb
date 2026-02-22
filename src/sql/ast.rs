@@ -146,7 +146,7 @@ pub struct JoinClause {
 pub struct Select {
     pub distinct: bool,
     pub columns: Vec<SelectColumn>,
-    pub table_name: String,
+    pub table_name: Option<String>,
     pub table_alias: Option<String>,
     pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,

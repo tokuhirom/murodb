@@ -1,6 +1,7 @@
 # Architecture
 
-MuroDB is an encrypted embedded SQL database. The system is organized in layers:
+MuroDB is an embedded SQL database with optional at-rest encryption.
+The runtime stack is organized in layers:
 
 ```
 sql/ (lexer → parser → planner → executor)
@@ -22,6 +23,17 @@ Additional modules:
 
 - `fts/` - Full-text search (bigram tokenizer, postings B-tree, BM25, BOOLEAN/NATURAL mode)
 - `concurrency/` - parking_lot::RwLock (thread) + fs4 file lock (process)
+
+## How To Read This Section
+
+If your goal is "reconstruct internals after a long break", read in this order:
+
+1. [Reading Guide](reading-guide.md)
+2. [Files, WAL, and Locking](files-and-locking.md)
+3. [B-tree](btree.md)
+4. [Query Planning & Execution](query-planning.md)
+5. [Cryptography](cryptography.md)
+6. [WAL & Crash Resilience](wal.md)
 
 ## Module Map
 
@@ -45,3 +57,5 @@ Additional modules:
   - `Database::query` acquires a shared lock for read-only statements.
   - `Database::execute` acquires an exclusive lock for general SQL execution.
   - CLI routes read-only statements to `query` unless an explicit transaction is active.
+
+For on-disk file contracts (`.db` / `.wal` / `.lock`), see [Files, WAL, and Locking](files-and-locking.md).

@@ -54,6 +54,15 @@ Main entry points:
 - `docs-site/src/user-guide/recovery.md`
 - `docs-site/src/internals/architecture.md`
 
+Internals deep dive:
+
+- `docs-site/src/internals/reading-guide.md`
+- `docs-site/src/internals/files-and-locking.md`
+- `docs-site/src/internals/btree.md`
+- `docs-site/src/internals/query-planning.md`
+- `docs-site/src/internals/cryptography.md`
+- `docs-site/src/internals/wal.md`
+
 ## API Notes
 
 - `Database::execute(sql)` is the general SQL entrypoint (read/write, exclusive lock).

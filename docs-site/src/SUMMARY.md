@@ -22,8 +22,12 @@
 # Internals
 
 - [Architecture](internals/architecture.md)
+- [Reading Guide](internals/reading-guide.md)
 - [Storage](internals/storage.md)
 - [B-tree](internals/btree.md)
+- [Query Planning & Execution](internals/query-planning.md)
+- [Files, WAL, and Locking](internals/files-and-locking.md)
+- [Cryptography](internals/cryptography.md)
 - [WAL & Crash Resilience](internals/wal.md)
 - [Durability Matrix](internals/durability-matrix.md)
 - [FTS Internals](internals/fts-internals.md)

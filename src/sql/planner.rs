@@ -102,7 +102,10 @@ pub fn estimate_plan_rows_hint(
             ..
         } => {
             let index = index_stats.iter().find(|idx| idx.name == *index_name);
-            estimate_index_seek_rows(table_rows, key_exprs.len(), index)
+            let full_key_equality = index
+                .map(|idx| idx.is_unique && key_exprs.len() == idx.column_names.len())
+                .unwrap_or(false);
+            estimate_index_seek_rows(table_rows, key_exprs.len(), index, full_key_equality)
         }
         Plan::IndexRangeSeek {
             index_name,
@@ -112,7 +115,8 @@ pub fn estimate_plan_rows_hint(
             ..
         } => {
             let index = index_stats.iter().find(|idx| idx.name == *index_name);
-            let prefix_rows = estimate_index_seek_rows(table_rows, prefix_key_exprs.len(), index);
+            let prefix_rows =
+                estimate_index_seek_rows(table_rows, prefix_key_exprs.len(), index, false);
             let ranged_rows = match (lower.is_some(), upper.is_some()) {
                 (true, true) => div_ceil(prefix_rows, 5),
                 (true, false) | (false, true) => div_ceil(prefix_rows, 2),
@@ -310,12 +314,13 @@ fn estimate_index_seek_rows(
     table_rows: u64,
     key_parts: usize,
     index: Option<&IndexPlanStat>,
+    full_key_equality: bool,
 ) -> u64 {
     if key_parts == 0 {
         return table_rows.max(1);
     }
 
-    if index.is_some_and(|idx| idx.is_unique) {
+    if full_key_equality {
         return 1;
     }
 

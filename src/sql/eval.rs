@@ -249,8 +249,11 @@ pub fn eval_expr_with_collation(
                 (Value::Varchar(s), Value::Varchar(p)) => {
                     let collation = resolve_collation(expr, pattern)?;
                     let matches = match collation.as_deref() {
-                        None | Some("binary") => like_match(s, p),
-                        Some("nocase") => like_match(&ascii_fold_nocase(s), &ascii_fold_nocase(p)),
+                        None => like_match(s, p),
+                        Some(name) if name.eq_ignore_ascii_case("binary") => like_match(s, p),
+                        Some(name) if name.eq_ignore_ascii_case("nocase") => {
+                            like_match(&ascii_fold_nocase(s), &ascii_fold_nocase(p))
+                        }
                         Some(other) => {
                             return Err(MuroError::Execution(format!(
                                 "Unsupported collation '{}' in LIKE: currently only binary and nocase are supported",
@@ -292,8 +295,9 @@ fn value_cmp_with_collation(
     collation: Option<&str>,
 ) -> Result<Option<std::cmp::Ordering>> {
     match collation {
-        None | Some("binary") => Ok(value_cmp(left, right)),
-        Some("nocase") => match (left, right) {
+        None => Ok(value_cmp(left, right)),
+        Some(name) if name.eq_ignore_ascii_case("binary") => Ok(value_cmp(left, right)),
+        Some(name) if name.eq_ignore_ascii_case("nocase") => match (left, right) {
             (Value::Varchar(a), Value::Varchar(b)) => {
                 let a = ascii_fold_nocase(a);
                 let b = ascii_fold_nocase(b);

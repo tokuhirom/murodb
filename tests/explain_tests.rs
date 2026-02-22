@@ -487,3 +487,50 @@ fn test_explain_histogram_handles_narrow_span_without_collapsing_to_one() {
     };
     assert!(est >= 50);
 }
+
+#[test]
+fn test_explain_join_extra_shows_loop_order_choice() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t1 (id BIGINT PRIMARY KEY, v INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute(
+        "CREATE TABLE t2 (id BIGINT PRIMARY KEY, t1_id BIGINT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    for i in 1..=20 {
+        execute(
+            &format!("INSERT INTO t1 (id, v) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+    for i in 1..=3 {
+        execute(
+            &format!("INSERT INTO t2 (id, t1_id) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let rows = query_rows(
+        "EXPLAIN SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id",
+        &mut pager,
+        &mut catalog,
+    );
+    let extra = match &rows[0][7].1 {
+        Value::Varchar(s) => s.clone(),
+        other => panic!("expected VARCHAR extra, got {:?}", other),
+    };
+    assert!(extra.contains("Join loops:"));
+    assert!(extra.contains("j1=right_outer"));
+}

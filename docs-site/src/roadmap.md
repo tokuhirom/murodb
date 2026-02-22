@@ -134,6 +134,7 @@ MySQL-compatible scalar functions.
     - EXPLAIN `rows`/`cost` now uses the same planner estimation logic (with table-row fallback), so estimates reflect planner tradeoffs.
     - JOIN loop-order choice for `INNER`/`CROSS` now uses planner-side estimated row counts (stats-aware with runtime fallback) and keeps row shape (`left + right`) stable.
     - `ANALYZE TABLE` now persists numeric min/max bounds and equal-width histogram bins for single-column numeric B-tree indexes; range row estimation uses these stats when available.
+    - EXPLAIN for JOIN now reports nested-loop outer-side choice with estimated left/right row counts in `Extra`.
   - Done when:
     - Planner compares at least full-scan vs single-index vs join-order alternatives.
     - Basic column stats/histograms are persisted and refreshable.

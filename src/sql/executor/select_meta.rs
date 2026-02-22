@@ -14,15 +14,20 @@ pub(super) fn exec_explain(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let (table_name, where_clause, select_type) = match stmt {
+    let (table_name, where_clause, select_type, join_note) = match stmt {
         Statement::Select(sel) => {
             let table_name = sel.table_name.as_ref().ok_or_else(|| {
                 MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
             })?;
-            (table_name.clone(), &sel.where_clause, "SIMPLE")
+            (
+                table_name.clone(),
+                &sel.where_clause,
+                "SIMPLE",
+                build_join_loop_note(sel, pager, catalog)?,
+            )
         }
-        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE"),
-        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE"),
+        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE", None),
+        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE", None),
         _ => {
             return Err(MuroError::Execution(
                 "EXPLAIN supports SELECT, UPDATE, and DELETE statements".into(),
@@ -104,6 +109,7 @@ pub(super) fn exec_explain(
         }
     };
 
+    let extra = append_extra(extra, join_note.as_deref());
     let row = Row {
         values: vec![
             ("id".to_string(), Value::Integer(1)),
@@ -135,6 +141,62 @@ pub(super) fn exec_explain(
     };
 
     Ok(ExecResult::Rows(vec![row]))
+}
+
+fn append_extra(base: String, extra_note: Option<&str>) -> String {
+    match (base.is_empty(), extra_note) {
+        (_, None) => base,
+        (true, Some(note)) => note.to_string(),
+        (false, Some(note)) => format!("{}; {}", base, note),
+    }
+}
+
+fn build_join_loop_note(
+    sel: &Select,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<Option<String>> {
+    if sel.joins.is_empty() {
+        return Ok(None);
+    }
+    let base_name = sel
+        .table_name
+        .as_ref()
+        .ok_or_else(|| MuroError::Execution("EXPLAIN JOIN requires a FROM table".into()))?;
+    let base_def = catalog
+        .get_table(pager, base_name)?
+        .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", base_name)))?;
+    let mut left_est = estimate_table_rows(&base_def, pager)?;
+    let mut parts: Vec<String> = Vec::new();
+
+    for (i, join) in sel.joins.iter().enumerate() {
+        if !matches!(join.join_type, JoinType::Inner | JoinType::Cross) {
+            continue;
+        }
+        let right_def = catalog
+            .get_table(pager, &join.table_name)?
+            .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", join.table_name)))?;
+        let right_est = estimate_table_rows(&right_def, pager)?;
+        let order = choose_nested_loop_order(left_est, right_est);
+        let order_label = match order {
+            JoinLoopOrder::LeftOuter => "left_outer",
+            JoinLoopOrder::RightOuter => "right_outer",
+        };
+        parts.push(format!(
+            "j{}={} (L={},R={})",
+            i + 1,
+            order_label,
+            left_est,
+            right_est
+        ));
+        left_est = left_est.saturating_mul(right_est).max(1);
+    }
+
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("Join loops: {}", parts.join(", "))))
+    }
 }
 
 fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Result<u64> {

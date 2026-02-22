@@ -22,6 +22,8 @@ pub struct IndexDef {
     pub stats_num_max: i64,
     /// Whether numeric bounds are known (from ANALYZE TABLE).
     pub stats_num_bounds_known: bool,
+    /// Optional equal-width histogram counts for single-column numeric indexes.
+    pub stats_num_hist_bins: Vec<u32>,
     /// FULLTEXT-only: whether stop-ngram filtering is enabled in NATURAL mode.
     pub fts_stop_filter: bool,
     /// FULLTEXT-only: df/total_docs threshold in ppm (0..=1_000_000).
@@ -77,6 +79,11 @@ impl IndexDef {
         // fts_stop_filter + fts_stop_df_ratio_ppm (optional extension)
         buf.push(if self.fts_stop_filter { 1 } else { 0 });
         buf.extend_from_slice(&self.fts_stop_df_ratio_ppm.to_le_bytes());
+        // numeric histogram bins (optional extension)
+        buf.extend_from_slice(&(self.stats_num_hist_bins.len() as u16).to_le_bytes());
+        for c in &self.stats_num_hist_bins {
+            buf.extend_from_slice(&c.to_le_bytes());
+        }
         buf
     }
 
@@ -210,6 +217,24 @@ impl IndexDef {
             0
         };
 
+        // numeric histogram bins (optional extension)
+        let mut stats_num_hist_bins = Vec::new();
+        if data.len() >= offset + 2 {
+            let bin_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+            offset += 2;
+            let needed = (bin_count as usize).saturating_mul(4);
+            if data.len() >= offset + needed {
+                for _ in 0..bin_count {
+                    let n = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                    offset += 4;
+                    stats_num_hist_bins.push(n);
+                }
+            } else {
+                // Corrupt/incomplete tail; ignore histogram extension.
+                stats_num_hist_bins.clear();
+            }
+        }
+
         Some((
             IndexDef {
                 name,
@@ -222,6 +247,7 @@ impl IndexDef {
                 stats_num_min,
                 stats_num_max,
                 stats_num_bounds_known,
+                stats_num_hist_bins,
                 fts_stop_filter,
                 fts_stop_df_ratio_ppm,
             },
@@ -278,6 +304,7 @@ mod tests {
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: vec![1, 2, 3],
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -289,6 +316,7 @@ mod tests {
         assert_eq!(idx2.index_type, IndexType::BTree);
         assert!(idx2.is_unique);
         assert_eq!(idx2.btree_root, 42);
+        assert_eq!(idx2.stats_num_hist_bins, vec![1, 2, 3]);
     }
 
     #[test]
@@ -304,6 +332,7 @@ mod tests {
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -328,6 +357,7 @@ mod tests {
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: true,
             fts_stop_df_ratio_ppm: 250_000,
         };

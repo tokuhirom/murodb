@@ -147,6 +147,7 @@ pub(super) fn exec_create_table(
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -168,6 +169,7 @@ pub(super) fn exec_create_table(
                 stats_num_min: 0,
                 stats_num_max: 0,
                 stats_num_bounds_known: false,
+                stats_num_hist_bins: Vec::new(),
                 fts_stop_filter: false,
                 fts_stop_df_ratio_ppm: 0,
             };
@@ -326,6 +328,7 @@ pub(super) fn exec_create_index(
         stats_num_min: 0,
         stats_num_max: 0,
         stats_num_bounds_known: false,
+        stats_num_hist_bins: Vec::new(),
         fts_stop_filter: false,
         fts_stop_df_ratio_ppm: 0,
     };
@@ -416,6 +419,7 @@ pub(super) fn exec_create_fulltext_index(
         stats_num_min: 0,
         stats_num_max: 0,
         stats_num_bounds_known: false,
+        stats_num_hist_bins: Vec::new(),
         fts_stop_filter: fi.stop_filter,
         fts_stop_df_ratio_ppm: fi.stop_df_ratio_ppm,
     };
@@ -429,6 +433,7 @@ pub(super) fn exec_analyze_table(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    const NUM_HIST_BINS: usize = 16;
     let mut table_def = catalog
         .get_table(pager, table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
@@ -489,6 +494,37 @@ pub(super) fn exec_analyze_table(
             Ok(true)
         })?;
     }
+    let mut numeric_histograms: HashMap<String, Vec<u32>> = numeric_bounds
+        .keys()
+        .map(|k| (k.clone(), vec![0; NUM_HIST_BINS]))
+        .collect();
+    if !numeric_histograms.is_empty() {
+        let data_btree = BTree::open(table_def.data_btree_root);
+        data_btree.scan(pager, |_k, row| {
+            let values =
+                deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
+            for (idx_name, col_idx) in &numeric_targets {
+                let Some((min_v, max_v)) = numeric_bounds.get(idx_name).copied() else {
+                    continue;
+                };
+                let Some(n) = values.get(*col_idx).and_then(value_as_i64_for_stats) else {
+                    continue;
+                };
+                if n < min_v || n > max_v {
+                    continue;
+                }
+                let Some(bi) = numeric_hist_bin_index(n, min_v, max_v, NUM_HIST_BINS) else {
+                    continue;
+                };
+                if let Some(bins) = numeric_histograms.get_mut(idx_name) {
+                    if let Some(slot) = bins.get_mut(bi) {
+                        *slot = slot.saturating_add(1);
+                    }
+                }
+            }
+            Ok(true)
+        })?;
+    }
 
     for idx in &mut indexes {
         if idx.index_type != IndexType::BTree {
@@ -522,10 +558,12 @@ pub(super) fn exec_analyze_table(
             idx.stats_num_bounds_known = true;
             idx.stats_num_min = min_v;
             idx.stats_num_max = max_v;
+            idx.stats_num_hist_bins = numeric_histograms.remove(&idx.name).unwrap_or_default();
         } else {
             idx.stats_num_bounds_known = false;
             idx.stats_num_min = 0;
             idx.stats_num_max = 0;
+            idx.stats_num_hist_bins.clear();
         }
         catalog.update_index(pager, idx)?;
     }
@@ -541,6 +579,36 @@ fn value_as_i64_for_stats(v: &Value) -> Option<i64> {
         Value::Timestamp(n) => Some(*n),
         _ => None,
     }
+}
+
+fn numeric_hist_bin_index(v: i64, min_v: i64, max_v: i64, bins: usize) -> Option<usize> {
+    if bins == 0 || max_v < min_v || v < min_v || v > max_v {
+        return None;
+    }
+    if max_v == min_v {
+        return Some(bins - 1);
+    }
+    let span = (max_v as i128 - min_v as i128 + 1) as u128;
+    let bin_count = bins as u128;
+
+    // Use the same boundary reconstruction as planner::estimate_from_histogram_bins
+    // so collected counts and interpreted bins stay consistent even when span < bins.
+    for i in 0..bins {
+        let i_u = i as u128;
+        let bin_lo = (min_v as i128 + ((span.saturating_mul(i_u)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let next_lo = (min_v as i128 + ((span.saturating_mul(i_u + 1)) / bin_count) as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let bin_hi = if i + 1 == bins {
+            max_v
+        } else {
+            next_lo.saturating_sub(1)
+        };
+        if bin_hi >= bin_lo && v >= bin_lo && v <= bin_hi {
+            return Some(i);
+        }
+    }
+    Some(bins - 1)
 }
 
 pub(super) fn exec_drop_table(

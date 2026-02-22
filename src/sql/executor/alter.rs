@@ -131,6 +131,7 @@ pub(super) fn exec_alter_add_column(
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -422,6 +423,7 @@ pub(super) fn reconcile_unique_index(
             stats_num_min: 0,
             stats_num_max: 0,
             stats_num_bounds_known: false,
+            stats_num_hist_bins: Vec::new(),
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };

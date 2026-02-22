@@ -98,6 +98,10 @@ MySQL-compatible scalar functions.
     - Operational limits are documented (max size, indexing restrictions, comparison semantics).
 - [ ] Overflow pages (posting list > 4096B)
   - Scope: support values/postings that exceed single-page capacity.
+  - Progress:
+    - Implemented FTS segment overflow chains (`__segovf__`) with typed page format (`OFG1`).
+    - Read/write/delete + vacuum path now reclaims overflow pages without orphaning.
+    - Covered by unit/integration tests (`cargo test` green as of 2026-02-22).
   - Done when:
     - Overflow chain format is versioned and crash-safe.
     - WAL/recovery covers partial-write and torn-tail scenarios for overflow chains.

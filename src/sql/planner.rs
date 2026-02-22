@@ -467,7 +467,7 @@ fn is_row_independent_expr(expr: &Expr) -> bool {
             .unwrap_or(true),
         Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
         Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
-        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => false,
         Expr::IntLiteral(_)
         | Expr::FloatLiteral(_)
         | Expr::StringLiteral(_)

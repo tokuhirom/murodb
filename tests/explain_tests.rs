@@ -275,3 +275,26 @@ fn test_explain_range_bounds_are_merged_order_independent() {
     assert_eq!(r1[5].1, Value::Integer(100));
     assert_eq!(r2[5].1, Value::Integer(100));
 }
+
+#[test]
+fn test_explain_does_not_use_range_for_fts_dependent_bound() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, body TEXT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a < MATCH(body) AGAINST('foo' IN NATURAL LANGUAGE MODE)",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row[3].1, Value::Varchar("ALL".to_string()));
+}

@@ -655,10 +655,12 @@ All SELECT statements in a UNION must return the same number of columns.
 
 ## EXPLAIN
 
-Shows the query execution plan for a SELECT statement.
+Shows the query execution plan for a statement.
 
 ```sql
 EXPLAIN SELECT * FROM t WHERE id = 1;
+EXPLAIN UPDATE t SET name = 'Alicia' WHERE id = 1;
+EXPLAIN DELETE FROM t WHERE id = 1;
 ```
 
 Output columns:
@@ -672,8 +674,13 @@ Output columns:
 | key | Index used (NULL for full scan) |
 | Extra | Additional info: "Using where", "Using index", "Using fulltext" |
 
+`select_type` values:
+- `SIMPLE` for `EXPLAIN SELECT`
+- `UPDATE` for `EXPLAIN UPDATE`
+- `DELETE` for `EXPLAIN DELETE`
+
 **Limitations:**
-- Only SELECT statements are supported.
+- Supported targets are `SELECT`, `UPDATE`, and `DELETE`.
 - JOIN and subquery queries show only one row (the primary table's plan).
 
 ## Transactions

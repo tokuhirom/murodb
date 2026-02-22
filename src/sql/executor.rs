@@ -2719,23 +2719,27 @@ fn exec_explain(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let sel = match stmt {
-        Statement::Select(sel) => sel,
+    let (table_name, where_clause, select_type) = match stmt {
+        Statement::Select(sel) => {
+            let table_name = sel.table_name.as_ref().ok_or_else(|| {
+                MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
+            })?;
+            (table_name.clone(), &sel.where_clause, "SIMPLE")
+        }
+        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE"),
+        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE"),
         _ => {
             return Err(MuroError::Execution(
-                "EXPLAIN is only supported for SELECT statements".into(),
+                "EXPLAIN supports SELECT, UPDATE, and DELETE statements".into(),
             ));
         }
     };
 
-    let table_name = sel.table_name.as_ref().ok_or_else(|| {
-        MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
-    })?;
     let table_def = catalog
-        .get_table(pager, table_name)?
+        .get_table(pager, &table_name)?
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", table_name)))?;
 
-    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    let indexes = catalog.get_indexes_for_table(pager, &table_name)?;
     let index_columns: Vec<(String, Vec<String>)> = indexes
         .iter()
         .filter(|idx| idx.index_type == IndexType::BTree)
@@ -2743,10 +2747,10 @@ fn exec_explain(
         .collect();
 
     let plan = plan_select(
-        table_name,
+        &table_name,
         &table_def.pk_columns,
         &index_columns,
-        &sel.where_clause,
+        where_clause,
     );
 
     let (access_type, key_name, extra) = match &plan {
@@ -2757,7 +2761,7 @@ fn exec_explain(
             "Using where; Using index".to_string(),
         ),
         Plan::FullScan { .. } => {
-            let extra = if sel.where_clause.is_some() {
+            let extra = if where_clause.is_some() {
                 "Using where"
             } else {
                 ""
@@ -2786,9 +2790,9 @@ fn exec_explain(
             ("id".to_string(), Value::Integer(1)),
             (
                 "select_type".to_string(),
-                Value::Varchar("SIMPLE".to_string()),
+                Value::Varchar(select_type.to_string()),
             ),
-            ("table".to_string(), Value::Varchar(table_name.clone())),
+            ("table".to_string(), Value::Varchar(table_name)),
             ("type".to_string(), Value::Varchar(access_type.to_string())),
             (
                 "key".to_string(),
@@ -2956,19 +2960,77 @@ fn exec_update(
     ensure_row_format_v1(&mut table_def, pager, catalog)?;
 
     let indexes = catalog.get_indexes_for_table(pager, &upd.table_name)?;
+    let index_columns: Vec<(String, Vec<String>)> = indexes
+        .iter()
+        .filter(|idx| idx.index_type == IndexType::BTree)
+        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .collect();
+    let plan = plan_select(
+        &upd.table_name,
+        &table_def.pk_columns,
+        &index_columns,
+        &upd.where_clause,
+    );
 
     let data_btree = BTree::open(table_def.data_btree_root);
 
     // Collect rows to update (to avoid modifying during scan)
     let mut to_update: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
-    data_btree.scan(pager, |k, v| {
-        let values =
-            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
-        if matches_where(&upd.where_clause, &table_def, &values)? {
-            to_update.push((k.to_vec(), values));
+    match plan {
+        Plan::PkSeek { key_exprs, .. }
+            if key_exprs.iter().all(|(_, e)| is_row_independent_expr(e)) =>
+        {
+            let pk_key = eval_pk_seek_key(&table_def, &key_exprs)?;
+            if let Some(data) = data_btree.search(pager, &pk_key)? {
+                let values = deserialize_row_versioned(
+                    &data,
+                    &table_def.columns,
+                    table_def.row_format_version,
+                )?;
+                if matches_where(&upd.where_clause, &table_def, &values)? {
+                    to_update.push((pk_key, values));
+                }
+            }
         }
-        Ok(true)
-    })?;
+        Plan::IndexSeek {
+            index_name,
+            column_names,
+            key_exprs,
+            ..
+        } if key_exprs.iter().all(is_row_independent_expr) => {
+            let idx_key = eval_index_seek_key(&table_def, &column_names, &key_exprs)?;
+            let idx = indexes
+                .iter()
+                .find(|i| i.name == index_name)
+                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
+            let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
+            for pk_key in pk_keys {
+                if let Some(data) = data_btree.search(pager, &pk_key)? {
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
+                    if matches_where(&upd.where_clause, &table_def, &values)? {
+                        to_update.push((pk_key, values));
+                    }
+                }
+            }
+        }
+        Plan::PkSeek { .. }
+        | Plan::IndexSeek { .. }
+        | Plan::FullScan { .. }
+        | Plan::FtsScan { .. } => {
+            data_btree.scan(pager, |k, v| {
+                let values =
+                    deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
+                if matches_where(&upd.where_clause, &table_def, &values)? {
+                    to_update.push((k.to_vec(), values));
+                }
+                Ok(true)
+            })?;
+        }
+    }
 
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut count = 0u64;
@@ -3028,19 +3090,77 @@ fn exec_delete(
         .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", del.table_name)))?;
 
     let indexes = catalog.get_indexes_for_table(pager, &del.table_name)?;
+    let index_columns: Vec<(String, Vec<String>)> = indexes
+        .iter()
+        .filter(|idx| idx.index_type == IndexType::BTree)
+        .map(|idx| (idx.name.clone(), idx.column_names.clone()))
+        .collect();
+    let plan = plan_select(
+        &del.table_name,
+        &table_def.pk_columns,
+        &index_columns,
+        &del.where_clause,
+    );
 
     let data_btree = BTree::open(table_def.data_btree_root);
 
     // Collect keys and row values to delete
     let mut to_delete: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
-    data_btree.scan(pager, |k, v| {
-        let values =
-            deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
-        if matches_where(&del.where_clause, &table_def, &values)? {
-            to_delete.push((k.to_vec(), values));
+    match plan {
+        Plan::PkSeek { key_exprs, .. }
+            if key_exprs.iter().all(|(_, e)| is_row_independent_expr(e)) =>
+        {
+            let pk_key = eval_pk_seek_key(&table_def, &key_exprs)?;
+            if let Some(data) = data_btree.search(pager, &pk_key)? {
+                let values = deserialize_row_versioned(
+                    &data,
+                    &table_def.columns,
+                    table_def.row_format_version,
+                )?;
+                if matches_where(&del.where_clause, &table_def, &values)? {
+                    to_delete.push((pk_key, values));
+                }
+            }
         }
-        Ok(true)
-    })?;
+        Plan::IndexSeek {
+            index_name,
+            column_names,
+            key_exprs,
+            ..
+        } if key_exprs.iter().all(is_row_independent_expr) => {
+            let idx_key = eval_index_seek_key(&table_def, &column_names, &key_exprs)?;
+            let idx = indexes
+                .iter()
+                .find(|i| i.name == index_name)
+                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
+            let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
+            for pk_key in pk_keys {
+                if let Some(data) = data_btree.search(pager, &pk_key)? {
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
+                    if matches_where(&del.where_clause, &table_def, &values)? {
+                        to_delete.push((pk_key, values));
+                    }
+                }
+            }
+        }
+        Plan::PkSeek { .. }
+        | Plan::IndexSeek { .. }
+        | Plan::FullScan { .. }
+        | Plan::FtsScan { .. } => {
+            data_btree.scan(pager, |k, v| {
+                let values =
+                    deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
+                if matches_where(&del.where_clause, &table_def, &values)? {
+                    to_delete.push((k.to_vec(), values));
+                }
+                Ok(true)
+            })?;
+        }
+    }
 
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut count = 0u64;
@@ -4584,6 +4704,62 @@ fn matches_where(
     }
 }
 
+fn is_row_independent_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRef(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            is_row_independent_expr(left) && is_row_independent_expr(right)
+        }
+        Expr::UnaryOp { operand, .. } => is_row_independent_expr(operand),
+        Expr::Like { expr, pattern, .. } => {
+            is_row_independent_expr(expr) && is_row_independent_expr(pattern)
+        }
+        Expr::InList { expr, list, .. } => {
+            is_row_independent_expr(expr) && list.iter().all(is_row_independent_expr)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            is_row_independent_expr(expr)
+                && is_row_independent_expr(low)
+                && is_row_independent_expr(high)
+        }
+        Expr::IsNull { expr, .. } => is_row_independent_expr(expr),
+        Expr::FunctionCall { args, .. } => args.iter().all(is_row_independent_expr),
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_ref()
+                .map(|e| is_row_independent_expr(e))
+                .unwrap_or(true)
+                && when_clauses.iter().all(|(cond, value)| {
+                    is_row_independent_expr(cond) && is_row_independent_expr(value)
+                })
+                && else_clause
+                    .as_ref()
+                    .map(|e| is_row_independent_expr(e))
+                    .unwrap_or(true)
+        }
+        Expr::Cast { expr, .. } => is_row_independent_expr(expr),
+        Expr::AggregateFunc { arg, .. } => arg
+            .as_ref()
+            .map(|e| is_row_independent_expr(e))
+            .unwrap_or(true),
+        Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::IntLiteral(_)
+        | Expr::FloatLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BlobLiteral(_)
+        | Expr::Null
+        | Expr::DefaultValue => true,
+    }
+}
+
 fn matches_where_with_fts(
     where_clause: &Option<Expr>,
     table_def: &TableDef,
@@ -5465,6 +5641,209 @@ mod tests {
     }
 
     #[test]
+    fn test_update_pk_seek_rechecks_full_where_clause() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "UPDATE t SET name = 'Alicia' WHERE id = 1 AND name = 'Bob'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 0);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows[0].get("name"), Some(&Value::Varchar("Alice".into())));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_update_uses_index_seek_for_indexed_predicate() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR, age BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE INDEX idx_name ON t (name)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice', 20)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, 'Bob', 30)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'Bob', 40)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "UPDATE t SET age = age + 1 WHERE name = 'Bob'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute(
+            "SELECT id, age FROM t ORDER BY id ASC",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].get("age"), Some(&Value::Integer(20)));
+            assert_eq!(rows[1].get("age"), Some(&Value::Integer(31)));
+            assert_eq!(rows[2].get("age"), Some(&Value::Integer(41)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_update_pk_row_dependent_predicate_falls_back_to_scan() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, other_id BIGINT, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (1, 1, 'A')", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (2, 1, 'B')", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (3, 3, 'C')", &mut pager, &mut catalog).unwrap();
+
+        let result = execute(
+            "UPDATE t SET name = 'Z' WHERE id = other_id",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute(
+            "SELECT id, name FROM t ORDER BY id ASC",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows[0].get("name"), Some(&Value::Varchar("Z".into())));
+            assert_eq!(rows[1].get("name"), Some(&Value::Varchar("B".into())));
+            assert_eq!(rows[2].get("name"), Some(&Value::Varchar("Z".into())));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_update_index_row_dependent_predicate_falls_back_to_scan() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR, alias VARCHAR, age BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE INDEX idx_name ON t (name)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'a', 'a', 10)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, 'b', 'a', 20)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'b', 'b', 30)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "UPDATE t SET age = age + 100 WHERE name = alias",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute(
+            "SELECT id, age FROM t ORDER BY id ASC",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows[0].get("age"), Some(&Value::Integer(110)));
+            assert_eq!(rows[1].get("age"), Some(&Value::Integer(20)));
+            assert_eq!(rows[2].get("age"), Some(&Value::Integer(130)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
     fn test_delete() {
         let (mut pager, mut catalog, _dir) = setup();
 
@@ -5488,6 +5867,98 @@ mod tests {
         if let ExecResult::Rows(rows) = result {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get("name"), Some(&Value::Varchar("Bob".into())));
+        }
+    }
+
+    #[test]
+    fn test_delete_uses_index_seek_for_indexed_predicate() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE INDEX idx_name ON t (name)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (2, 'Bob')", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (3, 'Bob')", &mut pager, &mut catalog).unwrap();
+
+        let result = execute("DELETE FROM t WHERE name = 'Bob'", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute("SELECT id FROM t ORDER BY id ASC", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("Expected rows");
+        }
+    }
+
+    #[test]
+    fn test_delete_row_dependent_predicate_falls_back_to_scan() {
+        let (mut pager, mut catalog, _dir) = setup();
+
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR, alias VARCHAR)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE INDEX idx_name ON t (name)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'a', 'a')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (2, 'b', 'a')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (3, 'b', 'b')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute("DELETE FROM t WHERE name = alias", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::RowsAffected(n) = result {
+            assert_eq!(n, 2);
+        } else {
+            panic!("Expected RowsAffected");
+        }
+
+        let result = execute("SELECT id FROM t ORDER BY id ASC", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(2)));
+        } else {
+            panic!("Expected rows");
         }
     }
 

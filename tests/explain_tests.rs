@@ -133,3 +133,52 @@ fn test_explain_full_scan_with_where() {
     assert_eq!(row[3].1, Value::Varchar("ALL".to_string())); // full scan, no index on name
     assert_eq!(row[5].1, Value::Varchar("Using where".to_string()));
 }
+
+#[test]
+fn test_explain_update_pk_seek() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN UPDATE t SET name = 'x' WHERE id = 1",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row[1].1, Value::Varchar("UPDATE".to_string()));
+    assert_eq!(row[3].1, Value::Varchar("const".to_string()));
+    assert_eq!(row[4].1, Value::Varchar("PRIMARY".to_string()));
+}
+
+#[test]
+fn test_explain_delete_index_seek() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_name ON t(name)", &mut pager, &mut catalog).unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN DELETE FROM t WHERE name = 'Bob'",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row[1].1, Value::Varchar("DELETE".to_string()));
+    assert_eq!(row[3].1, Value::Varchar("ref".to_string()));
+    assert_eq!(row[4].1, Value::Varchar("idx_name".to_string()));
+}

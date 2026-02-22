@@ -1188,4 +1188,39 @@ mod tests {
             panic!("Expected rows");
         }
     }
+
+    #[test]
+    fn test_explain_shows_fullscan_for_nocase_index_seek_predicate() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR COLLATE nocase)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("CREATE INDEX idx_name ON t(name)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'Alice')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let result = execute(
+            "EXPLAIN SELECT id FROM t WHERE name = 'alice'",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("type"),
+                Some(&Value::Varchar("ALL".to_string()))
+            );
+            assert_eq!(rows[0].get("key"), Some(&Value::Null));
+        } else {
+            panic!("Expected rows");
+        }
+    }
 }

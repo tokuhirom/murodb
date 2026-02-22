@@ -41,12 +41,17 @@ pub(super) fn exec_explain(
         .map(|idx| (idx.name.clone(), idx.column_names.clone()))
         .collect();
 
-    let plan = plan_select(
+    let mut plan = plan_select(
         &table_name,
         &table_def.pk_columns,
         &index_columns,
         where_clause,
     );
+    if plan_requires_collation_full_scan(&plan, &table_def) {
+        plan = Plan::FullScan {
+            table_name: table_name.clone(),
+        };
+    }
     let estimated_rows = estimate_plan_rows(&plan, &table_def, &indexes, pager)?;
     let estimated_cost = plan_cost_hint(&plan) as i64;
 

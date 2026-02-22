@@ -18,7 +18,7 @@ If you return after weeks/months, start from these questions:
 The internals section now follows this order:
 
 1. [Architecture](architecture.md): module map and end-to-end data flow.
-2. [Files, WAL, and Locking](files-and-locking.md): `.db` / `.wal` / `.lock` contract.
+2. [Files, WAL, and Locking](files-and-locking.md): main file / `.wal` / `.lock` contract.
 3. [B-tree](btree.md): in-page node format and mutation/scan algorithms.
 4. [Query Planning & Execution](query-planning.md): plan selection and execution mapping.
 5. [Cryptography](cryptography.md): encryption/KDF details and rationale.

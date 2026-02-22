@@ -31,11 +31,58 @@ See [Cryptography](cryptography.md) for rationale and full details.
 
 Freed pages are tracked in a freelist for reuse:
 
-- Stored as a multi-page chain on disk
-- Each page has the format: `[magic "FLMP": 4B] [next_freelist_page_id: u64] [count: u64] [page_id entries: u64...]`
-- `next_freelist_page_id = 0` indicates end of chain
-- The header's `freelist_page_id` points to the first page in the chain
-- Legacy single-page format (without `FLMP` magic) is supported for backward compatibility
+## Freelist In-Memory Model
+
+Implementation (`src/storage/freelist.rs`) uses `Vec<PageId>`:
+
+- `allocate()` pops from tail (LIFO reuse)
+- `free(page_id)` pushes if not already present
+- duplicate `free` is treated as double-free and rejected
+- `undo_last_free()` exists for speculative commit-time calculations
+
+## Freelist On-Disk Format
+
+Primary format is a multi-page chain.
+
+Per freelist page data area:
+
+`[magic "FLMP":4][next_page_id:u64][count:u64][entries:u64...]`
+
+Facts:
+
+- `ENTRIES_PER_FREELIST_PAGE = 507` for 4096-byte pages with 14-byte page header
+- `next_page_id = 0` marks chain end
+- DB header field `freelist_page_id` points to chain head
+
+Backward compatibility:
+
+- legacy single-page format (count + entries, without `FLMP`) is still readable
+
+## Commit-Time Freelist Handling
+
+During `Transaction::commit` (`src/tx/transaction.rs`):
+
+1. Build a speculative freelist snapshot (without permanent mutation).
+2. Determine how many freelist pages are needed.
+3. Reuse existing freelist head page when possible, allocate more page IDs if needed.
+4. Serialize freelist pages and emit them as WAL `PagePut`.
+5. Emit `MetaUpdate` with new `freelist_page_id`.
+6. After `wal.sync()` succeeds, apply freed pages to in-memory freelist.
+
+This ordering avoids freelist state leaks when commit fails before WAL durability.
+
+## Open-Time Freelist Loading and Sanitize
+
+At open/refresh (`Pager::reload_freelist_from_disk`):
+
+1. Read freelist chain from `freelist_page_id`.
+2. For multi-page chain, detect cycles and out-of-range next pointers.
+3. Deserialize entries.
+4. Run `sanitize(page_count)` to remove:
+   - out-of-range entries (`pid >= page_count`)
+   - duplicate entries
+
+Sanitization results are exposed as diagnostics and warning counters.
 
 ## Data File Header
 
@@ -50,4 +97,4 @@ Magic (8B) + Version (4B) + Salt (16B) + CatalogRoot (8B)
 - CRC32 covers bytes `0..72`
 - `freelist_page_id` persists the freelist root across restarts
 
-See [Files, WAL, and Locking](files-and-locking.md) for `.db` / `.wal` / `.lock` overview.
+See [Files, WAL, and Locking](files-and-locking.md) for main file / `.wal` / `.lock` overview.

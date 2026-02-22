@@ -4,13 +4,18 @@ This chapter defines the on-disk files and lock behavior.
 
 ## File Set
 
-For `mydb.db`, MuroDB uses:
+If you open database path `<db_path>`, MuroDB uses:
 
-- `mydb.db`: main database file (header + pages)
-- `mydb.wal`: write-ahead log
-- `mydb.lock`: lock file for cross-process coordination
+- `<db_path>`: main database file (header + pages)
+- `<db_path>.wal`: write-ahead log
+- `<db_path>.lock`: lock file for cross-process coordination
 
-## `.db` Main File Layout
+Example:
+
+- if `<db_path> = mydata`, files are `mydata`, `mydata.wal`, `mydata.lock`
+- if `<db_path> = mydb.db`, files are `mydb.db`, `mydb.wal`, `mydb.lock`
+
+## Main DB File Layout
 
 The main file starts with a 76-byte plaintext header (`src/storage/pager/mod.rs`):
 
@@ -41,7 +46,7 @@ Durability boundary:
 
 ## `.lock` File Semantics
 
-`mydb.lock` is created by `LockManager::new` (`src/concurrency/mod.rs`).
+`<db_path>.lock` is created by `LockManager::new` (`src/concurrency/mod.rs`).
 
 - It is not a structured metadata file.
 - Its payload is not interpreted by MuroDB.
@@ -69,8 +74,8 @@ Important granularity note:
 When no explicit transaction is active, session execution calls `pager.refresh_from_disk_if_changed()` and reloads catalog metadata when header fields changed.
 This is how a process observes committed changes from other processes.
 
-## Why this split (`.db` + `.wal` + `.lock`)?
+## Why this split (main file + `.wal` + `.lock`)?
 
-- `.db`: stable state and efficient reads.
+- main DB file: stable state and efficient reads.
 - `.wal`: sequential append for crash-safe commit protocol.
 - `.lock`: avoids embedding lock bytes into data format and delegates arbitration to OS advisory locks.

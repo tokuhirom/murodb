@@ -58,4 +58,4 @@ If your goal is "reconstruct internals after a long break", read in this order:
   - `Database::execute` acquires an exclusive lock for general SQL execution.
   - CLI routes read-only statements to `query` unless an explicit transaction is active.
 
-For on-disk file contracts (`.db` / `.wal` / `.lock`), see [Files, WAL, and Locking](files-and-locking.md).
+For on-disk file contracts (main DB file / `.wal` / `.lock`), see [Files, WAL, and Locking](files-and-locking.md).

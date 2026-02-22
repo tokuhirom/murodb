@@ -3,7 +3,7 @@
 /// Uses a B-tree to store postings:
 ///   legacy key = term_id (HMAC-SHA256 of bigram), value = serialized PostingList
 ///   segmented keys = "__segmeta__"+term_id + "__segdata__"+term_id+segment_idx
-/// Posting lists are segmented to keep each value below page-size limits.
+/// Large segment payloads spill to overflow page chains via "__segovf__" keys.
 ///
 /// Also stores statistics in the same B-tree:
 ///   key = b"__stats__"
@@ -13,7 +13,7 @@ use crate::crypto::hmac_util::hmac_term_id;
 use crate::error::Result;
 use crate::fts::postings::{Posting, PostingList};
 use crate::fts::tokenizer::tokenize_bigram;
-use crate::storage::page::PageId;
+use crate::storage::page::{Page, PageId, PAGE_HEADER_SIZE, PAGE_SIZE};
 use crate::storage::page_store::PageStore;
 
 /// FTS index handle.
@@ -61,12 +61,25 @@ const SEG_META_PREFIX: &[u8] = b"__segmeta__";
 const SEG_GEN_PREFIX: &[u8] = b"__seggen__";
 const SEG_DATA_PREFIX: &[u8] = b"__segdata__";
 const SEG_DATA_V2_PREFIX: &[u8] = b"__segv2__";
+const SEG_OVERFLOW_V2_PREFIX: &[u8] = b"__segovf__";
 const SEG_META_V2_VERSION: u8 = 2;
 const SEG_GC_HEAD_KEY: &[u8] = b"__seggc_head__";
 const SEG_GC_TAIL_KEY: &[u8] = b"__seggc_tail__";
 const SEG_GC_TASK_PREFIX: &[u8] = b"__seggc__";
-// Keep payloads comfortably below page-cell limits even with key/cell overhead.
-const MAX_SEGMENT_PAYLOAD_BYTES: usize = 3000;
+// Keep inline payloads comfortably below page-cell limits even with key/cell overhead.
+const MAX_SEGMENT_INLINE_BYTES: usize = 3000;
+// Logical segment size target before falling back to overflow pages.
+const MAX_SEGMENT_PAYLOAD_BYTES: usize = 64 * 1024;
+const OVERFLOW_PAGE_MAGIC: &[u8; 4] = b"OFG1";
+const OVERFLOW_PAGE_META_BYTES: usize = 4 + 8 + 2; // magic + next_page_id + chunk_len
+const OVERFLOW_PAGE_CHUNK_BYTES: usize = PAGE_SIZE - PAGE_HEADER_SIZE - OVERFLOW_PAGE_META_BYTES;
+
+#[derive(Clone, Copy)]
+struct SegmentOverflowRef {
+    first_page_id: PageId,
+    total_len: u32,
+    page_count: u32,
+}
 
 #[derive(Clone, Copy)]
 enum SegmentKeyFormat {
@@ -276,10 +289,7 @@ impl FtsIndex {
                 SegmentMeta::V2 { seg_count, .. } => seg_count,
             };
             for seg_idx in 0..seg_count {
-                let key = segment_payload_key(tid, meta, seg_idx)?;
-                let data = self.btree.search(pager, &key)?.ok_or_else(|| {
-                    crate::error::MuroError::Corruption("missing segmented posting payload".into())
-                })?;
+                let data = self.load_segment_payload(pager, tid, meta, seg_idx)?;
                 let segment = PostingList::deserialize(&data).ok_or_else(|| {
                     crate::error::MuroError::Corruption("failed to deserialize posting list".into())
                 })?;
@@ -335,8 +345,7 @@ impl FtsIndex {
             let seg_idx = u32::try_from(idx).map_err(|_| {
                 crate::error::MuroError::Execution("segment index exceeds u32 range".into())
             })?;
-            let key = seg_data_key_v2(tid, new_generation, seg_idx);
-            self.btree.insert(pager, &key, &seg_pl.serialize())?;
+            self.store_segment_payload(pager, tid, new_generation, seg_idx, &seg_pl.serialize())?;
         }
 
         let mut meta_buf = Vec::with_capacity(9);
@@ -383,9 +392,75 @@ impl FtsIndex {
             SegmentMeta::V2 { seg_count, .. } => seg_count,
         };
         for seg_idx in 0..seg_count {
-            let key = segment_payload_key(tid, meta, seg_idx)?;
-            if self.btree.search(pager, &key)?.is_some() {
-                self.btree.delete(pager, &key)?;
+            self.delete_segment_payload(pager, tid, meta, seg_idx)?;
+        }
+        Ok(())
+    }
+
+    fn load_segment_payload(
+        &self,
+        pager: &mut impl PageStore,
+        tid: &[u8; 32],
+        meta: SegmentMeta,
+        seg_idx: u32,
+    ) -> Result<Vec<u8>> {
+        let key = segment_payload_key(tid, meta, seg_idx)?;
+        if let Some(data) = self.btree.search(pager, &key)? {
+            return Ok(data);
+        }
+
+        if let SegmentMeta::V2 { generation, .. } = meta {
+            let overflow_key = seg_overflow_key_v2(tid, generation, seg_idx);
+            if let Some(raw_ref) = self.btree.search(pager, &overflow_key)? {
+                let overflow_ref = decode_overflow_ref(&raw_ref)?;
+                return read_overflow_chain(pager, overflow_ref);
+            }
+        }
+
+        Err(crate::error::MuroError::Corruption(
+            "missing segmented posting payload".into(),
+        ))
+    }
+
+    fn store_segment_payload(
+        &mut self,
+        pager: &mut impl PageStore,
+        tid: &[u8; 32],
+        generation: u32,
+        seg_idx: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let data_key = seg_data_key_v2(tid, generation, seg_idx);
+        let overflow_key = seg_overflow_key_v2(tid, generation, seg_idx);
+        if payload.len() <= MAX_SEGMENT_INLINE_BYTES {
+            self.btree.insert(pager, &data_key, payload)?;
+            return Ok(());
+        }
+
+        let overflow_ref = write_overflow_chain(pager, payload)?;
+        self.btree
+            .insert(pager, &overflow_key, &encode_overflow_ref(overflow_ref))?;
+        Ok(())
+    }
+
+    fn delete_segment_payload(
+        &mut self,
+        pager: &mut impl PageStore,
+        tid: &[u8; 32],
+        meta: SegmentMeta,
+        seg_idx: u32,
+    ) -> Result<()> {
+        let key = segment_payload_key(tid, meta, seg_idx)?;
+        if self.btree.search(pager, &key)?.is_some() {
+            self.btree.delete(pager, &key)?;
+        }
+
+        if let SegmentMeta::V2 { generation, .. } = meta {
+            let overflow_key = seg_overflow_key_v2(tid, generation, seg_idx);
+            if let Some(raw_ref) = self.btree.search(pager, &overflow_key)? {
+                let overflow_ref = decode_overflow_ref(&raw_ref)?;
+                free_overflow_chain(pager, overflow_ref)?;
+                self.btree.delete(pager, &overflow_key)?;
             }
         }
         Ok(())
@@ -578,6 +653,15 @@ fn seg_data_key_v2(tid: &[u8; 32], generation: u32, idx: u32) -> Vec<u8> {
     key
 }
 
+fn seg_overflow_key_v2(tid: &[u8; 32], generation: u32, idx: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SEG_OVERFLOW_V2_PREFIX.len() + tid.len() + 8);
+    key.extend_from_slice(SEG_OVERFLOW_V2_PREFIX);
+    key.extend_from_slice(tid);
+    key.extend_from_slice(&generation.to_le_bytes());
+    key.extend_from_slice(&idx.to_le_bytes());
+    key
+}
+
 fn seg_gc_task_key(seq: u64) -> Vec<u8> {
     let mut key = Vec::with_capacity(SEG_GC_TASK_PREFIX.len() + 8);
     key.extend_from_slice(SEG_GC_TASK_PREFIX);
@@ -625,6 +709,171 @@ fn decode_segment_meta(meta: &[u8]) -> Result<SegmentMeta> {
             "invalid segmented posting metadata".into(),
         )),
     }
+}
+
+fn encode_overflow_ref(overflow_ref: SegmentOverflowRef) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&overflow_ref.first_page_id.to_le_bytes());
+    out[8..12].copy_from_slice(&overflow_ref.total_len.to_le_bytes());
+    out[12..16].copy_from_slice(&overflow_ref.page_count.to_le_bytes());
+    out
+}
+
+fn decode_overflow_ref(raw: &[u8]) -> Result<SegmentOverflowRef> {
+    if raw.len() != 16 {
+        return Err(crate::error::MuroError::Corruption(
+            "invalid overflow reference payload".into(),
+        ));
+    }
+    let first_page_id = u64::from_le_bytes([
+        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+    ]);
+    let total_len = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+    let page_count = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
+    if page_count == 0 {
+        return Err(crate::error::MuroError::Corruption(
+            "overflow reference page_count must be > 0".into(),
+        ));
+    }
+    Ok(SegmentOverflowRef {
+        first_page_id,
+        total_len,
+        page_count,
+    })
+}
+
+fn write_overflow_chain(pager: &mut impl PageStore, payload: &[u8]) -> Result<SegmentOverflowRef> {
+    if payload.is_empty() {
+        return Err(crate::error::MuroError::Execution(
+            "overflow payload cannot be empty".into(),
+        ));
+    }
+    let page_count_usize = payload.len().div_ceil(OVERFLOW_PAGE_CHUNK_BYTES);
+    let page_count = u32::try_from(page_count_usize)
+        .map_err(|_| crate::error::MuroError::Execution("overflow chain too long".into()))?;
+    let total_len = u32::try_from(payload.len())
+        .map_err(|_| crate::error::MuroError::Execution("overflow payload too large".into()))?;
+
+    let mut page_ids = Vec::with_capacity(page_count_usize);
+    for _ in 0..page_count_usize {
+        let page = pager.allocate_page()?;
+        page_ids.push(page.page_id());
+    }
+
+    for (i, &page_id) in page_ids.iter().enumerate() {
+        let next_page_id = page_ids.get(i + 1).copied().unwrap_or(0);
+        let mut page = Page::new(page_id);
+        let start = i * OVERFLOW_PAGE_CHUNK_BYTES;
+        let end = std::cmp::min(start + OVERFLOW_PAGE_CHUNK_BYTES, payload.len());
+        let chunk = &payload[start..end];
+        let chunk_len = u16::try_from(chunk.len())
+            .map_err(|_| crate::error::MuroError::Execution("overflow chunk too large".into()))?;
+
+        let base = PAGE_HEADER_SIZE;
+        page.data[base..base + 4].copy_from_slice(OVERFLOW_PAGE_MAGIC);
+        page.data[base + 4..base + 12].copy_from_slice(&next_page_id.to_le_bytes());
+        page.data[base + 12..base + 14].copy_from_slice(&chunk_len.to_le_bytes());
+        page.data[base + 14..base + 14 + chunk.len()].copy_from_slice(chunk);
+        pager.write_page(&page)?;
+    }
+
+    Ok(SegmentOverflowRef {
+        first_page_id: page_ids[0],
+        total_len,
+        page_count,
+    })
+}
+
+fn read_overflow_chain(
+    pager: &mut impl PageStore,
+    overflow_ref: SegmentOverflowRef,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(overflow_ref.total_len as usize);
+    let mut visited = std::collections::HashSet::new();
+    let mut current = overflow_ref.first_page_id;
+    let mut read_pages = 0u32;
+
+    while current != 0 {
+        if !visited.insert(current) {
+            return Err(crate::error::MuroError::Corruption(
+                "overflow chain cycle detected".into(),
+            ));
+        }
+        let page = pager.read_page(current)?;
+        let base = PAGE_HEADER_SIZE;
+        if &page.data[base..base + 4] != OVERFLOW_PAGE_MAGIC {
+            return Err(crate::error::MuroError::Corruption(
+                "invalid overflow page magic".into(),
+            ));
+        }
+        let next_page_id = u64::from_le_bytes([
+            page.data[base + 4],
+            page.data[base + 5],
+            page.data[base + 6],
+            page.data[base + 7],
+            page.data[base + 8],
+            page.data[base + 9],
+            page.data[base + 10],
+            page.data[base + 11],
+        ]);
+        let chunk_len = u16::from_le_bytes([page.data[base + 12], page.data[base + 13]]) as usize;
+        if chunk_len > OVERFLOW_PAGE_CHUNK_BYTES {
+            return Err(crate::error::MuroError::Corruption(
+                "overflow chunk length exceeds page capacity".into(),
+            ));
+        }
+        out.extend_from_slice(&page.data[base + 14..base + 14 + chunk_len]);
+        read_pages = read_pages.saturating_add(1);
+        current = next_page_id;
+    }
+
+    if read_pages != overflow_ref.page_count || out.len() != overflow_ref.total_len as usize {
+        return Err(crate::error::MuroError::Corruption(
+            "overflow chain length mismatch".into(),
+        ));
+    }
+    Ok(out)
+}
+
+fn free_overflow_chain(pager: &mut impl PageStore, overflow_ref: SegmentOverflowRef) -> Result<()> {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = overflow_ref.first_page_id;
+    let mut freed_pages = 0u32;
+
+    while current != 0 {
+        if !visited.insert(current) {
+            return Err(crate::error::MuroError::Corruption(
+                "overflow chain cycle detected while free".into(),
+            ));
+        }
+        let page = pager.read_page(current)?;
+        let base = PAGE_HEADER_SIZE;
+        if &page.data[base..base + 4] != OVERFLOW_PAGE_MAGIC {
+            return Err(crate::error::MuroError::Corruption(
+                "invalid overflow page magic while free".into(),
+            ));
+        }
+        let next_page_id = u64::from_le_bytes([
+            page.data[base + 4],
+            page.data[base + 5],
+            page.data[base + 6],
+            page.data[base + 7],
+            page.data[base + 8],
+            page.data[base + 9],
+            page.data[base + 10],
+            page.data[base + 11],
+        ]);
+        pager.free_page(current);
+        freed_pages = freed_pages.saturating_add(1);
+        current = next_page_id;
+    }
+
+    if freed_pages != overflow_ref.page_count {
+        return Err(crate::error::MuroError::Corruption(
+            "overflow chain page_count mismatch while free".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn encode_segment_gc_task(task: SegmentGcTask) -> Vec<u8> {
@@ -710,6 +959,24 @@ mod tests {
 
     fn term_key() -> [u8; 32] {
         [0x55u8; 32]
+    }
+
+    fn segment_payload_exists(
+        idx: &mut FtsIndex,
+        pager: &mut Pager,
+        tid: &[u8; 32],
+        generation: u32,
+        seg_idx: u32,
+    ) -> bool {
+        idx.btree
+            .search(pager, &seg_data_key_v2(tid, generation, seg_idx))
+            .unwrap()
+            .is_some()
+            || idx
+                .btree
+                .search(pager, &seg_overflow_key_v2(tid, generation, seg_idx))
+                .unwrap()
+                .is_some()
     }
 
     #[test]
@@ -822,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_postings_splits_large_single_doc_positions_without_pageoverflow() {
+    fn test_store_postings_spills_large_single_doc_positions_to_overflow_pages() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -844,7 +1111,25 @@ mod tests {
             .unwrap()
             .unwrap();
         match decode_segment_meta(&meta).unwrap() {
-            SegmentMeta::V2 { seg_count, .. } => assert!(seg_count > 1),
+            SegmentMeta::V2 {
+                generation,
+                seg_count,
+            } => {
+                assert_eq!(seg_count, 1);
+                assert!(idx
+                    .btree
+                    .search(&mut pager, &seg_data_key_v2(&tid, generation, 0))
+                    .unwrap()
+                    .is_none());
+                let overflow_ref = decode_overflow_ref(
+                    &idx.btree
+                        .search(&mut pager, &seg_overflow_key_v2(&tid, generation, 0))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(overflow_ref.page_count >= 2);
+            }
             SegmentMeta::V1 { .. } => panic!("expected v2 segment metadata"),
         }
     }
@@ -964,24 +1249,12 @@ mod tests {
         pl2.add(2, vec![1]);
         idx.store_postings_by_tid(&mut pager, &tid, &pl2).unwrap();
 
-        assert!(idx
-            .btree
-            .search(&mut pager, &seg_data_key_v2(&tid, 1, 0))
-            .unwrap()
-            .is_some());
+        assert!(segment_payload_exists(&mut idx, &mut pager, &tid, 1, 0));
 
         let processed = idx.vacuum_stale_segments(&mut pager, 16).unwrap();
         assert!(processed >= 1);
-        assert!(idx
-            .btree
-            .search(&mut pager, &seg_data_key_v2(&tid, 1, 0))
-            .unwrap()
-            .is_none());
-        assert!(idx
-            .btree
-            .search(&mut pager, &seg_data_key_v2(&tid, 2, 0))
-            .unwrap()
-            .is_some());
+        assert!(!segment_payload_exists(&mut idx, &mut pager, &tid, 1, 0));
+        assert!(segment_payload_exists(&mut idx, &mut pager, &tid, 2, 0));
     }
 
     #[test]

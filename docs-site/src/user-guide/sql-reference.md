@@ -65,23 +65,6 @@ CREATE TABLE t (
 );
 ```
 
-Collation (text columns only):
-
-```sql
-CREATE TABLE users (
-  id BIGINT PRIMARY KEY,
-  name VARCHAR COLLATE binary,
-  nickname VARCHAR COLLATE nocase
-);
-```
-
-- If `COLLATE` is omitted, the default behavior is `binary`.
-- Supported collations:
-  - `binary`: byte-wise comparison.
-  - `nocase`: ASCII case-insensitive comparison.
-- `COLLATE` is valid only for `VARCHAR` / `TEXT`.
-- Current scope: collation is applied to `ORDER BY` on column references. Other paths (`WHERE` comparison, `LIKE`, index key ordering) are not collation-aware yet.
-
 ### CREATE INDEX
 
 ```sql
@@ -122,14 +105,12 @@ DROP INDEX IF EXISTS idx_email;
 -- Add a new column (O(1), no row rewrite)
 ALTER TABLE t ADD COLUMN email VARCHAR;
 ALTER TABLE t ADD age INT DEFAULT 0;
-ALTER TABLE t ADD COLUMN nickname VARCHAR COLLATE nocase;
 
 -- Drop a column (full table rewrite)
 ALTER TABLE t DROP COLUMN age;
 
 -- Modify column type or constraints (full rewrite if type changes)
 ALTER TABLE t MODIFY COLUMN name VARCHAR(255) NOT NULL;
-ALTER TABLE t MODIFY COLUMN name VARCHAR(255) COLLATE binary;
 ALTER TABLE t MODIFY name TEXT;
 
 -- Rename and optionally change a column (CHANGE COLUMN)

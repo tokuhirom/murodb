@@ -298,3 +298,53 @@ fn test_explain_does_not_use_range_for_fts_dependent_bound() {
     let row = &rows[0];
     assert_eq!(row[3].1, Value::Varchar("ALL".to_string()));
 }
+
+#[test]
+fn test_explain_range_rows_improve_after_analyze_with_numeric_bounds() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_a ON t(a)", &mut pager, &mut catalog).unwrap();
+
+    for i in 1..=1000 {
+        execute(
+            &format!("INSERT INTO t (id, a) VALUES ({}, {})", i, i),
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    let before = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110",
+        &mut pager,
+        &mut catalog,
+    );
+    let before_row = &before[0];
+    assert_eq!(before_row[3].1, Value::Varchar("range".to_string()));
+    let before_rows = match before_row[5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    execute("ANALYZE TABLE t", &mut pager, &mut catalog).unwrap();
+    let after = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110",
+        &mut pager,
+        &mut catalog,
+    );
+    let after_row = &after[0];
+    assert_eq!(after_row[3].1, Value::Varchar("range".to_string()));
+    let after_rows = match after_row[5].1 {
+        Value::Integer(n) => n,
+        ref other => panic!("expected integer rows estimate, got {:?}", other),
+    };
+
+    assert!(after_rows < before_rows);
+    assert!(after_rows <= 20);
+}

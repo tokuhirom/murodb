@@ -14,6 +14,8 @@ pub struct IndexPlanStat {
     pub column_names: Vec<String>,
     pub is_unique: bool,
     pub stats_distinct_keys: u64,
+    pub stats_num_min: Option<i64>,
+    pub stats_num_max: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,10 +119,20 @@ pub fn estimate_plan_rows_hint(
             let index = index_stats.iter().find(|idx| idx.name == *index_name);
             let prefix_rows =
                 estimate_index_seek_rows(table_rows, prefix_key_exprs.len(), index, false);
-            let ranged_rows = match (lower.is_some(), upper.is_some()) {
-                (true, true) => div_ceil(prefix_rows, 5),
-                (true, false) | (false, true) => div_ceil(prefix_rows, 2),
-                (false, false) => prefix_rows,
+            let ranged_rows = if prefix_key_exprs.is_empty() {
+                estimate_numeric_range_rows(prefix_rows, lower, upper, index).unwrap_or_else(|| {
+                    match (lower.is_some(), upper.is_some()) {
+                        (true, true) => div_ceil(prefix_rows, 5),
+                        (true, false) | (false, true) => div_ceil(prefix_rows, 2),
+                        (false, false) => prefix_rows,
+                    }
+                })
+            } else {
+                match (lower.is_some(), upper.is_some()) {
+                    (true, true) => div_ceil(prefix_rows, 5),
+                    (true, false) | (false, true) => div_ceil(prefix_rows, 2),
+                    (false, false) => prefix_rows,
+                }
             };
             ranged_rows.max(1).min(table_rows)
         }
@@ -345,6 +357,52 @@ fn div_ceil(num: u64, den: u64) -> u64 {
         return num;
     }
     num.saturating_add(den - 1) / den
+}
+
+fn estimate_numeric_range_rows(
+    prefix_rows: u64,
+    lower: &Option<(Box<Expr>, bool)>,
+    upper: &Option<(Box<Expr>, bool)>,
+    index: Option<&IndexPlanStat>,
+) -> Option<u64> {
+    let idx = index?;
+    let min_v = idx.stats_num_min?;
+    let max_v = idx.stats_num_max?;
+    if min_v > max_v {
+        return None;
+    }
+
+    let mut lo = min_v;
+    let mut hi = max_v;
+    if let Some((expr, inclusive)) = lower {
+        let v = const_i64(expr)?;
+        lo = if *inclusive { v } else { v.saturating_add(1) };
+    }
+    if let Some((expr, inclusive)) = upper {
+        let v = const_i64(expr)?;
+        hi = if *inclusive { v } else { v.saturating_sub(1) };
+    }
+
+    if hi < lo {
+        return Some(1);
+    }
+
+    let clamped_lo = lo.max(min_v);
+    let clamped_hi = hi.min(max_v);
+    if clamped_hi < clamped_lo {
+        return Some(1);
+    }
+
+    let covered = (clamped_hi as i128 - clamped_lo as i128 + 1).max(0) as u64;
+    let total = (max_v as i128 - min_v as i128 + 1).max(1) as u64;
+    Some(div_ceil(prefix_rows.saturating_mul(covered), total).max(1))
+}
+
+fn const_i64(expr: &Expr) -> Option<i64> {
+    match eval_expr(expr, &|_| None).ok()? {
+        crate::types::Value::Integer(n) => Some(n),
+        _ => None,
+    }
 }
 
 /// Extract FTS match from expression tree.

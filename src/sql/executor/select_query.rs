@@ -177,6 +177,8 @@ pub(super) fn exec_select(
             column_names: idx.column_names.clone(),
             is_unique: idx.is_unique,
             stats_distinct_keys: idx.stats_distinct_keys,
+            stats_num_min: idx.stats_num_bounds_known.then_some(idx.stats_num_min),
+            stats_num_max: idx.stats_num_bounds_known.then_some(idx.stats_num_max),
         })
         .collect();
 

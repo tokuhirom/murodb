@@ -16,6 +16,12 @@ pub struct IndexDef {
     pub btree_root: PageId,
     /// Last analyzed distinct key count (0 means unknown / not analyzed).
     pub stats_distinct_keys: u64,
+    /// Single-column numeric index lower bound captured by ANALYZE TABLE.
+    pub stats_num_min: i64,
+    /// Single-column numeric index upper bound captured by ANALYZE TABLE.
+    pub stats_num_max: i64,
+    /// Whether numeric bounds are known (from ANALYZE TABLE).
+    pub stats_num_bounds_known: bool,
     /// FULLTEXT-only: whether stop-ngram filtering is enabled in NATURAL mode.
     pub fts_stop_filter: bool,
     /// FULLTEXT-only: df/total_docs threshold in ppm (0..=1_000_000).
@@ -64,6 +70,10 @@ impl IndexDef {
         }
         // stats_distinct_keys
         buf.extend_from_slice(&self.stats_distinct_keys.to_le_bytes());
+        // numeric bounds stats (optional extension)
+        buf.push(if self.stats_num_bounds_known { 1 } else { 0 });
+        buf.extend_from_slice(&self.stats_num_min.to_le_bytes());
+        buf.extend_from_slice(&self.stats_num_max.to_le_bytes());
         // fts_stop_filter + fts_stop_df_ratio_ppm (optional extension)
         buf.push(if self.fts_stop_filter { 1 } else { 0 });
         buf.extend_from_slice(&self.fts_stop_df_ratio_ppm.to_le_bytes());
@@ -167,6 +177,29 @@ impl IndexDef {
             0
         };
 
+        // numeric bounds stats (optional extension)
+        let stats_num_bounds_known = if data.len() > offset {
+            let b = data[offset];
+            offset += 1;
+            b != 0
+        } else {
+            false
+        };
+        let stats_num_min = if data.len() >= offset + 8 {
+            let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            n
+        } else {
+            0
+        };
+        let stats_num_max = if data.len() >= offset + 8 {
+            let n = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            n
+        } else {
+            0
+        };
+
         // FULLTEXT stop-ngram settings (optional extension)
         let fts_stop_filter = if data.len() > offset {
             let b = data[offset];
@@ -192,6 +225,9 @@ impl IndexDef {
                 is_unique,
                 btree_root,
                 stats_distinct_keys,
+                stats_num_min,
+                stats_num_max,
+                stats_num_bounds_known,
                 fts_stop_filter,
                 fts_stop_df_ratio_ppm,
             },
@@ -214,6 +250,9 @@ mod tests {
             is_unique: true,
             btree_root: 42,
             stats_distinct_keys: 0,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -237,6 +276,9 @@ mod tests {
             is_unique: false,
             btree_root: 99,
             stats_distinct_keys: 0,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };

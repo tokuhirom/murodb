@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn exec_create_table(
     ct: &CreateTable,
@@ -144,6 +144,9 @@ pub(super) fn exec_create_table(
             is_unique: true,
             btree_root: idx_btree.root_page_id(),
             stats_distinct_keys: 0,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };
@@ -162,6 +165,9 @@ pub(super) fn exec_create_table(
                 is_unique: true,
                 btree_root: idx_btree.root_page_id(),
                 stats_distinct_keys: 0,
+                stats_num_min: 0,
+                stats_num_max: 0,
+                stats_num_bounds_known: false,
                 fts_stop_filter: false,
                 fts_stop_df_ratio_ppm: 0,
             };
@@ -317,6 +323,9 @@ pub(super) fn exec_create_index(
         is_unique: ci.is_unique,
         btree_root: idx_btree_mut.root_page_id(),
         stats_distinct_keys: 0,
+        stats_num_min: 0,
+        stats_num_max: 0,
+        stats_num_bounds_known: false,
         fts_stop_filter: false,
         fts_stop_df_ratio_ppm: 0,
     };
@@ -404,6 +413,9 @@ pub(super) fn exec_create_fulltext_index(
         is_unique: false,
         btree_root: fts_root,
         stats_distinct_keys: 0,
+        stats_num_min: 0,
+        stats_num_max: 0,
+        stats_num_bounds_known: false,
         fts_stop_filter: fi.stop_filter,
         fts_stop_df_ratio_ppm: fi.stop_df_ratio_ppm,
     };
@@ -430,8 +442,55 @@ pub(super) fn exec_analyze_table(
     table_def.stats_row_count = row_count;
     catalog.update_table(pager, &table_def)?;
 
-    let indexes = catalog.get_indexes_for_table(pager, table_name)?;
-    for mut idx in indexes {
+    let mut indexes = catalog.get_indexes_for_table(pager, table_name)?;
+    let mut numeric_targets: HashMap<String, usize> = HashMap::new();
+    for idx in &indexes {
+        if idx.index_type != IndexType::BTree || idx.column_names.len() != 1 {
+            continue;
+        }
+        let col_name = &idx.column_names[0];
+        if let Some(col_idx) = table_def.column_index(col_name) {
+            if matches!(
+                table_def.columns[col_idx].data_type,
+                DataType::TinyInt
+                    | DataType::SmallInt
+                    | DataType::Int
+                    | DataType::BigInt
+                    | DataType::Date
+                    | DataType::DateTime
+                    | DataType::Timestamp
+            ) {
+                numeric_targets.insert(idx.name.clone(), col_idx);
+            }
+        }
+    }
+
+    let mut numeric_bounds: HashMap<String, (i64, i64)> = HashMap::new();
+    if !numeric_targets.is_empty() {
+        let data_btree = BTree::open(table_def.data_btree_root);
+        data_btree.scan(pager, |_k, row| {
+            let values =
+                deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
+            for (idx_name, col_idx) in &numeric_targets {
+                if let Some(Value::Integer(n)) = values.get(*col_idx) {
+                    numeric_bounds
+                        .entry(idx_name.clone())
+                        .and_modify(|(min_v, max_v)| {
+                            if *n < *min_v {
+                                *min_v = *n;
+                            }
+                            if *n > *max_v {
+                                *max_v = *n;
+                            }
+                        })
+                        .or_insert((*n, *n));
+                }
+            }
+            Ok(true)
+        })?;
+    }
+
+    for idx in &mut indexes {
         if idx.index_type != IndexType::BTree {
             continue;
         }
@@ -459,7 +518,16 @@ pub(super) fn exec_analyze_table(
         })?;
 
         idx.stats_distinct_keys = distinct_keys;
-        catalog.update_index(pager, &idx)?;
+        if let Some((min_v, max_v)) = numeric_bounds.get(&idx.name).copied() {
+            idx.stats_num_bounds_known = true;
+            idx.stats_num_min = min_v;
+            idx.stats_num_max = max_v;
+        } else {
+            idx.stats_num_bounds_known = false;
+            idx.stats_num_min = 0;
+            idx.stats_num_max = 0;
+        }
+        catalog.update_index(pager, idx)?;
     }
 
     Ok(ExecResult::Ok)

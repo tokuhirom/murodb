@@ -48,6 +48,25 @@ IF failed_checkpoints > 0 THEN ALERT
   message: "Checkpoint failures detected. WAL may be growing. Monitor WAL file size on disk."
 ```
 
+### deferred_checkpoints / checkpoint_pending_ops
+
+`deferred_checkpoints` is the number of transactions where checkpoint was intentionally skipped by policy.
+`checkpoint_pending_ops` is the current backlog since the last successful checkpoint.
+
+High `deferred_checkpoints` is expected with batch policies. Alert only when `checkpoint_pending_ops` keeps growing together with WAL size.
+
+### checkpoint_policy_*
+
+The active checkpoint policy is surfaced as:
+- `checkpoint_policy_tx_threshold`
+- `checkpoint_policy_wal_bytes_threshold`
+- `checkpoint_policy_interval_ms`
+
+Policy is configured via environment variables:
+- `MURODB_CHECKPOINT_TX_THRESHOLD` (default `1`, `0` disables tx-count trigger)
+- `MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD` (default `0`, disabled)
+- `MURODB_CHECKPOINT_INTERVAL_MS` (default `0`, disabled)
+
 ### freelist_sanitize_count
 
 **Alert threshold**: `> 0` (informational)

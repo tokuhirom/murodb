@@ -137,7 +137,13 @@ All index updates happen within the same transaction as the data update:
 
 ### WAL file size
 
-After successful commits and explicit `ROLLBACK`, the Session auto-checkpoints the WAL (truncates to empty). Checkpoint is best-effort and does not affect commit success.
+After successful commits and explicit `ROLLBACK`, the Session auto-checkpoints the WAL according to policy. Checkpoint is best-effort and does not affect commit success.
+
+Default policy is per-transaction (`MURODB_CHECKPOINT_TX_THRESHOLD=1`), and can be tuned with:
+
+- `MURODB_CHECKPOINT_TX_THRESHOLD`
+- `MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD`
+- `MURODB_CHECKPOINT_INTERVAL_MS`
 
 When checkpoint truncate fails, MuroDB emits a warning with `wal_path` and `wal_size_bytes` so operators can detect and triage WAL growth.
 

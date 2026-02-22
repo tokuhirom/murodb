@@ -11,6 +11,71 @@ use crate::wal::record::TxId;
 use crate::wal::writer::WalWriter;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
+const DEFAULT_CHECKPOINT_TX_THRESHOLD: u64 = 1;
+const DEFAULT_CHECKPOINT_WAL_BYTES_THRESHOLD: u64 = 0;
+const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 0;
+
+#[derive(Debug, Clone, Copy)]
+struct CheckpointPolicy {
+    tx_threshold: u64,
+    wal_bytes_threshold: u64,
+    interval_ms: u64,
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self {
+            tx_threshold: DEFAULT_CHECKPOINT_TX_THRESHOLD,
+            wal_bytes_threshold: DEFAULT_CHECKPOINT_WAL_BYTES_THRESHOLD,
+            interval_ms: DEFAULT_CHECKPOINT_INTERVAL_MS,
+        }
+    }
+}
+
+impl CheckpointPolicy {
+    fn from_env() -> Self {
+        Self {
+            tx_threshold: parse_checkpoint_env_u64(
+                "MURODB_CHECKPOINT_TX_THRESHOLD",
+                DEFAULT_CHECKPOINT_TX_THRESHOLD,
+                0,
+            ),
+            wal_bytes_threshold: parse_checkpoint_env_u64(
+                "MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD",
+                DEFAULT_CHECKPOINT_WAL_BYTES_THRESHOLD,
+                0,
+            ),
+            interval_ms: parse_checkpoint_env_u64(
+                "MURODB_CHECKPOINT_INTERVAL_MS",
+                DEFAULT_CHECKPOINT_INTERVAL_MS,
+                0,
+            ),
+        }
+    }
+}
+
+fn parse_checkpoint_env_u64(name: &str, default: u64, min: u64) -> u64 {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.parse::<u64>() {
+        Ok(v) if v >= min => v,
+        Ok(_) => {
+            eprintln!(
+                "WARNING: {} must be >= {}, using default {}",
+                name, min, default
+            );
+            default
+        }
+        Err(_) => {
+            eprintln!(
+                "WARNING: {} must be an integer, using default {}",
+                name, default
+            );
+            default
+        }
+    }
+}
 
 /// Database operation statistics for observability.
 #[derive(Debug, Clone, Default)]
@@ -28,6 +93,7 @@ pub struct DatabaseStats {
     pub freelist_sanitize_count: u64,
     pub freelist_out_of_range_total: u64,
     pub freelist_duplicates_total: u64,
+    pub deferred_checkpoints: u64,
 }
 
 /// Backward-compatible alias.
@@ -48,6 +114,9 @@ pub struct Session {
     next_txid: TxId,
     stats: DatabaseStats,
     poisoned: Option<String>,
+    checkpoint_policy: CheckpointPolicy,
+    pending_checkpoint_ops: u64,
+    last_checkpoint_at: std::time::Instant,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
 }
@@ -78,6 +147,9 @@ impl Session {
             next_txid,
             stats,
             poisoned: None,
+            checkpoint_policy: CheckpointPolicy::from_env(),
+            pending_checkpoint_ops: 0,
+            last_checkpoint_at: std::time::Instant::now(),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
         }
@@ -332,6 +404,11 @@ impl Session {
     }
 
     fn post_commit_checkpoint(&mut self) {
+        self.pending_checkpoint_ops = self.pending_checkpoint_ops.saturating_add(1);
+        if !self.should_checkpoint_now() {
+            self.stats.deferred_checkpoints += 1;
+            return;
+        }
         self.stats.total_checkpoints += 1;
         // Best-effort: commit already reached durable state in data file.
         // If WAL truncate fails, keep serving and rely on startup recovery path.
@@ -345,10 +422,18 @@ impl Session {
                     .as_millis() as u64,
             );
             self.emit_checkpoint_warning("post-commit", attempts, &e);
+            return;
         }
+        self.pending_checkpoint_ops = 0;
+        self.last_checkpoint_at = std::time::Instant::now();
     }
 
     fn post_rollback_checkpoint(&mut self) {
+        self.pending_checkpoint_ops = self.pending_checkpoint_ops.saturating_add(1);
+        if !self.should_checkpoint_now() {
+            self.stats.deferred_checkpoints += 1;
+            return;
+        }
         self.stats.total_checkpoints += 1;
         // Best-effort: rollback leaves no committed changes to preserve in WAL.
         if let Err((attempts, e)) = self.try_checkpoint_truncate_with_retry() {
@@ -361,7 +446,38 @@ impl Session {
                     .as_millis() as u64,
             );
             self.emit_checkpoint_warning("post-rollback", attempts, &e);
+            return;
         }
+        self.pending_checkpoint_ops = 0;
+        self.last_checkpoint_at = std::time::Instant::now();
+    }
+
+    fn should_checkpoint_now(&self) -> bool {
+        if self.pending_checkpoint_ops == 0 {
+            return false;
+        }
+        if self.checkpoint_policy.tx_threshold > 0 {
+            if self.checkpoint_policy.tx_threshold <= 1 {
+                return true;
+            }
+            if self.pending_checkpoint_ops >= self.checkpoint_policy.tx_threshold {
+                return true;
+            }
+        }
+        if self.checkpoint_policy.wal_bytes_threshold > 0 {
+            if let Ok(size) = self.wal.file_size_bytes() {
+                if size >= self.checkpoint_policy.wal_bytes_threshold {
+                    return true;
+                }
+            }
+        }
+        if self.checkpoint_policy.interval_ms > 0
+            && self.last_checkpoint_at.elapsed().as_millis() as u64
+                >= self.checkpoint_policy.interval_ms
+        {
+            return true;
+        }
+        false
     }
 
     fn handle_show_checkpoint_stats(&self) -> Result<ExecResult> {
@@ -503,6 +619,26 @@ impl Session {
                 "freelist_duplicates_total",
                 stats.freelist_duplicates_total.to_string(),
             ),
+            stat_row(
+                "deferred_checkpoints",
+                stats.deferred_checkpoints.to_string(),
+            ),
+            stat_row(
+                "checkpoint_pending_ops",
+                self.pending_checkpoint_ops.to_string(),
+            ),
+            stat_row(
+                "checkpoint_policy_tx_threshold",
+                self.checkpoint_policy.tx_threshold.to_string(),
+            ),
+            stat_row(
+                "checkpoint_policy_wal_bytes_threshold",
+                self.checkpoint_policy.wal_bytes_threshold.to_string(),
+            ),
+            stat_row(
+                "checkpoint_policy_interval_ms",
+                self.checkpoint_policy.interval_ms.to_string(),
+            ),
             stat_row("pager_cache_hits", cache_hits.to_string()),
             stat_row("pager_cache_misses", cache_misses.to_string()),
             stat_row(
@@ -569,6 +705,20 @@ impl Session {
     #[cfg(test)]
     fn inject_checkpoint_failures_for_test(&mut self, count: usize) {
         self.inject_checkpoint_failures_remaining = count;
+    }
+
+    #[cfg(test)]
+    fn set_checkpoint_policy_for_test(
+        &mut self,
+        tx_threshold: u64,
+        wal_threshold: u64,
+        interval_ms: u64,
+    ) {
+        self.checkpoint_policy = CheckpointPolicy {
+            tx_threshold,
+            wal_bytes_threshold: wal_threshold,
+            interval_ms,
+        };
     }
 }
 
@@ -802,6 +952,7 @@ mod tests {
         // Initial stats should be zero
         assert_eq!(session.checkpoint_stats().total_checkpoints, 0);
         assert_eq!(session.checkpoint_stats().failed_checkpoints, 0);
+        assert_eq!(session.database_stats().deferred_checkpoints, 0);
 
         // Successful checkpoint
         session
@@ -820,6 +971,77 @@ mod tests {
             .checkpoint_stats()
             .last_failure_timestamp_ms
             .is_some());
+        assert_eq!(session.database_stats().deferred_checkpoints, 0);
+    }
+
+    #[test]
+    fn test_checkpoint_can_be_deferred_by_tx_threshold() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+        session.set_checkpoint_policy_for_test(3, 0, 0);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        assert_eq!(session.database_stats().total_checkpoints, 0);
+        assert_eq!(session.database_stats().deferred_checkpoints, 1);
+        assert!(std::fs::metadata(&wal_path).unwrap().len() > crate::wal::WAL_HEADER_SIZE as u64);
+
+        session.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(session.database_stats().total_checkpoints, 0);
+        assert_eq!(session.database_stats().deferred_checkpoints, 2);
+
+        session.execute("INSERT INTO t VALUES (2)").unwrap();
+        assert_eq!(session.database_stats().total_checkpoints, 1);
+        assert_eq!(session.database_stats().deferred_checkpoints, 2);
+        assert_eq!(session.database_stats().failed_checkpoints, 0);
+        assert_eq!(
+            std::fs::metadata(&wal_path).unwrap().len(),
+            crate::wal::WAL_HEADER_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_triggered_by_wal_size_threshold_before_tx_threshold() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+        let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+        let mut session = Session::new(pager, catalog, wal);
+
+        session
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+
+        // Keep tx threshold high, but set WAL threshold low enough that large inserts trigger checkpoint.
+        session.set_checkpoint_policy_for_test(1000, 600, 0);
+        let checkpoints_before = session.database_stats().total_checkpoints;
+        session
+            .execute("INSERT INTO t VALUES (1, REPEAT('a', 2048))")
+            .unwrap();
+
+        assert_eq!(
+            session.database_stats().total_checkpoints,
+            checkpoints_before + 1
+        );
+        assert_eq!(session.database_stats().failed_checkpoints, 0);
+        assert_eq!(
+            std::fs::metadata(&wal_path).unwrap().len(),
+            crate::wal::WAL_HEADER_SIZE as u64
+        );
     }
 
     #[test]
@@ -882,7 +1104,7 @@ mod tests {
 
         match session.execute("SHOW DATABASE STATS").unwrap() {
             ExecResult::Rows(rows) => {
-                assert_eq!(rows.len(), 13);
+                assert_eq!(rows.len(), 18);
                 // Verify checkpoint stats
                 assert_eq!(
                     rows[0].get("stat"),
@@ -903,14 +1125,38 @@ mod tests {
                 assert_eq!(rows[7].get("value"), Some(&Value::Varchar("0".to_string())));
                 assert_eq!(
                     rows[10].get("stat"),
-                    Some(&Value::Varchar("pager_cache_hits".to_string()))
+                    Some(&Value::Varchar("deferred_checkpoints".to_string()))
                 );
                 assert_eq!(
                     rows[11].get("stat"),
-                    Some(&Value::Varchar("pager_cache_misses".to_string()))
+                    Some(&Value::Varchar("checkpoint_pending_ops".to_string()))
                 );
                 assert_eq!(
                     rows[12].get("stat"),
+                    Some(&Value::Varchar(
+                        "checkpoint_policy_tx_threshold".to_string()
+                    ))
+                );
+                assert_eq!(
+                    rows[13].get("stat"),
+                    Some(&Value::Varchar(
+                        "checkpoint_policy_wal_bytes_threshold".to_string()
+                    ))
+                );
+                assert_eq!(
+                    rows[14].get("stat"),
+                    Some(&Value::Varchar("checkpoint_policy_interval_ms".to_string()))
+                );
+                assert_eq!(
+                    rows[15].get("stat"),
+                    Some(&Value::Varchar("pager_cache_hits".to_string()))
+                );
+                assert_eq!(
+                    rows[16].get("stat"),
+                    Some(&Value::Varchar("pager_cache_misses".to_string()))
+                );
+                assert_eq!(
+                    rows[17].get("stat"),
                     Some(&Value::Varchar("pager_cache_hit_rate_pct".to_string()))
                 );
             }
@@ -1032,7 +1278,7 @@ mod tests {
         // SHOW DATABASE STATS must still work on poisoned session
         match session.execute("SHOW DATABASE STATS").unwrap() {
             ExecResult::Rows(rows) => {
-                assert_eq!(rows.len(), 13);
+                assert_eq!(rows.len(), 18);
                 // commit_in_doubt_count should be 1
                 assert_eq!(
                     rows[4].get("stat"),
@@ -1041,15 +1287,15 @@ mod tests {
                 assert_eq!(rows[4].get("value"), Some(&Value::Varchar("1".to_string())));
                 // Pager cache stats should be present
                 assert_eq!(
-                    rows[10].get("stat"),
+                    rows[15].get("stat"),
                     Some(&Value::Varchar("pager_cache_hits".to_string()))
                 );
                 assert_eq!(
-                    rows[11].get("stat"),
+                    rows[16].get("stat"),
                     Some(&Value::Varchar("pager_cache_misses".to_string()))
                 );
                 assert_eq!(
-                    rows[12].get("stat"),
+                    rows[17].get("stat"),
                     Some(&Value::Varchar("pager_cache_hit_rate_pct".to_string()))
                 );
             }

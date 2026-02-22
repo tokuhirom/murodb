@@ -147,6 +147,13 @@ Both commands return two columns: `stat` and `value`.
 - `pager_cache_misses`
 - `pager_cache_hit_rate_pct`
 
+It also exposes checkpoint policy/runtime fields:
+- `deferred_checkpoints`
+- `checkpoint_pending_ops`
+- `checkpoint_policy_tx_threshold`
+- `checkpoint_policy_wal_bytes_threshold`
+- `checkpoint_policy_interval_ms`
+
 ## DML (Data Manipulation Language)
 
 ### INSERT

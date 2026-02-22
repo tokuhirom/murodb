@@ -400,6 +400,56 @@ fn test_power() {
     );
 }
 
+// ── Date/time functions ──
+
+#[test]
+fn test_now_and_current_timestamp() {
+    let (mut p, mut c, _d) = setup();
+
+    let now = query_one(&mut p, &mut c, "SELECT NOW()");
+    assert!(matches!(now, Value::DateTime(_)));
+
+    let current_ts = query_one(&mut p, &mut c, "SELECT CURRENT_TIMESTAMP()");
+    assert!(matches!(current_ts, Value::DateTime(_)));
+
+    let current_ts_no_paren = query_one(&mut p, &mut c, "SELECT CURRENT_TIMESTAMP");
+    assert!(matches!(current_ts_no_paren, Value::DateTime(_)));
+}
+
+#[test]
+fn test_date_format() {
+    let (mut p, mut c, _d) = setup();
+    assert_eq!(
+        query_one(
+            &mut p,
+            &mut c,
+            "SELECT DATE_FORMAT('2026-02-22 13:04:05', '%Y/%m/%d %H:%i:%s')",
+        ),
+        Value::Varchar("2026/02/22 13:04:05".into())
+    );
+    assert_eq!(
+        query_one(
+            &mut p,
+            &mut c,
+            "SELECT DATE_FORMAT('2026-02-22', '%W, %M %e')",
+        ),
+        Value::Varchar("Sunday, February 22".into())
+    );
+}
+
+#[test]
+fn test_date_format_null_and_invalid_input() {
+    let (mut p, mut c, _d) = setup();
+    assert_eq!(
+        query_one(&mut p, &mut c, "SELECT DATE_FORMAT(NULL, '%Y')"),
+        Value::Null
+    );
+    assert_eq!(
+        query_one(&mut p, &mut c, "SELECT DATE_FORMAT('not-a-date', '%Y')"),
+        Value::Null
+    );
+}
+
 // ── NULL handling & conditional ──
 
 #[test]

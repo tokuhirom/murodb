@@ -116,6 +116,15 @@ Notes:
 - Long tail-hit case shows small but measurable p50 reduction.
 - Offset-map memory is linear in normalized char count: `(chars + 1) * sizeof(usize)`.
 
+### 2026-02-22 / Stop-ngram behavior example
+
+Reference scenario (same as SQL integration tests):
+
+| Setting | Query | Expected behavior |
+|---|---|---|
+| `stop_filter=off` | `MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE)` | broader recall (`東京*` docs can match) |
+| `stop_filter=on, stop_df_ratio_ppm=500000` | same | higher precision (mostly exact-intent doc remains) |
+
 ## Adding New Entries
 
 When updating this page for a new version:

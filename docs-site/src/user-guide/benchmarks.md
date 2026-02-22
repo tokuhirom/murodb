@@ -18,6 +18,11 @@ Workloads:
 - `fts_update_point`: point update on FTS-indexed `TEXT` column
 - `fts_mixed_70q_30u`: FTS-focused mixed workload (70% search / 30% update)
 
+Additional microbenchmark:
+
+- `murodb_snippet_bench`: compares legacy vs current `fts_snippet()` implementation
+  on representative text sizes and reports approximate offset-map memory bytes.
+
 Default dataset/config:
 
 - initial rows: `20,000`
@@ -48,6 +53,7 @@ cargo run --release --bin murodb_bench
 |---|---|---|---|
 | 2026-02-22 | `a78694537f59` | local dev machine | first baseline |
 | 2026-02-22 | `829ad18145c2` | local dev machine | after secondary-index root persistence fix |
+| 2026-02-22 | `5c422b8b` | local dev machine | added snippet microbenchmark and UTF-8 offset-map optimization |
 
 ### 2026-02-22 / `a78694537f59`
 
@@ -87,6 +93,28 @@ Row counts:
 - start: `20,000`
 - after insert phase: `25,000`
 - final: `25,519`
+
+### 2026-02-22 / `5c422b8b` (Snippet Microbenchmark)
+
+Command:
+
+```bash
+cargo run --release --bin murodb_snippet_bench
+```
+
+Raw output summary:
+
+| Case | Iters | Legacy p50 (us) | New p50 (us) | p50 Speedup | Approx offset-map bytes |
+|---|---:|---:|---:|---:|---:|
+| snippet_short_tail_hit | 2,000 | 14.10 | 15.09 | 0.93x | 4,936 |
+| snippet_medium_tail_hit | 2,000 | 126.01 | 127.93 | 0.99x | 48,136 |
+| snippet_long_tail_hit | 500 | 1245.52 | 1228.43 | 1.01x | 480,136 |
+
+Notes:
+
+- Short/medium cases are near parity.
+- Long tail-hit case shows small but measurable p50 reduction.
+- Offset-map memory is linear in normalized char count: `(chars + 1) * sizeof(usize)`.
 
 ## Adding New Entries
 

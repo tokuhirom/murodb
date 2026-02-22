@@ -143,10 +143,12 @@ MySQL-compatible scalar functions.
     - Frequent low-information ngrams are skipped using configurable thresholds.
     - Recall/precision tradeoff is documented with benchmark examples.
     - Toggle exists for exact behavior compatibility.
-- [ ] fts_snippet acceleration (pos-to-offset map)
+- [x] fts_snippet acceleration (pos-to-offset map)
   - Progress:
     - Replaced snippet byte/char conversion loops with a UTF-8 position-to-offset map plus binary search.
     - Snippet assembly now slices by byte ranges instead of repeatedly collecting char vectors.
+    - Added dedicated benchmark runner (`murodb_snippet_bench`) with legacy-vs-new comparison and offset-map memory estimate.
+    - On 2026-02-22 (local, release build), long-text tail-hit case showed small p50 improvement (legacy `1245.52us` -> new `1228.43us`).
   - Done when:
     - Snippet generation avoids repeated UTF-8 rescans for long docs.
     - Latency improvement is measured and documented on representative datasets.

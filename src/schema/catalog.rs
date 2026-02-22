@@ -570,6 +570,9 @@ mod tests {
             is_unique: true,
             btree_root: 99,
             stats_distinct_keys: 0,
+            stats_num_min: 0,
+            stats_num_max: 0,
+            stats_num_bounds_known: false,
             fts_stop_filter: false,
             fts_stop_df_ratio_ppm: 0,
         };

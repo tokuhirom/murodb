@@ -14,6 +14,8 @@ pub struct IndexPlanStat {
     pub column_names: Vec<String>,
     pub is_unique: bool,
     pub stats_distinct_keys: u64,
+    pub stats_num_min: Option<i64>,
+    pub stats_num_max: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,10 +119,20 @@ pub fn estimate_plan_rows_hint(
             let index = index_stats.iter().find(|idx| idx.name == *index_name);
             let prefix_rows =
                 estimate_index_seek_rows(table_rows, prefix_key_exprs.len(), index, false);
-            let ranged_rows = match (lower.is_some(), upper.is_some()) {
-                (true, true) => div_ceil(prefix_rows, 5),
-                (true, false) | (false, true) => div_ceil(prefix_rows, 2),
-                (false, false) => prefix_rows,
+            let ranged_rows = if prefix_key_exprs.is_empty() {
+                estimate_numeric_range_rows(prefix_rows, lower, upper, index).unwrap_or_else(|| {
+                    match (lower.is_some(), upper.is_some()) {
+                        (true, true) => div_ceil(prefix_rows, 5),
+                        (true, false) | (false, true) => div_ceil(prefix_rows, 2),
+                        (false, false) => prefix_rows,
+                    }
+                })
+            } else {
+                match (lower.is_some(), upper.is_some()) {
+                    (true, true) => div_ceil(prefix_rows, 5),
+                    (true, false) | (false, true) => div_ceil(prefix_rows, 2),
+                    (false, false) => prefix_rows,
+                }
             };
             ranged_rows.max(1).min(table_rows)
         }
@@ -345,6 +357,90 @@ fn div_ceil(num: u64, den: u64) -> u64 {
         return num;
     }
     num.saturating_add(den - 1) / den
+}
+
+fn estimate_numeric_range_rows(
+    prefix_rows: u64,
+    lower: &Option<(Box<Expr>, bool)>,
+    upper: &Option<(Box<Expr>, bool)>,
+    index: Option<&IndexPlanStat>,
+) -> Option<u64> {
+    let idx = index?;
+    let min_v = idx.stats_num_min?;
+    let max_v = idx.stats_num_max?;
+    if min_v > max_v {
+        return None;
+    }
+
+    let mut lo = min_v;
+    let mut hi = max_v;
+    if let Some((expr, inclusive)) = lower {
+        let v = const_i64(expr)?;
+        lo = if *inclusive { v } else { v.saturating_add(1) };
+    }
+    if let Some((expr, inclusive)) = upper {
+        let v = const_i64(expr)?;
+        hi = if *inclusive { v } else { v.saturating_sub(1) };
+    }
+
+    if hi < lo {
+        return Some(1);
+    }
+
+    let clamped_lo = lo.max(min_v);
+    let clamped_hi = hi.min(max_v);
+    if clamped_hi < clamped_lo {
+        return Some(1);
+    }
+
+    let covered = span_inclusive_u128(clamped_lo, clamped_hi)?;
+    let total = span_inclusive_u128(min_v, max_v)?;
+    let scaled = div_ceil_u128((prefix_rows as u128).saturating_mul(covered), total);
+    Some((scaled as u64).max(1))
+}
+
+fn const_i64(expr: &Expr) -> Option<i64> {
+    match eval_expr(expr, &|_| None).ok()? {
+        crate::types::Value::Integer(n) => Some(n),
+        crate::types::Value::Date(n) => Some(n as i64),
+        crate::types::Value::DateTime(n) => Some(n),
+        crate::types::Value::Timestamp(n) => Some(n),
+        _ => None,
+    }
+}
+
+fn span_inclusive_u128(lo: i64, hi: i64) -> Option<u128> {
+    if hi < lo {
+        return None;
+    }
+    Some((hi as i128 - lo as i128 + 1) as u128)
+}
+
+fn div_ceil_u128(num: u128, den: u128) -> u128 {
+    if den == 0 {
+        return num;
+    }
+    num.saturating_add(den - 1) / den
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_numeric_range_estimator_handles_full_i64_span() {
+        let idx = IndexPlanStat {
+            name: "idx_a".to_string(),
+            column_names: vec!["a".to_string()],
+            is_unique: false,
+            stats_distinct_keys: 0,
+            stats_num_min: Some(i64::MIN),
+            stats_num_max: Some(i64::MAX),
+        };
+        let lower = Some((Box::new(Expr::IntLiteral(0)), true));
+        let rows = estimate_numeric_range_rows(1000, &lower, &None, Some(&idx)).unwrap();
+        assert_eq!(rows, 500);
+    }
 }
 
 /// Extract FTS match from expression tree.

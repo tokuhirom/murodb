@@ -46,7 +46,7 @@ pub(super) fn exec_explain(
         })
         .collect();
     let planner_stats = PlannerStats {
-        table_rows: estimate_table_rows(&table_def, pager)?,
+        table_rows: table_def.stats_row_count,
     };
 
     let plan = plan_select(
@@ -56,7 +56,12 @@ pub(super) fn exec_explain(
         where_clause,
         planner_stats,
     );
-    let estimated_rows = estimate_plan_rows_hint(&plan, &planner_stats, &index_stats);
+    // Keep EXPLAIN row cardinality informative even before ANALYZE TABLE
+    // by falling back to observed table rows for display only.
+    let display_stats = PlannerStats {
+        table_rows: estimate_table_rows(&table_def, pager)?,
+    };
+    let estimated_rows = estimate_plan_rows_hint(&plan, &display_stats, &index_stats);
     let estimated_cost = plan_cost_hint_with_stats(&plan, &planner_stats, &index_stats) as i64;
 
     let (access_type, key_name, extra) = match &plan {

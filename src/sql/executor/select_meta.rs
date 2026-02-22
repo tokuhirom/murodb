@@ -47,11 +47,17 @@ pub(super) fn exec_explain(
         &index_columns,
         where_clause,
     );
+    let estimated_rows = estimate_plan_rows(&plan, &table_def, &indexes, pager)?;
 
     let (access_type, key_name, extra) = match &plan {
         Plan::PkSeek { .. } => ("const", "PRIMARY".to_string(), "Using where".to_string()),
         Plan::IndexSeek { index_name, .. } => (
             "ref",
+            index_name.clone(),
+            "Using where; Using index".to_string(),
+        ),
+        Plan::IndexRangeSeek { index_name, .. } => (
+            "range",
             index_name.clone(),
             "Using where; Using index".to_string(),
         ),
@@ -97,6 +103,7 @@ pub(super) fn exec_explain(
                     Value::Varchar(key_name)
                 },
             ),
+            ("rows".to_string(), Value::Integer(estimated_rows as i64)),
             (
                 "Extra".to_string(),
                 if extra.is_empty() {
@@ -109,6 +116,94 @@ pub(super) fn exec_explain(
     };
 
     Ok(ExecResult::Rows(vec![row]))
+}
+
+fn estimate_plan_rows(
+    plan: &Plan,
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    pager: &mut impl PageStore,
+) -> Result<u64> {
+    let table_rows = estimate_table_rows(table_def, pager)?;
+    let fallback_rows = table_rows.max(1);
+
+    match plan {
+        Plan::PkSeek { key_exprs, .. } => {
+            let Ok(pk_key) = eval_pk_seek_key(table_def, key_exprs) else {
+                return Ok(fallback_rows);
+            };
+            let data_btree = BTree::open(table_def.data_btree_root);
+            Ok(if data_btree.search(pager, &pk_key)?.is_some() {
+                1
+            } else {
+                0
+            })
+        }
+        Plan::IndexSeek {
+            index_name,
+            column_names,
+            key_exprs,
+            ..
+        } => {
+            let Some(idx) = indexes.iter().find(|i| i.name == *index_name) else {
+                return Ok(fallback_rows);
+            };
+            let Ok(idx_key) = eval_index_seek_key(table_def, column_names, key_exprs) else {
+                return Ok(fallback_rows);
+            };
+            Ok(index_seek_pk_keys(idx, &idx_key, pager)?.len() as u64)
+        }
+        Plan::IndexRangeSeek {
+            index_name,
+            column_names,
+            prefix_key_exprs,
+            lower,
+            upper,
+            ..
+        } => {
+            let Some(idx) = indexes.iter().find(|i| i.name == *index_name) else {
+                return Ok(fallback_rows);
+            };
+            if prefix_key_exprs.len() + 1 != column_names.len() {
+                return Ok(fallback_rows);
+            }
+
+            let lower_key = if let Some((expr, inclusive)) = lower {
+                let mut key_exprs = prefix_key_exprs.clone();
+                key_exprs.push((**expr).clone());
+                let Ok(key) = eval_index_seek_key(table_def, column_names, &key_exprs) else {
+                    return Ok(fallback_rows);
+                };
+                Some((key, *inclusive))
+            } else {
+                None
+            };
+
+            let upper_key = if let Some((expr, inclusive)) = upper {
+                let mut key_exprs = prefix_key_exprs.clone();
+                key_exprs.push((**expr).clone());
+                let Ok(key) = eval_index_seek_key(table_def, column_names, &key_exprs) else {
+                    return Ok(fallback_rows);
+                };
+                Some((key, *inclusive))
+            } else {
+                None
+            };
+
+            Ok(index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?.len() as u64)
+        }
+        Plan::FullScan { .. } | Plan::FtsScan { .. } => Ok(table_rows),
+    }
+}
+
+fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Result<u64> {
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut cnt: u64 = 0;
+    data_btree.scan(pager, |_k, _v| {
+        cnt += 1;
+        Ok(true)
+    })?;
+    Ok(cnt)
 }
 
 pub(super) fn exec_set_query(

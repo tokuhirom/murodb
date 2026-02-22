@@ -19,6 +19,14 @@ pub enum Plan {
         column_names: Vec<String>,
         key_exprs: Vec<Expr>,
     },
+    IndexRangeSeek {
+        table_name: String,
+        index_name: String,
+        column_names: Vec<String>,
+        prefix_key_exprs: Vec<Expr>,
+        lower: Option<(Box<Expr>, bool)>, // (expr, inclusive)
+        upper: Option<(Box<Expr>, bool)>, // (expr, inclusive)
+    },
     FullScan {
         table_name: String,
     },
@@ -88,6 +96,7 @@ pub fn plan_select(
 
         // Check for index equality (single or composite)
         let equalities = extract_equalities(expr);
+        let ranges = extract_ranges(expr);
         for (idx_name, col_names) in index_columns {
             if col_names.len() == 1 {
                 if let Some(key_expr) = equalities.iter().find_map(|(col, e)| {
@@ -104,25 +113,55 @@ pub fn plan_select(
                         key_exprs: vec![key_expr],
                     };
                 }
+                if let Some(range) = ranges.get(&col_names[0]) {
+                    return Plan::IndexRangeSeek {
+                        table_name: table_name.to_string(),
+                        index_name: idx_name.clone(),
+                        column_names: col_names.clone(),
+                        prefix_key_exprs: Vec::new(),
+                        lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                        upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                    };
+                }
             } else {
-                // Composite index: need all columns
+                // Composite index:
+                // 1) exact seek if all columns have equality
+                // 2) range seek if prefix equalities exist and the next (last) column has a range predicate
                 let mut key_exprs = Vec::new();
-                let mut all_found = true;
+                let mut prefix_key_exprs = Vec::new();
+                let mut prefix_len = 0usize;
                 for col_name in col_names {
                     if let Some((_, e)) = equalities.iter().find(|(col, _)| col == col_name) {
                         key_exprs.push(e.clone());
+                        prefix_key_exprs.push(e.clone());
+                        prefix_len += 1;
                     } else {
-                        all_found = false;
                         break;
                     }
                 }
-                if all_found {
+                if prefix_len == col_names.len() {
                     return Plan::IndexSeek {
                         table_name: table_name.to_string(),
                         index_name: idx_name.clone(),
                         column_names: col_names.clone(),
                         key_exprs,
                     };
+                }
+
+                if prefix_len < col_names.len() && prefix_len + 1 == col_names.len() {
+                    let range_col = &col_names[prefix_len];
+                    if let Some(range) = ranges.get(range_col) {
+                        if prefix_key_exprs.iter().all(is_row_independent_expr) {
+                            return Plan::IndexRangeSeek {
+                                table_name: table_name.to_string(),
+                                index_name: idx_name.clone(),
+                                column_names: col_names.clone(),
+                                prefix_key_exprs,
+                                lower: range.lower.clone().map(|(e, i)| (Box::new(e), i)),
+                                upper: range.upper.clone().map(|(e, i)| (Box::new(e), i)),
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -200,5 +239,127 @@ fn collect_equalities(expr: &Expr, result: &mut Vec<(String, Expr)>) {
             collect_equalities(right, result);
         }
         _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ColumnRange {
+    lower: Option<(Expr, bool)>,
+    upper: Option<(Expr, bool)>,
+}
+
+fn extract_ranges(expr: &Expr) -> std::collections::HashMap<String, ColumnRange> {
+    let mut result = std::collections::HashMap::new();
+    collect_ranges(expr, &mut result);
+    result
+}
+
+fn collect_ranges(expr: &Expr, result: &mut std::collections::HashMap<String, ColumnRange>) {
+    match expr {
+        Expr::BinaryOp { left, op, right } => match op {
+            BinaryOp::And => {
+                collect_ranges(left, result);
+                collect_ranges(right, result);
+            }
+            BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
+                if let Expr::ColumnRef(col) = left.as_ref() {
+                    if !is_row_independent_expr(right) {
+                        return;
+                    }
+                    let entry = result.entry(col.clone()).or_default();
+                    match op {
+                        BinaryOp::Gt => entry.lower = Some((*right.clone(), false)),
+                        BinaryOp::Ge => entry.lower = Some((*right.clone(), true)),
+                        BinaryOp::Lt => entry.upper = Some((*right.clone(), false)),
+                        BinaryOp::Le => entry.upper = Some((*right.clone(), true)),
+                        _ => {}
+                    }
+                } else if let Expr::ColumnRef(col) = right.as_ref() {
+                    if !is_row_independent_expr(left) {
+                        return;
+                    }
+                    let entry = result.entry(col.clone()).or_default();
+                    match op {
+                        BinaryOp::Gt => entry.upper = Some((*left.clone(), false)),
+                        BinaryOp::Ge => entry.upper = Some((*left.clone(), true)),
+                        BinaryOp::Lt => entry.lower = Some((*left.clone(), false)),
+                        BinaryOp::Le => entry.lower = Some((*left.clone(), true)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        },
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated: false,
+        } => {
+            if let Expr::ColumnRef(col) = expr.as_ref() {
+                if is_row_independent_expr(low) && is_row_independent_expr(high) {
+                    let entry = result.entry(col.clone()).or_default();
+                    entry.lower = Some((*low.clone(), true));
+                    entry.upper = Some((*high.clone(), true));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_row_independent_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRef(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            is_row_independent_expr(left) && is_row_independent_expr(right)
+        }
+        Expr::UnaryOp { operand, .. } => is_row_independent_expr(operand),
+        Expr::Like { expr, pattern, .. } => {
+            is_row_independent_expr(expr) && is_row_independent_expr(pattern)
+        }
+        Expr::InList { expr, list, .. } => {
+            is_row_independent_expr(expr) && list.iter().all(is_row_independent_expr)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            is_row_independent_expr(expr)
+                && is_row_independent_expr(low)
+                && is_row_independent_expr(high)
+        }
+        Expr::IsNull { expr, .. } => is_row_independent_expr(expr),
+        Expr::FunctionCall { args, .. } => args.iter().all(is_row_independent_expr),
+        Expr::CaseWhen {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand
+                .as_ref()
+                .map(|e| is_row_independent_expr(e))
+                .unwrap_or(true)
+                && when_clauses.iter().all(|(cond, value)| {
+                    is_row_independent_expr(cond) && is_row_independent_expr(value)
+                })
+                && else_clause
+                    .as_ref()
+                    .map(|e| is_row_independent_expr(e))
+                    .unwrap_or(true)
+        }
+        Expr::Cast { expr, .. } => is_row_independent_expr(expr),
+        Expr::AggregateFunc { arg, .. } => arg
+            .as_ref()
+            .map(|e| is_row_independent_expr(e))
+            .unwrap_or(true),
+        Expr::GreaterThanZero(expr) => is_row_independent_expr(expr),
+        Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::ScalarSubquery(_) => false,
+        Expr::MatchAgainst { .. } | Expr::FtsSnippet { .. } => true,
+        Expr::IntLiteral(_)
+        | Expr::FloatLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BlobLiteral(_)
+        | Expr::Null
+        | Expr::DefaultValue => true,
     }
 }

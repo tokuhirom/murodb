@@ -70,8 +70,62 @@ pub(super) fn exec_update(
                 }
             }
         }
+        Plan::IndexRangeSeek {
+            index_name,
+            column_names,
+            prefix_key_exprs,
+            lower,
+            upper,
+            ..
+        } if prefix_key_exprs.iter().all(is_row_independent_expr)
+            && lower
+                .as_ref()
+                .is_none_or(|(expr, _)| is_row_independent_expr(expr.as_ref()))
+            && upper
+                .as_ref()
+                .is_none_or(|(expr, _)| is_row_independent_expr(expr.as_ref())) =>
+        {
+            let prefix_len = prefix_key_exprs.len();
+            let bound_columns = column_names[..prefix_len + 1].to_vec();
+            let lower_key = lower
+                .as_ref()
+                .map(|(expr, inclusive)| {
+                    let mut key_exprs = prefix_key_exprs.clone();
+                    key_exprs.push(*expr.clone());
+                    eval_index_seek_key(&table_def, &bound_columns, &key_exprs)
+                        .map(|key| (key, *inclusive))
+                })
+                .transpose()?;
+            let upper_key = upper
+                .as_ref()
+                .map(|(expr, inclusive)| {
+                    let mut key_exprs = prefix_key_exprs.clone();
+                    key_exprs.push(*expr.clone());
+                    eval_index_seek_key(&table_def, &bound_columns, &key_exprs)
+                        .map(|key| (key, *inclusive))
+                })
+                .transpose()?;
+            let idx = indexes
+                .iter()
+                .find(|i| i.name == index_name)
+                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
+            let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
+            for pk_key in pk_keys {
+                if let Some(data) = data_btree.search(pager, &pk_key)? {
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
+                    if matches_where(&upd.where_clause, &table_def, &values)? {
+                        to_update.push((pk_key, values));
+                    }
+                }
+            }
+        }
         Plan::PkSeek { .. }
         | Plan::IndexSeek { .. }
+        | Plan::IndexRangeSeek { .. }
         | Plan::FullScan { .. }
         | Plan::FtsScan { .. } => {
             data_btree.scan(pager, |k, v| {
@@ -201,8 +255,62 @@ pub(super) fn exec_delete(
                 }
             }
         }
+        Plan::IndexRangeSeek {
+            index_name,
+            column_names,
+            prefix_key_exprs,
+            lower,
+            upper,
+            ..
+        } if prefix_key_exprs.iter().all(is_row_independent_expr)
+            && lower
+                .as_ref()
+                .is_none_or(|(expr, _)| is_row_independent_expr(expr.as_ref()))
+            && upper
+                .as_ref()
+                .is_none_or(|(expr, _)| is_row_independent_expr(expr.as_ref())) =>
+        {
+            let prefix_len = prefix_key_exprs.len();
+            let bound_columns = column_names[..prefix_len + 1].to_vec();
+            let lower_key = lower
+                .as_ref()
+                .map(|(expr, inclusive)| {
+                    let mut key_exprs = prefix_key_exprs.clone();
+                    key_exprs.push(*expr.clone());
+                    eval_index_seek_key(&table_def, &bound_columns, &key_exprs)
+                        .map(|key| (key, *inclusive))
+                })
+                .transpose()?;
+            let upper_key = upper
+                .as_ref()
+                .map(|(expr, inclusive)| {
+                    let mut key_exprs = prefix_key_exprs.clone();
+                    key_exprs.push(*expr.clone());
+                    eval_index_seek_key(&table_def, &bound_columns, &key_exprs)
+                        .map(|key| (key, *inclusive))
+                })
+                .transpose()?;
+            let idx = indexes
+                .iter()
+                .find(|i| i.name == index_name)
+                .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
+            let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
+            for pk_key in pk_keys {
+                if let Some(data) = data_btree.search(pager, &pk_key)? {
+                    let values = deserialize_row_versioned(
+                        &data,
+                        &table_def.columns,
+                        table_def.row_format_version,
+                    )?;
+                    if matches_where(&del.where_clause, &table_def, &values)? {
+                        to_delete.push((pk_key, values));
+                    }
+                }
+            }
+        }
         Plan::PkSeek { .. }
         | Plan::IndexSeek { .. }
+        | Plan::IndexRangeSeek { .. }
         | Plan::FullScan { .. }
         | Plan::FtsScan { .. } => {
             data_btree.scan(pager, |k, v| {

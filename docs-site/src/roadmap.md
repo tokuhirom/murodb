@@ -114,7 +114,11 @@ MySQL-compatible scalar functions.
 ## Phase 7 — Performance & Internals
 
 - [x] Auto-checkpoint (threshold-based WAL)
-- [ ] Composite index range scan
+- [x] Composite index range scan
+  - Progress:
+    - Added planner/executor support for composite-index range seek on the last key part (e.g. `(a,b)` with `a = ?` and `b` range).
+    - EXPLAIN now reports `type=range` for this access path.
+    - EXPLAIN now reports estimated cardinality via `rows`.
   - Done when:
     - Multi-column prefix ranges (`(a,b)` with predicates on `a`, optional range on `b`) use index scan.
     - EXPLAIN shows index-range choice and estimated cardinality.

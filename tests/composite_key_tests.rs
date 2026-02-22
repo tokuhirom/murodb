@@ -688,6 +688,41 @@ fn test_non_unique_index_duplicate_values() {
 }
 
 #[test]
+fn test_composite_index_prefix_equality_with_range_on_last_column() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_ab ON t (a, b)", &mut pager, &mut catalog);
+
+    for i in 1..=8 {
+        let sql = format!(
+            "INSERT INTO t (id, a, b, c) VALUES ({}, 10, {}, 'v{}')",
+            i, i, i
+        );
+        exec(&sql, &mut pager, &mut catalog);
+    }
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (100, 11, 3, 'other_a')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a = 10 AND b BETWEEN 3 AND 5 ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0].1, Value::Integer(3));
+    assert_eq!(rows[1][0].1, Value::Integer(4));
+    assert_eq!(rows[2][0].1, Value::Integer(5));
+}
+
+#[test]
 fn test_non_unique_single_column_index_duplicates() {
     let (mut pager, mut catalog, _dir) = setup();
 
@@ -731,6 +766,122 @@ fn test_non_unique_single_column_index_duplicates() {
         &mut catalog,
     ));
     assert_eq!(rows.len(), 3, "Should find all 3 rows with category=1");
+}
+
+#[test]
+fn test_non_unique_varchar_range_seek_does_not_early_stop() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_s ON t (s)", &mut pager, &mut catalog);
+
+    // For non-unique keys, physical order is by (s || pk). With variable-length s,
+    // rows with s='a' can appear after s='ab'/'ac' depending on pk bytes.
+    exec(
+        "INSERT INTO t (id, s) VALUES (1, 'ab')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, s) VALUES (2, 'ac')",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, s) VALUES (3, 'a')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE s < 'ab' ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(
+        rows.len(),
+        1,
+        "range seek must not drop trailing s='a' rows"
+    );
+    assert_eq!(rows[0][0].1, Value::Integer(3));
+}
+
+#[test]
+fn test_range_seek_does_not_plan_row_dependent_bound() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_a ON t (a)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (1, 5, 3)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (2, 2, 4)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b) VALUES (3, 7, 7)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // a > b is row-dependent and must fall back to row-wise predicate evaluation.
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a > b ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].1, Value::Integer(1));
+}
+
+#[test]
+fn test_composite_range_seek_does_not_plan_row_dependent_prefix() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c INT)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_ab ON t (a, b)", &mut pager, &mut catalog);
+
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 5, 4, 5)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (2, 6, 2, 6)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (3, 5, 5, 9)",
+        &mut pager,
+        &mut catalog,
+    );
+
+    // a=c is row-dependent; planner must not produce range seek with prefix key "c".
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a = c AND b > 3 ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].1, Value::Integer(1));
 }
 
 #[test]

@@ -2,7 +2,7 @@ TLA_TOOLS_DIR ?= .tools
 TLA2TOOLS_JAR ?= $(TLA_TOOLS_DIR)/tla2tools.jar
 TLA2TOOLS_URL ?= https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar
 
-.PHONY: tlc-tools tlc tlc-large test
+.PHONY: tlc-tools tlc tlc-large test bench
 
 tlc-tools: $(TLA2TOOLS_JAR)
 
@@ -28,3 +28,6 @@ tlc-large: tlc-tools
 
 test:
 	cargo test
+
+bench:
+	cargo run --release --bin murodb_bench

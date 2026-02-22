@@ -58,6 +58,7 @@ impl FtsStats {
 
 const STATS_KEY: &[u8] = b"__stats__";
 const SEG_META_PREFIX: &[u8] = b"__segmeta__";
+const SEG_GEN_PREFIX: &[u8] = b"__seggen__";
 const SEG_DATA_PREFIX: &[u8] = b"__segdata__";
 const SEG_DATA_V2_PREFIX: &[u8] = b"__segv2__";
 const SEG_META_V2_VERSION: u8 = 2;
@@ -310,16 +311,19 @@ impl FtsIndex {
             .map(|meta| decode_segment_meta(&meta))
             .transpose()?;
         let had_legacy_single = self.btree.search(pager, tid)?.is_some();
-        let new_generation = old_meta
+        let last_generation_from_meta = old_meta
             .and_then(|meta| match meta {
                 SegmentMeta::V2 { generation, .. } => Some(generation),
                 SegmentMeta::V1 { .. } => None,
             })
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| {
-                crate::error::MuroError::Execution("segment generation exceeds u32 range".into())
-            })?;
+            .unwrap_or(0);
+        let last_generation = std::cmp::max(
+            last_generation_from_meta,
+            self.load_term_generation_counter(pager, tid)?,
+        );
+        let new_generation = last_generation.checked_add(1).ok_or_else(|| {
+            crate::error::MuroError::Execution("segment generation exceeds u32 range".into())
+        })?;
 
         let seg_count_usize = pl.postings.len().div_ceil(MAX_POSTINGS_PER_SEGMENT);
         let seg_count = u32::try_from(seg_count_usize).map_err(|_| {
@@ -341,6 +345,7 @@ impl FtsIndex {
         meta_buf.extend_from_slice(&new_generation.to_le_bytes());
         meta_buf.extend_from_slice(&seg_count.to_le_bytes());
         self.btree.insert(pager, &seg_meta_key(tid), &meta_buf)?;
+        self.store_term_generation_counter(pager, tid, new_generation)?;
 
         if old_meta.is_some() || had_legacy_single {
             let task = SegmentGcTask {
@@ -419,6 +424,30 @@ impl FtsIndex {
     ) -> Result<()> {
         self.btree.insert(pager, key, &value.to_le_bytes())
     }
+
+    fn load_term_generation_counter(
+        &self,
+        pager: &mut impl PageStore,
+        tid: &[u8; 32],
+    ) -> Result<u32> {
+        match self.btree.search(pager, &seg_generation_key(tid))? {
+            Some(raw) if raw.len() == 4 => Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+            Some(_) => Err(crate::error::MuroError::Corruption(
+                "invalid segmented generation counter".into(),
+            )),
+            None => Ok(0),
+        }
+    }
+
+    fn store_term_generation_counter(
+        &mut self,
+        pager: &mut impl PageStore,
+        tid: &[u8; 32],
+        generation: u32,
+    ) -> Result<()> {
+        self.btree
+            .insert(pager, &seg_generation_key(tid), &generation.to_le_bytes())
+    }
 }
 
 fn seg_meta_key(tid: &[u8; 32]) -> Vec<u8> {
@@ -433,6 +462,13 @@ fn seg_data_key(tid: &[u8; 32], idx: u32) -> Vec<u8> {
     key.extend_from_slice(SEG_DATA_PREFIX);
     key.extend_from_slice(tid);
     key.extend_from_slice(&idx.to_le_bytes());
+    key
+}
+
+fn seg_generation_key(tid: &[u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SEG_GEN_PREFIX.len() + tid.len());
+    key.extend_from_slice(SEG_GEN_PREFIX);
+    key.extend_from_slice(tid);
     key
 }
 
@@ -853,5 +889,52 @@ mod tests {
         let processed = idx.vacuum_stale_segments(&mut pager, 16).unwrap();
         assert!(processed >= 1);
         assert!(idx.btree.search(&mut pager, &tid).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_generation_does_not_reuse_after_delete_then_readd() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut idx = FtsIndex::create(&mut pager, term_key()).unwrap();
+        let tid = idx.term_id("東京");
+
+        let mut pl1 = PostingList::new();
+        pl1.add(1, vec![0]);
+        idx.store_postings_by_tid(&mut pager, &tid, &pl1).unwrap(); // gen=1
+
+        let mut pl2 = PostingList::new();
+        pl2.add(2, vec![1]);
+        idx.store_postings_by_tid(&mut pager, &tid, &pl2).unwrap(); // gen=2, queue old gen=1 GC
+
+        let empty = PostingList::new();
+        idx.store_postings_by_tid(&mut pager, &tid, &empty).unwrap(); // delete term + meta
+
+        let mut pl3 = PostingList::new();
+        pl3.add(3, vec![2]);
+        idx.store_postings_by_tid(&mut pager, &tid, &pl3).unwrap(); // must become gen=3 (not reused 1)
+
+        let meta = idx
+            .btree
+            .search(&mut pager, &seg_meta_key(&tid))
+            .unwrap()
+            .unwrap();
+        match decode_segment_meta(&meta).unwrap() {
+            SegmentMeta::V2 {
+                generation,
+                seg_count,
+            } => {
+                assert_eq!(generation, 3);
+                assert_eq!(seg_count, 1);
+            }
+            SegmentMeta::V1 { .. } => panic!("expected v2 segment metadata"),
+        }
+
+        let processed = idx.vacuum_stale_segments(&mut pager, 64).unwrap();
+        assert!(processed >= 1);
+
+        let loaded = idx.load_postings_by_tid(&mut pager, &tid).unwrap();
+        assert_eq!(loaded.df(), 1);
+        assert_eq!(loaded.get(3).unwrap().positions, vec![2]);
     }
 }

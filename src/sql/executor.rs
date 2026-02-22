@@ -831,4 +831,37 @@ mod tests {
         );
         assert!(invalid_timestamp.is_err());
     }
+
+    #[test]
+    fn test_create_table_rejects_collate_on_non_text_column() {
+        let (mut pager, mut catalog, _dir) = setup();
+        let err = execute(
+            "CREATE TABLE t (id BIGINT COLLATE utf8mb4_bin PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("COLLATE is only supported for VARCHAR/TEXT columns"));
+    }
+
+    #[test]
+    fn test_alter_table_rejects_collate_on_non_text_column() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, v INT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let err = execute(
+            "ALTER TABLE t MODIFY COLUMN v INT COLLATE utf8mb4_bin",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("COLLATE is only supported for VARCHAR/TEXT columns"));
+    }
 }

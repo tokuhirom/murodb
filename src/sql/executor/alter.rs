@@ -36,6 +36,12 @@ pub(super) fn exec_alter_add_column(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    validate_column_collation(
+        &col_spec.name,
+        col_spec.data_type,
+        col_spec.collation.as_deref(),
+    )?;
+
     // Validate: column doesn't already exist
     if table_def.column_index(&col_spec.name).is_some() {
         return Err(MuroError::Schema(format!(
@@ -213,6 +219,12 @@ pub(super) fn exec_alter_modify_column(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    validate_column_collation(
+        &col_spec.name,
+        col_spec.data_type,
+        col_spec.collation.as_deref(),
+    )?;
+
     let col_idx = table_def.column_index(&col_spec.name).ok_or_else(|| {
         MuroError::Schema(format!(
             "Column '{}' not found in table '{}'",
@@ -282,6 +294,12 @@ pub(super) fn exec_alter_change_column(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    validate_column_collation(
+        &col_spec.name,
+        col_spec.data_type,
+        col_spec.collation.as_deref(),
+    )?;
+
     let col_idx = table_def.column_index(old_name).ok_or_else(|| {
         MuroError::Schema(format!(
             "Column '{}' not found in table '{}'",

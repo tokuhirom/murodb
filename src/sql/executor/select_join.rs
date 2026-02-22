@@ -124,20 +124,41 @@ pub(super) fn exec_select_join(
 
         match join.join_type {
             JoinType::Inner => {
-                for left in &joined_rows {
+                if right_rows.len() < joined_rows.len() {
                     for right in &right_rows {
-                        let mut combined: Vec<(String, Value)> =
-                            Vec::with_capacity(left.len() + right.len());
-                        combined.extend(left.iter().cloned());
-                        combined.extend(right.iter().cloned());
+                        for left in &joined_rows {
+                            let mut combined: Vec<(String, Value)> =
+                                Vec::with_capacity(left.len() + right.len());
+                            // Keep logical row shape stable: left columns first, then right.
+                            combined.extend(left.iter().cloned());
+                            combined.extend(right.iter().cloned());
 
-                        if let Some(on_expr) = &join.on_condition {
-                            let val = eval_join_expr(on_expr, &combined)?;
-                            if is_truthy(&val) {
+                            if let Some(on_expr) = &join.on_condition {
+                                let val = eval_join_expr(on_expr, &combined)?;
+                                if is_truthy(&val) {
+                                    new_rows.push(combined);
+                                }
+                            } else {
                                 new_rows.push(combined);
                             }
-                        } else {
-                            new_rows.push(combined);
+                        }
+                    }
+                } else {
+                    for left in &joined_rows {
+                        for right in &right_rows {
+                            let mut combined: Vec<(String, Value)> =
+                                Vec::with_capacity(left.len() + right.len());
+                            combined.extend(left.iter().cloned());
+                            combined.extend(right.iter().cloned());
+
+                            if let Some(on_expr) = &join.on_condition {
+                                let val = eval_join_expr(on_expr, &combined)?;
+                                if is_truthy(&val) {
+                                    new_rows.push(combined);
+                                }
+                            } else {
+                                new_rows.push(combined);
+                            }
                         }
                     }
                 }
@@ -203,13 +224,25 @@ pub(super) fn exec_select_join(
                 }
             }
             JoinType::Cross => {
-                for left in &joined_rows {
+                if right_rows.len() < joined_rows.len() {
                     for right in &right_rows {
-                        let mut combined: Vec<(String, Value)> =
-                            Vec::with_capacity(left.len() + right.len());
-                        combined.extend(left.iter().cloned());
-                        combined.extend(right.iter().cloned());
-                        new_rows.push(combined);
+                        for left in &joined_rows {
+                            let mut combined: Vec<(String, Value)> =
+                                Vec::with_capacity(left.len() + right.len());
+                            combined.extend(left.iter().cloned());
+                            combined.extend(right.iter().cloned());
+                            new_rows.push(combined);
+                        }
+                    }
+                } else {
+                    for left in &joined_rows {
+                        for right in &right_rows {
+                            let mut combined: Vec<(String, Value)> =
+                                Vec::with_capacity(left.len() + right.len());
+                            combined.extend(left.iter().cloned());
+                            combined.extend(right.iter().cloned());
+                            new_rows.push(combined);
+                        }
                     }
                 }
             }

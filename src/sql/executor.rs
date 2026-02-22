@@ -54,7 +54,7 @@ use fts::{
 use indexing::{
     check_unique_index_constraints, check_unique_index_constraints_excluding,
     delete_from_secondary_indexes, encode_index_key_from_row, encode_pk_key, eval_index_seek_key,
-    eval_pk_seek_key, find_unique_index_conflict, index_seek_pk_keys,
+    eval_pk_seek_key, find_unique_index_conflict, index_seek_pk_keys, index_seek_pk_keys_range,
     insert_into_secondary_indexes, persist_indexes, replace_delete_unique_conflicts,
 };
 use insert::*;

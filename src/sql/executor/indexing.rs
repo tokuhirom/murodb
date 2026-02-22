@@ -138,6 +138,56 @@ pub(super) fn index_seek_pk_keys(
     }
 }
 
+/// Look up PK keys from an index for a key range on index columns.
+/// `lower`/`upper` bounds are compared against the index-key portion only
+/// (excluding appended PK suffix for non-unique indexes).
+pub(super) fn index_seek_pk_keys_range(
+    idx: &IndexDef,
+    lower: Option<(Vec<u8>, bool)>,
+    upper: Option<(Vec<u8>, bool)>,
+    pager: &mut impl PageStore,
+) -> Result<Vec<Vec<u8>>> {
+    let idx_btree = BTree::open(idx.btree_root);
+    let mut pk_keys = Vec::new();
+    let start_key = lower
+        .as_ref()
+        .map(|(k, _)| k.as_slice())
+        .unwrap_or(&[] as &[u8]);
+
+    idx_btree.scan_from(pager, start_key, |k, v| {
+        let idx_part: &[u8] = if idx.is_unique {
+            k
+        } else if k.len() >= v.len() {
+            &k[..k.len() - v.len()]
+        } else {
+            return Err(MuroError::Corruption(
+                "invalid non-unique index entry: key shorter than value".into(),
+            ));
+        };
+
+        if let Some((lower_key, inclusive)) = &lower {
+            match idx_part.cmp(lower_key) {
+                std::cmp::Ordering::Less => return Ok(true),
+                std::cmp::Ordering::Equal if !inclusive => return Ok(true),
+                _ => {}
+            }
+        }
+
+        if let Some((upper_key, inclusive)) = &upper {
+            match idx_part.cmp(upper_key) {
+                std::cmp::Ordering::Greater => return Ok(false),
+                std::cmp::Ordering::Equal if !inclusive => return Ok(true),
+                _ => {}
+            }
+        }
+
+        pk_keys.push(v.to_vec());
+        Ok(true)
+    })?;
+
+    Ok(pk_keys)
+}
+
 /// Check unique index constraints for a set of values.
 pub(super) fn check_unique_index_constraints(
     table_def: &TableDef,

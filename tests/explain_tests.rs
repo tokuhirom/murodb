@@ -182,3 +182,27 @@ fn test_explain_delete_index_seek() {
     assert_eq!(row[3].1, Value::Varchar("ref".to_string()));
     assert_eq!(row[4].1, Value::Varchar("idx_name".to_string()));
 }
+
+#[test]
+fn test_explain_composite_index_range_seek() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    )
+    .unwrap();
+    execute("CREATE INDEX idx_ab ON t(a, b)", &mut pager, &mut catalog).unwrap();
+
+    let rows = query_rows(
+        "EXPLAIN SELECT * FROM t WHERE a = 10 AND b >= 3 AND b <= 7",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    let row = &rows[0];
+    assert_eq!(row[3].1, Value::Varchar("range".to_string()));
+    assert_eq!(row[4].1, Value::Varchar("idx_ab".to_string()));
+}

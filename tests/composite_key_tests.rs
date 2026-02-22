@@ -688,6 +688,41 @@ fn test_non_unique_index_duplicate_values() {
 }
 
 #[test]
+fn test_composite_index_prefix_equality_with_range_on_last_column() {
+    let (mut pager, mut catalog, _dir) = setup();
+
+    exec(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, a INT, b INT, c VARCHAR)",
+        &mut pager,
+        &mut catalog,
+    );
+    exec("CREATE INDEX idx_ab ON t (a, b)", &mut pager, &mut catalog);
+
+    for i in 1..=8 {
+        let sql = format!(
+            "INSERT INTO t (id, a, b, c) VALUES ({}, 10, {}, 'v{}')",
+            i, i, i
+        );
+        exec(&sql, &mut pager, &mut catalog);
+    }
+    exec(
+        "INSERT INTO t (id, a, b, c) VALUES (100, 11, 3, 'other_a')",
+        &mut pager,
+        &mut catalog,
+    );
+
+    let rows = get_rows(exec(
+        "SELECT id FROM t WHERE a = 10 AND b BETWEEN 3 AND 5 ORDER BY id",
+        &mut pager,
+        &mut catalog,
+    ));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0][0].1, Value::Integer(3));
+    assert_eq!(rows[1][0].1, Value::Integer(4));
+    assert_eq!(rows[2][0].1, Value::Integer(5));
+}
+
+#[test]
 fn test_non_unique_single_column_index_duplicates() {
     let (mut pager, mut catalog, _dir) = setup();
 

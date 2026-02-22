@@ -55,6 +55,11 @@ pub(super) fn exec_explain(
             index_name.clone(),
             "Using where; Using index".to_string(),
         ),
+        Plan::IndexRangeSeek { index_name, .. } => (
+            "range",
+            index_name.clone(),
+            "Using where; Using index".to_string(),
+        ),
         Plan::FullScan { .. } => {
             let extra = if where_clause.is_some() {
                 "Using where"

@@ -94,6 +94,7 @@ pub enum Token {
     Key,
     Replace,
     Explain,
+    Analyze,
     Checkpoint,
     Database,
     Stats,
@@ -377,6 +378,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "KEY" => Token::Key,
         "REPLACE" => Token::Replace,
         "EXPLAIN" => Token::Explain,
+        "ANALYZE" => Token::Analyze,
         "CHECKPOINT" => Token::Checkpoint,
         "DATABASE" => Token::Database,
         "STATS" => Token::Stats,
@@ -500,5 +502,13 @@ mod tests {
     fn test_tokenize_auto_increment() {
         let tokens = tokenize("CREATE TABLE t (id BIGINT PRIMARY KEY AUTO_INCREMENT)").unwrap();
         assert!(tokens.contains(&Token::AutoIncrement));
+    }
+
+    #[test]
+    fn test_tokenize_analyze_table() {
+        let tokens = tokenize("ANALYZE TABLE users").unwrap();
+        assert_eq!(tokens[0], Token::Analyze);
+        assert_eq!(tokens[1], Token::Table);
+        assert_eq!(tokens[2], Token::Ident("users".to_string()));
     }
 }

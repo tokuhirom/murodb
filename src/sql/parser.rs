@@ -58,6 +58,7 @@ impl Parser {
             Some(Token::Replace) => Ok("replace".to_string()),
             Some(Token::Duplicate) => Ok("duplicate".to_string()),
             Some(Token::Explain) => Ok("explain".to_string()),
+            Some(Token::Analyze) => Ok("analyze".to_string()),
             Some(t) => Err(format!("Expected identifier, got {:?}", t)),
             None => Err("Expected identifier, got end of input".into()),
         }
@@ -77,6 +78,7 @@ impl Parser {
             }
             Some(Token::Update) => Statement::Update(self.parse_update()?),
             Some(Token::Delete) => Statement::Delete(self.parse_delete()?),
+            Some(Token::Analyze) => self.parse_analyze()?,
             Some(Token::Alter) => self.parse_alter()?,
             Some(Token::Rename) => self.parse_rename()?,
             Some(Token::Show) => self.parse_show()?,
@@ -115,6 +117,13 @@ impl Parser {
         }
 
         Ok(stmt)
+    }
+
+    fn parse_analyze(&mut self) -> Result<Statement, String> {
+        self.advance(); // ANALYZE
+        self.expect(&Token::Table)?;
+        let table_name = self.expect_ident()?;
+        Ok(Statement::AnalyzeTable(table_name))
     }
 
     fn parse_create(&mut self) -> Result<Statement, String> {
@@ -2138,6 +2147,16 @@ mod tests {
             ));
         } else {
             panic!("Expected Select");
+        }
+    }
+
+    #[test]
+    fn test_parse_analyze_table() {
+        let stmt = parse_sql("ANALYZE TABLE users").unwrap();
+        if let Statement::AnalyzeTable(name) = stmt {
+            assert_eq!(name, "users");
+        } else {
+            panic!("Expected AnalyzeTable");
         }
     }
 }

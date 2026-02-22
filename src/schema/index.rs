@@ -14,6 +14,8 @@ pub struct IndexDef {
     pub index_type: IndexType,
     pub is_unique: bool,
     pub btree_root: PageId,
+    /// Last analyzed distinct key count (0 means unknown / not analyzed).
+    pub stats_distinct_keys: u64,
 }
 
 impl IndexDef {
@@ -56,6 +58,8 @@ impl IndexDef {
             buf.extend_from_slice(&(cb.len() as u16).to_le_bytes());
             buf.extend_from_slice(cb);
         }
+        // stats_distinct_keys
+        buf.extend_from_slice(&self.stats_distinct_keys.to_le_bytes());
         buf
     }
 
@@ -147,6 +151,15 @@ impl IndexDef {
             }
         }
 
+        // stats_distinct_keys (optional for backward compat)
+        let stats_distinct_keys = if data.len() >= offset + 8 {
+            let n = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            n
+        } else {
+            0
+        };
+
         Some((
             IndexDef {
                 name,
@@ -155,6 +168,7 @@ impl IndexDef {
                 index_type,
                 is_unique,
                 btree_root,
+                stats_distinct_keys,
             },
             offset,
         ))
@@ -174,6 +188,7 @@ mod tests {
             index_type: IndexType::BTree,
             is_unique: true,
             btree_root: 42,
+            stats_distinct_keys: 0,
         };
         let bytes = idx.serialize();
         let (idx2, _) = IndexDef::deserialize(&bytes).unwrap();
@@ -194,6 +209,7 @@ mod tests {
             index_type: IndexType::BTree,
             is_unique: false,
             btree_root: 99,
+            stats_distinct_keys: 0,
         };
         let bytes = idx.serialize();
         let (idx2, _) = IndexDef::deserialize(&bytes).unwrap();

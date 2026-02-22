@@ -199,6 +199,9 @@ fn estimate_plan_rows(
 }
 
 fn estimate_table_rows(table_def: &TableDef, pager: &mut impl PageStore) -> Result<u64> {
+    if table_def.stats_row_count > 0 {
+        return Ok(table_def.stats_row_count);
+    }
     let data_btree = BTree::open(table_def.data_btree_root);
     let mut cnt: u64 = 0;
     data_btree.scan(pager, |_k, _v| {

@@ -23,6 +23,7 @@ pub enum Statement {
     Explain(Box<Statement>),
     ShowCheckpointStats,
     ShowDatabaseStats,
+    AnalyzeTable(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

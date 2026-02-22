@@ -65,6 +65,7 @@ pub(super) fn exec_select_without_table_inner(sel: &Select) -> Result<ExecResult
             data_btree_root: PageId::default(),
             next_rowid: 0,
             row_format_version: 0,
+            stats_row_count: 0,
         };
         let raw_rows = if where_passed {
             vec![vec![]]

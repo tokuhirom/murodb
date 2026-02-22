@@ -259,6 +259,7 @@ impl Session {
             | Statement::Insert(_)
             | Statement::Update(_)
             | Statement::Delete(_)
+            | Statement::AnalyzeTable(_)
             | Statement::Begin
             | Statement::Commit
             | Statement::Rollback => false,

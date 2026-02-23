@@ -30,6 +30,7 @@
 - [Files, WAL, and Locking](internals/files-and-locking.md)
 - [Storage](internals/storage.md)
 - [Catalog Format](internals/catalog-format.md)
+- [Foreign Keys](internals/foreign-keys.md)
 - [B-tree](internals/btree.md)
 - [Query Planning & Execution](internals/query-planning.md)
 - [Cryptography](internals/cryptography.md)

@@ -124,8 +124,9 @@ pub fn execute_statement(
         | Statement::Commit
         | Statement::Rollback
         | Statement::ShowCheckpointStats
-        | Statement::ShowDatabaseStats => Err(MuroError::Execution(
-            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS must be handled by Session".into(),
+        | Statement::ShowDatabaseStats
+        | Statement::AlterDatabaseRekey { .. } => Err(MuroError::Execution(
+            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS/ALTER DATABASE REKEY must be handled by Session".into(),
         )),
     }
 }

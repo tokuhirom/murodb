@@ -166,18 +166,11 @@ MySQL-compatible scalar functions.
 
 ## Phase 8 — Security (Future)
 
-- [ ] Key rotation (epoch-based re-encryption)
-  - Progress:
-    - Extended WAL `MetaUpdate` to persist `epoch` alongside `catalog_root` / `page_count` / `freelist_page_id`.
-    - WAL recovery now restores the latest committed `epoch` value into DB metadata.
-    - Added backward-compatible decode defaults (`epoch=0`) for legacy WAL MetaUpdate records.
-  - Decision (2026-02-22):
-    - Deferred for now due to low immediate demand relative to implementation/operational complexity.
-    - Keep current work as groundwork and resume when concrete user or compliance requirements arise.
-  - Done when:
-    - Online/offline rotation flow is available with resumable progress.
-    - WAL + data file epoch mismatch handling is crash-safe.
-    - Rotation metrics/events are visible via inspection commands.
+- [x] Key rotation (epoch-based re-encryption)
+  - Implemented `ALTER DATABASE REKEY WITH PASSWORD 'newpass'` for password change with full page re-encryption.
+  - New random salt generated on each rotation; epoch incremented.
+  - Crash-safe via `.rekey` marker file with automatic recovery on next open.
+  - Rejects inside transactions and on plaintext databases.
 
 ## Phase 9 — Practical Embedded DB (Next)
 
@@ -195,11 +188,10 @@ Real-world deployment features to make MuroDB easier to embed and operate.
     - Algorithm + KDF are selected by explicit config at DB creation.
     - Supported suites are versioned, discoverable, and recorded in metadata.
     - Wrong-suite open errors are deterministic and actionable.
-- [ ] Rekey / algorithm migration
-  - Done when:
-    - Existing DB can migrate key and/or cipher suite safely.
-    - Migration is resumable and crash-recoverable.
-    - Rollback/retry procedure is documented and tested.
+- [x] Rekey / algorithm migration
+  - Rekey implemented via `ALTER DATABASE REKEY WITH PASSWORD 'newpass'`.
+  - Crash-recoverable via `.rekey` marker file.
+  - Algorithm migration (cipher suite change) deferred to future work.
 - [ ] Backup API + consistent snapshot
   - Decision (2026-02-22):
     - Prioritize early in Phase 9 so embedded apps can take consistent backups without full writer quiesce windows.

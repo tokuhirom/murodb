@@ -313,6 +313,7 @@ fn is_read_only_statement(stmt: &Statement) -> bool {
         | Statement::Update(_)
         | Statement::Delete(_)
         | Statement::AnalyzeTable(_)
+        | Statement::AlterDatabaseRekey { .. }
         | Statement::Begin
         | Statement::Commit
         | Statement::Rollback => false,

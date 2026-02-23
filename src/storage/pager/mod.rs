@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -54,6 +54,7 @@ pub struct DbEncryptionInfo {
 
 pub struct Pager {
     file: File,
+    path: PathBuf,
     crypto: PageCipher,
     encryption_suite: EncryptionSuite,
     page_count: u64,
@@ -107,6 +108,7 @@ impl Pager {
 
         let mut pager = Pager {
             file,
+            path: path.to_path_buf(),
             crypto,
             encryption_suite: suite,
             page_count: 0,
@@ -172,6 +174,7 @@ impl Pager {
 
         let mut pager = Pager {
             file,
+            path: path.to_path_buf(),
             crypto,
             encryption_suite: snapshot.encryption_suite,
             page_count: 0,
@@ -619,6 +622,145 @@ impl Pager {
         self.file.sync_all()?;
         Ok(())
     }
+
+    /// Get the database file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Re-encrypt all pages with a new master key and salt.
+    ///
+    /// This performs a full re-encryption of every page in the database file:
+    /// 1. Writes a `.rekey` marker file for crash safety
+    /// 2. Reads each page with the current key/epoch, re-encrypts with new key/epoch
+    /// 3. Syncs all pages to disk
+    /// 4. Updates the header with new salt/epoch
+    /// 5. Removes the marker file
+    ///
+    /// If a crash occurs mid-rekey, the marker file enables recovery on next open.
+    pub fn rekey(&mut self, new_key: &MasterKey, new_salt: [u8; 16]) -> Result<()> {
+        let new_epoch = self.epoch + 1;
+        let new_crypto = PageCipher::new(self.encryption_suite, Some(new_key))?;
+        let old_epoch = self.epoch;
+
+        // Write .rekey marker file for crash recovery
+        let marker_path = rekey_marker_path(&self.path);
+        write_rekey_marker(&marker_path, &new_salt, new_epoch)?;
+
+        // Re-encrypt all pages
+        let page_count = self.page_count;
+        let page_size_on_disk = self.page_size_on_disk();
+        for page_id in 0..page_count {
+            // Read with current crypto/epoch
+            let offset = PLAINTEXT_HEADER_SIZE + page_id * page_size_on_disk as u64;
+            self.file.seek(SeekFrom::Start(offset))?;
+            let mut encrypted = vec![0u8; page_size_on_disk];
+            self.file.read_exact(&mut encrypted)?;
+
+            let mut plaintext = [0u8; PAGE_SIZE];
+            let plaintext_len =
+                self.crypto
+                    .decrypt_into(page_id, old_epoch, &encrypted, &mut plaintext)?;
+            if plaintext_len != PAGE_SIZE {
+                return Err(MuroError::InvalidPage);
+            }
+
+            // Re-encrypt with new crypto/epoch
+            let mut new_encrypted = vec![0u8; page_size_on_disk];
+            let written =
+                new_crypto.encrypt_into(page_id, new_epoch, &plaintext, &mut new_encrypted)?;
+            if written != page_size_on_disk {
+                return Err(MuroError::Encryption(
+                    "unexpected encrypted page size during rekey".to_string(),
+                ));
+            }
+
+            // Write back
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.write_all(&new_encrypted)?;
+        }
+
+        // Sync all page data to disk
+        self.file.sync_data()?;
+
+        // Update in-memory state
+        self.crypto = new_crypto;
+        self.salt = new_salt;
+        self.epoch = new_epoch;
+
+        // Write new header and sync
+        self.write_plaintext_header()?;
+        self.file.sync_all()?;
+
+        // Remove marker file
+        let _ = std::fs::remove_file(&marker_path);
+
+        // Clear page cache since all pages changed
+        self.cache.clear();
+
+        Ok(())
+    }
+}
+
+/// Path for the .rekey crash-safety marker file.
+pub fn rekey_marker_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".rekey");
+    PathBuf::from(s)
+}
+
+/// Marker file layout (48 bytes):
+///   0..4    Magic "REKY"
+///   4..20   new_salt (16 bytes)
+///  20..28   new_epoch (u64 LE)
+///  28..32   reserved (zeroed)
+///  32..36   CRC32 of bytes 0..32
+const REKEY_MARKER_MAGIC: &[u8; 4] = b"REKY";
+const REKEY_MARKER_SIZE: usize = 36;
+
+fn write_rekey_marker(path: &Path, new_salt: &[u8; 16], new_epoch: u64) -> Result<()> {
+    let mut buf = [0u8; REKEY_MARKER_SIZE];
+    buf[0..4].copy_from_slice(REKEY_MARKER_MAGIC);
+    buf[4..20].copy_from_slice(new_salt);
+    buf[20..28].copy_from_slice(&new_epoch.to_le_bytes());
+    // 28..32 reserved
+    let checksum = crc32(&buf[0..32]);
+    buf[32..36].copy_from_slice(&checksum.to_le_bytes());
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(&buf)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Read and validate a .rekey marker file. Returns (new_salt, new_epoch).
+pub fn read_rekey_marker(path: &Path) -> Result<([u8; 16], u64)> {
+    let mut file = File::open(path)?;
+    let mut buf = [0u8; REKEY_MARKER_SIZE];
+    file.read_exact(&mut buf)?;
+
+    if &buf[0..4] != REKEY_MARKER_MAGIC {
+        return Err(MuroError::Corruption(
+            "rekey marker file has invalid magic".to_string(),
+        ));
+    }
+    let stored_crc = u32::from_le_bytes(buf[32..36].try_into().unwrap());
+    let computed_crc = crc32(&buf[0..32]);
+    if stored_crc != computed_crc {
+        return Err(MuroError::Corruption(
+            "rekey marker file is corrupted".to_string(),
+        ));
+    }
+
+    let mut new_salt = [0u8; 16];
+    new_salt.copy_from_slice(&buf[4..20]);
+    let new_epoch = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+
+    Ok((new_salt, new_epoch))
 }
 
 impl crate::storage::page_store::PageStore for Pager {

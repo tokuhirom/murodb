@@ -37,6 +37,7 @@ pub enum Statement {
     ShowCheckpointStats,
     ShowDatabaseStats,
     AnalyzeTable(String),
+    AlterDatabaseRekey { password: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

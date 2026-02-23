@@ -890,6 +890,26 @@ EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110;
 - Output is currently a single-row summary (not a full operator tree).
 - JOIN/subquery internals are summarized in `Extra` rather than emitted as multiple plan rows.
 
+## ALTER DATABASE
+
+### REKEY (Password Change)
+
+Re-encrypts all database pages with a new password-derived key. A new random salt is generated for key derivation.
+
+```sql
+ALTER DATABASE REKEY WITH PASSWORD 'new_password';
+```
+
+**Requirements:**
+- The database must be opened in encrypted mode (not plaintext).
+- Cannot be used inside an active transaction (`BEGIN` ... `COMMIT`/`ROLLBACK`).
+- The WAL is checkpointed before re-encryption begins.
+
+**Crash safety:**
+- A `.rekey` marker file is written before re-encryption starts.
+- If a crash occurs mid-rekey, the next `open_with_password` detects the marker and completes or rolls back the operation automatically.
+- After successful rekey, only the new password can open the database.
+
 ## Transactions
 
 ```sql

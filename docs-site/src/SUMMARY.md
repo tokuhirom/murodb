@@ -16,6 +16,7 @@
 - [Benchmarks](user-guide/benchmarks.md)
 - [Full-Text Search](user-guide/full-text-search.md)
 - [Recovery](user-guide/recovery.md)
+- [Backup & Restore](user-guide/backup.md)
 - [Checkpoint Policy Tuning](user-guide/checkpoint-policy.md)
 - [Alerting & Monitoring](user-guide/alerting.md)
 - [Incident Response Runbook](user-guide/runbook.md)

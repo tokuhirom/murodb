@@ -108,8 +108,47 @@ Two different cases:
    - normal behavior is page split (leaf/internal), with separator propagation up to root.
    - this is fully supported.
 2. Single-cell-too-large case (one key/value entry itself is huge):
-   - current implementation has no overflow/LOB pages.
-   - insert returns `PageOverflow` instead of spilling payload to extra pages.
+   - value-only overflow pages store large values that exceed page capacity.
+   - keys remain inline (max ~4,071 bytes); values spill to overflow page chains.
+
+## Overflow Pages
+
+When a leaf cell (key + value) exceeds ~4,073 bytes, the value is stored in an overflow page chain.
+
+### Overflow cell format
+
+Normal leaf cell: `[key_len: u16][key][value]`
+
+Overflow leaf cell: `[key_len|0x8000: u16][key][total_value_len: u32][first_overflow_page: u64]`
+
+The high bit of `key_len` (0x8000) signals an overflow cell. All value data is stored in the overflow chain; the leaf cell contains only the key and metadata pointer.
+
+### Overflow page layout
+
+Overflow pages use a simple linked-list format (not slotted pages):
+
+```
+[page_id: u64]       bytes 0..8   (standard page header)
+[0xFF marker: u8]    byte 8       (distinguishes from B-tree nodes)
+[next_page: u64]     bytes 9..17  (next page in chain, u64::MAX = end)
+[chunk_len: u16]     bytes 17..19 (length of data in this page)
+[chunk data]         bytes 19..   (up to 4,077 bytes per page)
+```
+
+### Operations
+
+- **Insert**: if `needs_overflow(key, value)`, write value to overflow chain, store chain head pointer in leaf cell.
+- **Search/Scan**: on overflow cell, call `read_overflow_chain` to reconstruct the full value.
+- **Delete**: free all overflow pages before removing the leaf cell.
+- **Update**: free old overflow chain (if any), then create new cell (inline or overflow).
+- **Split/Merge**: work with raw cell bytes to preserve overflow pointers without touching overflow data.
+- **collect_all_pages**: includes overflow page IDs for each overflow cell.
+
+### Implementation
+
+- `src/storage/overflow.rs`: `write_overflow_chain`, `read_overflow_chain`, `free_overflow_chain`, `collect_overflow_pages`
+- `src/btree/node.rs`: `needs_overflow`, `encode_overflow_leaf_cell`, `is_overflow_cell`, `decode_overflow_metadata`
+- `src/btree/ops/mod.rs`: overflow-aware insert/search/scan/delete/split/merge
 
 ## Delete/Rebalance Path
 

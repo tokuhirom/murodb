@@ -9,11 +9,14 @@ serialization formats, and design decisions of the storage engine.
 |---|---|---|
 | Page size | 4,096 bytes | Fixed; all data pages, B-tree nodes, and catalog entries use this size |
 | Page header | 14 bytes | page_id (8) + cell_count (2) + free_start (2) + free_end (2) |
-| Max row size | ~4,048 bytes | Depends on key size and column overhead; row overflow is not supported |
-| Max cell payload | ~4,078 bytes | 4,096 − 14 (header) − 2 (cell pointer) − 2 (cell length prefix) |
+| Max inline row size | ~4,073 bytes | Rows within this limit are stored inline in a single page |
+| Max row size (with overflow) | ~4 GB | Limited by u32 total_value_len; values exceeding inline limit use overflow pages |
+| Max cell payload | ~4,073 bytes | 4,096 − 14 (header) − 5 (node header cell) − 4 (cell pointer + length prefix) |
+| Overflow chunk size | 4,077 bytes | Per overflow page: 4,096 − 19 bytes header |
 
-Rows that exceed the page capacity will produce a **PageOverflow** error.
-MuroDB does not currently support row overflow pages; a single row must fit within one page.
+Rows with values that exceed the inline page capacity automatically use **overflow pages**.
+The value is stored in a chain of overflow pages, with the leaf cell containing only the key
+and a pointer to the first overflow page. Keys must still fit inline (max ~4,071 bytes).
 
 ## Column Limits
 
@@ -38,9 +41,9 @@ MuroDB does not currently support row overflow pages; a single row must fit with
 
 | Limit | Value | Notes |
 |---|---|---|
-| VARCHAR(n) max n | 4,294,967,295 (u32) | Practical max is ~4,048 bytes due to page capacity |
-| VARBINARY(n) max n | 4,294,967,295 (u32) | Practical max is ~4,048 bytes due to page capacity |
-| TEXT max size | ~4,048 bytes | Same as VARCHAR; limited by page capacity |
+| VARCHAR(n) max n | 4,294,967,295 (u32) | Values exceeding ~4,073 bytes use overflow pages |
+| VARBINARY(n) max n | 4,294,967,295 (u32) | Values exceeding ~4,073 bytes use overflow pages |
+| TEXT max size | ~4 GB | Limited by u32 value length; large values use overflow pages |
 | VARCHAR(n) length check | Character-based | `VARCHAR(100)` allows up to 100 *characters* (MySQL-compatible) |
 
 > **Note:** MuroDB checks `VARCHAR(n)` against *character count*, consistent with MySQL.

@@ -187,6 +187,7 @@ pub(super) fn ast_expr_to_default(expr: &Expr) -> Option<DefaultValue> {
         Expr::FloatLiteral(n) => Some(DefaultValue::Float(*n)),
         Expr::StringLiteral(s) => Some(DefaultValue::String(s.clone())),
         Expr::Null => Some(DefaultValue::Null),
+        Expr::Cast { expr, .. } => ast_expr_to_default(expr),
         _ => None,
     }
 }

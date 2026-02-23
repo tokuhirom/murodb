@@ -91,6 +91,13 @@ pub fn read_overflow_chain(
         let next_page_id = u64::from_le_bytes(page.data[9..17].try_into().unwrap());
         let chunk_len = u16::from_le_bytes(page.data[17..19].try_into().unwrap()) as usize;
 
+        if chunk_len > OVERFLOW_CHUNK_SIZE {
+            return Err(MuroError::Corruption(format!(
+                "overflow page {} has invalid chunk_len {} (max {})",
+                current_page_id, chunk_len, OVERFLOW_CHUNK_SIZE
+            )));
+        }
+
         let to_read = chunk_len.min(remaining - bytes_read);
         result.extend_from_slice(&page.data[19..19 + to_read]);
         bytes_read += to_read;

@@ -14,6 +14,7 @@
 | TIMESTAMP | 8 bytes | `YYYY-MM-DD HH:MM:SS` (timezone-aware input, normalized to UTC) |
 | VARCHAR(n) | variable | max n bytes (optional) |
 | TEXT | variable | unbounded text |
+| JSONB | variable | Canonical JSON text (validated on write) |
 | VARBINARY(n) | variable | max n bytes (optional) |
 | FLOAT | 4 bytes | Single-precision IEEE 754 |
 | DOUBLE | 8 bytes | Double-precision IEEE 754 |
@@ -682,7 +683,63 @@ SELECT CAST(42 AS VARCHAR);    -- '42'
 SELECT CAST(val AS BIGINT) FROM t;
 ```
 
-Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DECIMAL(p,s), DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DECIMAL(p,s), DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, JSONB, VARBINARY.
+
+### JSON Functions
+
+`JSONB` accepts valid JSON only. Values are canonicalized when stored.
+
+```sql
+CREATE TABLE docs (id BIGINT PRIMARY KEY, doc JSONB);
+INSERT INTO docs VALUES (1, '{"a":{"b":[1,2,3]}}');
+```
+
+#### JSON_EXTRACT(json, path)
+
+Evaluates `path` using `jsonpath_lib` JSONPath semantics and returns matched JSON (canonical text). If multiple values match, returns a JSON array.
+
+```sql
+SELECT JSON_EXTRACT('{"a":{"b":1}}', '$.a.b'); -- "1"
+```
+
+#### JSON_SET(json, path, value)
+
+Sets `value` at `path` and returns updated JSON. Supported update-path syntax is root-based dot/index form (`$.key`, `$.arr[0]`, chained combinations).
+
+```sql
+SELECT JSON_SET('{"a":1}', '$.b', 2); -- {"a":1,"b":2}
+```
+
+#### JSON_REMOVE(json, path)
+
+Removes value at `path` and returns updated JSON. Missing path is a no-op.
+
+```sql
+SELECT JSON_REMOVE('{"a":1,"b":2}', '$.a'); -- {"b":2}
+```
+
+#### JSON_TYPE(json)
+
+Returns one of: `NULL`, `BOOLEAN`, `INTEGER`, `DOUBLE`, `STRING`, `ARRAY`, `OBJECT`.
+
+```sql
+SELECT JSON_TYPE('[1,2,3]'); -- ARRAY
+```
+
+#### JSON_CONTAINS(json, value_or_path)
+
+- If second argument starts with `$`, it is evaluated as JSONPath (via `jsonpath_lib`); returns `1` when any match exists.
+- Otherwise it is treated as a JSON candidate value and checked for containment.
+
+```sql
+SELECT JSON_CONTAINS('{"a":{"b":1}}', '$.a.b'); -- 1
+SELECT JSON_CONTAINS('{"a":1,"b":2}', '{"b":2}'); -- 1
+```
+
+JSON function behavior:
+- If any argument is `NULL`, returns `NULL`.
+- Invalid JSON input returns an error.
+- Invalid/unsupported update-path syntax in `JSON_SET`/`JSON_REMOVE` returns an error.
 
 ## Aggregation & GROUP BY
 

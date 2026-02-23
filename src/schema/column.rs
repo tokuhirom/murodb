@@ -101,6 +101,7 @@ impl ColumnDef {
             DataType::Timestamp => 12,
             DataType::Uuid => 13,
             DataType::Decimal(_, _) => 14,
+            DataType::Jsonb => 15,
         });
         // flags
         let mut flags: u8 = 0;
@@ -229,6 +230,7 @@ impl ColumnDef {
                 consumed += 4;
                 DataType::Decimal(p, s)
             }
+            15 => DataType::Jsonb,
             _ => return None,
         };
 
@@ -352,6 +354,7 @@ mod tests {
             DataType::Varbinary(None),
             DataType::Varbinary(Some(512)),
             DataType::Text,
+            DataType::Jsonb,
             DataType::Uuid,
             DataType::Decimal(10, 0),
             DataType::Decimal(18, 2),

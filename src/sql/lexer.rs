@@ -114,6 +114,7 @@ pub enum Token {
     VarcharType,   // "VARCHAR"
     VarbinaryType, // "VARBINARY"
     TextType,      // "TEXT"
+    JsonbType,     // "JSONB"
     BooleanType,   // "BOOLEAN" / "BOOL"
     UuidType,      // "UUID"
     DecimalType,   // "DECIMAL" / "NUMERIC"
@@ -470,6 +471,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "VARCHAR" => Token::VarcharType,
         "VARBINARY" => Token::VarbinaryType,
         "TEXT" => Token::TextType,
+        "JSONB" => Token::JsonbType,
         "UUID" => Token::UuidType,
         "DECIMAL" | "NUMERIC" => Token::DecimalType,
         "FTS_SNIPPET" => Token::FtsSnippet,
@@ -533,6 +535,12 @@ mod tests {
         assert_eq!(tokens[2], Token::If);
         assert_eq!(tokens[3], Token::Exists);
         assert_eq!(tokens[4], Token::Ident("t".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_jsonb_type() {
+        let tokens = tokenize("CREATE TABLE t (doc JSONB)").unwrap();
+        assert!(tokens.contains(&Token::JsonbType));
     }
 
     #[test]

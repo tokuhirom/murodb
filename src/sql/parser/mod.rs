@@ -488,6 +488,7 @@ impl Parser {
                     Ok(DataType::Varbinary(size))
                 }
                 Some(Token::TextType) => Ok(DataType::Text),
+                Some(Token::JsonbType) => Ok(DataType::Jsonb),
                 Some(Token::UuidType) => Ok(DataType::Uuid),
                 Some(Token::DecimalType) => {
                     // Parse optional (precision, scale) with defaults (10, 0)

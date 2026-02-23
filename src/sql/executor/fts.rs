@@ -576,6 +576,11 @@ pub(super) fn validate_value(value: &Value, data_type: &DataType) -> Result<()> 
                 Ok(())
             }
         }
+        (Value::Varchar(s), DataType::Jsonb) => {
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| MuroError::Execution(format!("Invalid JSON: {}", e)))?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

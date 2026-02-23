@@ -322,3 +322,37 @@ fn test_parse_alter_database_rekey_case_insensitive_removed() {
     let err = parse_sql("alter database rekey with password 'test'").unwrap_err();
     assert!(err.contains("Only ALTER TABLE is supported"));
 }
+
+#[test]
+fn test_rekey_refreshes_stale_handle_before_reencrypt() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut writer = Database::create_with_password(&db_path, "old").unwrap();
+    writer
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, payload VARCHAR)")
+        .unwrap();
+
+    // Open a second handle first so it has stale pager metadata.
+    let mut stale = Database::open_with_password(&db_path, "old").unwrap();
+
+    // Grow the database from the writer handle.
+    for i in 0..500 {
+        writer
+            .execute(&format!(
+                "INSERT INTO t VALUES ({}, '{}')",
+                i,
+                "x".repeat(256)
+            ))
+            .unwrap();
+    }
+    writer.flush().unwrap();
+
+    // Rekey from stale handle. This must refresh before iterating pages.
+    stale.rekey_with_password("new").unwrap();
+
+    // New password must open and all rows must remain readable.
+    let mut reopened = Database::open_with_password(&db_path, "new").unwrap();
+    let rows = reopened.query("SELECT COUNT(*) AS cnt FROM t").unwrap();
+    assert_eq!(rows[0].get("cnt"), Some(&Value::Integer(500)));
+}

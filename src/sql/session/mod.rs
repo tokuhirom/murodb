@@ -321,6 +321,9 @@ impl Session {
     ///
     /// Must not be called inside an active transaction.
     pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
+        self.check_poisoned()?;
+        self.refresh_from_disk_if_needed()?;
+
         // Reject if inside an active transaction
         if self.active_tx.is_some() {
             return Err(MuroError::Execution(

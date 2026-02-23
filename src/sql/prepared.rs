@@ -129,7 +129,9 @@ fn count_statement_bind_params(stmt: &Statement) -> usize {
                         .map(count_expr_bind_params)
                         .unwrap_or(0)
             }
-            AlterTableOp::DropColumn(_) => 0,
+            AlterTableOp::DropColumn(_)
+            | AlterTableOp::AddForeignKey(_)
+            | AlterTableOp::DropForeignKey(_) => 0,
         },
         Statement::CreateIndex(_)
         | Statement::CreateFulltextIndex(_)
@@ -302,7 +304,9 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
             | AlterTableOp::ChangeColumn(_, spec) => {
                 bind_column_spec_in_place(spec, params, next)?;
             }
-            AlterTableOp::DropColumn(_) => {}
+            AlterTableOp::DropColumn(_)
+            | AlterTableOp::AddForeignKey(_)
+            | AlterTableOp::DropForeignKey(_) => {}
         },
         Statement::CreateIndex(_)
         | Statement::CreateFulltextIndex(_)

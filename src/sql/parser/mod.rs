@@ -231,18 +231,36 @@ impl Parser {
         let operation = match self.peek() {
             Some(Token::Add) => {
                 self.advance(); // ADD
-                                // Optional COLUMN keyword
-                if self.peek() == Some(&Token::Column) {
-                    self.advance();
+                if self.peek() == Some(&Token::Foreign) {
+                    let fk = self.parse_foreign_key_spec()?;
+                    AlterTableOp::AddForeignKey(fk)
+                } else {
+                    // Optional COLUMN keyword
+                    if self.peek() == Some(&Token::Column) {
+                        self.advance();
+                    }
+                    let col_spec = self.parse_column_spec()?;
+                    AlterTableOp::AddColumn(col_spec)
                 }
-                let col_spec = self.parse_column_spec()?;
-                AlterTableOp::AddColumn(col_spec)
             }
             Some(Token::Drop) => {
                 self.advance(); // DROP
-                self.expect(&Token::Column)?;
-                let col_name = self.expect_ident()?;
-                AlterTableOp::DropColumn(col_name)
+                match self.peek() {
+                    Some(Token::Column) => {
+                        self.advance();
+                        let col_name = self.expect_ident()?;
+                        AlterTableOp::DropColumn(col_name)
+                    }
+                    Some(Token::Foreign) => {
+                        self.advance(); // FOREIGN
+                        self.expect(&Token::Key)?;
+                        self.expect(&Token::LParen)?;
+                        let cols = self.parse_ident_list()?;
+                        self.expect(&Token::RParen)?;
+                        AlterTableOp::DropForeignKey(cols)
+                    }
+                    _ => return Err("Expected COLUMN or FOREIGN KEY after DROP".into()),
+                }
             }
             Some(Token::Modify) => {
                 self.advance(); // MODIFY
@@ -334,6 +352,28 @@ impl Parser {
                         continue;
                     }
                 }
+                Some(Token::Foreign) => {
+                    let fk = self.parse_foreign_key_spec()?;
+                    constraints.push(TableConstraint::ForeignKey {
+                        columns: fk.columns,
+                        ref_table: fk.ref_table,
+                        ref_columns: fk.ref_columns,
+                        on_delete: fk.on_delete,
+                        on_update: fk.on_update,
+                    });
+
+                    match self.peek() {
+                        Some(Token::Comma) => {
+                            self.advance();
+                        }
+                        Some(Token::RParen) => {
+                            self.advance();
+                            break;
+                        }
+                        _ => return Err("Expected ',' or ')' after table constraint".into()),
+                    }
+                    continue;
+                }
                 _ => {}
             }
 
@@ -368,6 +408,66 @@ impl Parser {
             names.push(self.expect_ident()?);
         }
         Ok(names)
+    }
+
+    fn parse_foreign_key_spec(&mut self) -> Result<ForeignKeySpec, String> {
+        self.expect(&Token::Foreign)?;
+        self.expect(&Token::Key)?;
+        self.expect(&Token::LParen)?;
+        let columns = self.parse_ident_list()?;
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::References)?;
+        let ref_table = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let ref_columns = self.parse_ident_list()?;
+        self.expect(&Token::RParen)?;
+
+        let mut on_delete = ForeignKeyAction::Restrict;
+        let mut on_update = ForeignKeyAction::Restrict;
+        loop {
+            if self.peek() != Some(&Token::On) {
+                break;
+            }
+            self.advance(); // ON
+            match self.peek() {
+                Some(Token::Delete) => {
+                    self.advance();
+                    on_delete = self.parse_foreign_key_action()?;
+                }
+                Some(Token::Update) => {
+                    self.advance();
+                    on_update = self.parse_foreign_key_action()?;
+                }
+                _ => return Err("Expected DELETE or UPDATE after ON".into()),
+            }
+        }
+
+        Ok(ForeignKeySpec {
+            columns,
+            ref_table,
+            ref_columns,
+            on_delete,
+            on_update,
+        })
+    }
+
+    fn parse_foreign_key_action(&mut self) -> Result<ForeignKeyAction, String> {
+        match self.peek() {
+            Some(Token::Cascade) => {
+                self.advance();
+                Ok(ForeignKeyAction::Cascade)
+            }
+            Some(Token::Set) => {
+                self.advance();
+                self.expect(&Token::Null)?;
+                Ok(ForeignKeyAction::SetNull)
+            }
+            Some(Token::Restrict) => {
+                self.advance();
+                Ok(ForeignKeyAction::Restrict)
+            }
+            _ => Err("Expected CASCADE, SET NULL, or RESTRICT".into()),
+        }
     }
 
     fn parse_column_spec(&mut self) -> Result<ColumnSpec, String> {

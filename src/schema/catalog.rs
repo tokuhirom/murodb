@@ -12,6 +12,40 @@ use crate::schema::index::IndexDef;
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
 const META_FTS_TERM_KEY: &[u8] = b"meta:fts_term_key";
+const FK_LAYOUT_V2_TAG: u8 = 0xF1;
+
+fn serialize_fk_action(action: &ForeignKeyAction) -> u8 {
+    match action {
+        ForeignKeyAction::Restrict => 0,
+        ForeignKeyAction::Cascade => 1,
+        ForeignKeyAction::SetNull => 2,
+    }
+}
+
+fn deserialize_fk_action(v: u8) -> Option<ForeignKeyAction> {
+    match v {
+        0 => Some(ForeignKeyAction::Restrict),
+        1 => Some(ForeignKeyAction::Cascade),
+        2 => Some(ForeignKeyAction::SetNull),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyDef {
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
 
 /// Table definition.
 #[derive(Debug, Clone)]
@@ -26,6 +60,7 @@ pub struct TableDef {
     pub row_format_version: u8,
     /// Last analyzed approximate row count (0 means unknown / not analyzed).
     pub stats_row_count: u64,
+    pub foreign_keys: Vec<ForeignKeyDef>,
 }
 
 impl TableDef {
@@ -71,6 +106,28 @@ impl TableDef {
         buf.push(self.row_format_version);
         // stats_row_count
         buf.extend_from_slice(&self.stats_row_count.to_le_bytes());
+        // foreign_keys (optional tail, backward compatible)
+        buf.push(FK_LAYOUT_V2_TAG);
+        buf.extend_from_slice(&(self.foreign_keys.len() as u16).to_le_bytes());
+        for fk in &self.foreign_keys {
+            buf.extend_from_slice(&(fk.columns.len() as u16).to_le_bytes());
+            for col in &fk.columns {
+                let b = col.as_bytes();
+                buf.extend_from_slice(&(b.len() as u16).to_le_bytes());
+                buf.extend_from_slice(b);
+            }
+            let t = fk.ref_table.as_bytes();
+            buf.extend_from_slice(&(t.len() as u16).to_le_bytes());
+            buf.extend_from_slice(t);
+            buf.extend_from_slice(&(fk.ref_columns.len() as u16).to_le_bytes());
+            for col in &fk.ref_columns {
+                let b = col.as_bytes();
+                buf.extend_from_slice(&(b.len() as u16).to_le_bytes());
+                buf.extend_from_slice(b);
+            }
+            buf.push(serialize_fk_action(&fk.on_delete));
+            buf.push(serialize_fk_action(&fk.on_update));
+        }
         buf
     }
 
@@ -175,9 +232,123 @@ impl TableDef {
 
         // stats_row_count (optional, defaults to 0 for old tables)
         let stats_row_count = if data.len() >= offset + 8 {
-            u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+            let v = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+            v
         } else {
             0
+        };
+
+        // foreign_keys (optional tail)
+        let foreign_keys = if data.len() > offset {
+            let (fk_count, has_actions) = if data[offset] == FK_LAYOUT_V2_TAG {
+                offset += 1;
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                (
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize,
+                    true,
+                )
+            } else {
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                (
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize,
+                    false,
+                )
+            };
+            offset += 2;
+            let mut fks = Vec::with_capacity(fk_count);
+            for _ in 0..fk_count {
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                let child_count =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                let mut columns = Vec::with_capacity(child_count);
+                for _ in 0..child_count {
+                    if data.len() < offset + 2 {
+                        return None;
+                    }
+                    let len =
+                        u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                    offset += 2;
+                    if data.len() < offset + len {
+                        return None;
+                    }
+                    let col = String::from_utf8(data[offset..offset + len].to_vec()).ok()?;
+                    offset += len;
+                    columns.push(col);
+                }
+
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                let table_len =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                if data.len() < offset + table_len {
+                    return None;
+                }
+                let ref_table =
+                    String::from_utf8(data[offset..offset + table_len].to_vec()).ok()?;
+                offset += table_len;
+
+                if data.len() < offset + 2 {
+                    return None;
+                }
+                let parent_count =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                offset += 2;
+                let mut ref_columns = Vec::with_capacity(parent_count);
+                for _ in 0..parent_count {
+                    if data.len() < offset + 2 {
+                        return None;
+                    }
+                    let len =
+                        u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+                    offset += 2;
+                    if data.len() < offset + len {
+                        return None;
+                    }
+                    let col = String::from_utf8(data[offset..offset + len].to_vec()).ok()?;
+                    offset += len;
+                    ref_columns.push(col);
+                }
+                let on_delete = if has_actions {
+                    if data.len() < offset + 1 {
+                        return None;
+                    }
+                    let a = deserialize_fk_action(data[offset])?;
+                    offset += 1;
+                    a
+                } else {
+                    ForeignKeyAction::Restrict
+                };
+                let on_update = if has_actions {
+                    if data.len() < offset + 1 {
+                        return None;
+                    }
+                    let a = deserialize_fk_action(data[offset])?;
+                    offset += 1;
+                    a
+                } else {
+                    ForeignKeyAction::Restrict
+                };
+                fks.push(ForeignKeyDef {
+                    columns,
+                    ref_table,
+                    ref_columns,
+                    on_delete,
+                    on_update,
+                });
+            }
+            fks
+        } else {
+            Vec::new()
         };
 
         Some(TableDef {
@@ -188,6 +359,7 @@ impl TableDef {
             next_rowid,
             row_format_version,
             stats_row_count,
+            foreign_keys,
         })
     }
 
@@ -314,6 +486,7 @@ impl SystemCatalog {
             next_rowid: 0,
             row_format_version: 1,
             stats_row_count: 0,
+            foreign_keys: Vec::new(),
         };
 
         // Store in catalog
@@ -528,6 +701,7 @@ mod tests {
             next_rowid: 0,
             row_format_version: 1,
             stats_row_count: 0,
+            foreign_keys: Vec::new(),
         };
 
         let bytes = table.serialize();

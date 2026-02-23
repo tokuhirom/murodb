@@ -28,6 +28,183 @@ pub(super) fn exec_alter_table(
             pager,
             catalog,
         ),
+        AlterTableOp::AddForeignKey(fk) => {
+            exec_alter_add_foreign_key(table_def, fk, &at.table_name, pager, catalog)
+        }
+        AlterTableOp::DropForeignKey(columns) => {
+            exec_alter_drop_foreign_key(table_def, columns, &at.table_name, pager, catalog)
+        }
+    }
+}
+
+fn exec_alter_add_foreign_key(
+    mut table_def: TableDef,
+    fk: &ForeignKeySpec,
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    if fk.columns.is_empty() || fk.ref_columns.is_empty() {
+        return Err(MuroError::Schema(
+            "FOREIGN KEY columns cannot be empty".into(),
+        ));
+    }
+    if fk.columns.len() != fk.ref_columns.len() {
+        return Err(MuroError::Schema(
+            "FOREIGN KEY column count must match referenced column count".into(),
+        ));
+    }
+    if table_def.foreign_keys.iter().any(|existing| {
+        existing.columns == fk.columns
+            && existing.ref_table == fk.ref_table
+            && existing.ref_columns == fk.ref_columns
+    }) {
+        return Err(MuroError::Schema("Duplicate FOREIGN KEY constraint".into()));
+    }
+
+    let mut child_types = Vec::with_capacity(fk.columns.len());
+    for col_name in &fk.columns {
+        let Some(idx) = table_def.column_index(col_name) else {
+            return Err(MuroError::Schema(format!(
+                "Column '{}' not found in table '{}'",
+                col_name, table_name
+            )));
+        };
+        child_types.push(table_def.columns[idx].data_type);
+    }
+
+    let (parent_types, unique_sets) = if fk.ref_table == table_name {
+        let mut parent_types = Vec::with_capacity(fk.ref_columns.len());
+        for col_name in &fk.ref_columns {
+            let Some(idx) = table_def.column_index(col_name) else {
+                return Err(MuroError::Schema(format!(
+                    "Referenced column '{}.{}' not found",
+                    fk.ref_table, col_name
+                )));
+            };
+            parent_types.push(table_def.columns[idx].data_type);
+        }
+        let mut unique_sets = vec![table_def.pk_columns.clone()];
+        for idx in catalog.get_indexes_for_table(pager, table_name)? {
+            if idx.is_unique {
+                unique_sets.push(idx.column_names);
+            }
+        }
+        (parent_types, unique_sets)
+    } else {
+        let parent_def = catalog.get_table(pager, &fk.ref_table)?.ok_or_else(|| {
+            MuroError::Schema(format!(
+                "Referenced table '{}' not found for FOREIGN KEY",
+                fk.ref_table
+            ))
+        })?;
+        let mut parent_types = Vec::with_capacity(fk.ref_columns.len());
+        for col_name in &fk.ref_columns {
+            let Some(idx) = parent_def.column_index(col_name) else {
+                return Err(MuroError::Schema(format!(
+                    "Referenced column '{}.{}' not found",
+                    fk.ref_table, col_name
+                )));
+            };
+            parent_types.push(parent_def.columns[idx].data_type);
+        }
+        let mut unique_sets = vec![parent_def.pk_columns.clone()];
+        for idx in catalog.get_indexes_for_table(pager, &fk.ref_table)? {
+            if idx.is_unique {
+                unique_sets.push(idx.column_names);
+            }
+        }
+        (parent_types, unique_sets)
+    };
+
+    if !unique_sets.iter().any(|cols| cols == &fk.ref_columns) {
+        return Err(MuroError::Schema(format!(
+            "Referenced columns '{}.({})' must be PRIMARY KEY or UNIQUE",
+            fk.ref_table,
+            fk.ref_columns.join(", ")
+        )));
+    }
+    for (child_ty, parent_ty) in child_types.iter().zip(parent_types.iter()) {
+        if child_ty != parent_ty {
+            return Err(MuroError::Schema(format!(
+                "FOREIGN KEY type mismatch: child '{}' and parent '{}' must have same type",
+                child_ty, parent_ty
+            )));
+        }
+    }
+
+    let new_fk = ForeignKeyDef {
+        columns: fk.columns.clone(),
+        ref_table: fk.ref_table.clone(),
+        ref_columns: fk.ref_columns.clone(),
+        on_delete: map_fk_action(fk.on_delete),
+        on_update: map_fk_action(fk.on_update),
+    };
+
+    let mut candidate = table_def.clone();
+    candidate.foreign_keys.push(new_fk.clone());
+    let data_btree = BTree::open(table_def.data_btree_root);
+    let mut existing_rows: Vec<Vec<Value>> = Vec::new();
+    data_btree.scan(pager, |_k, row| {
+        let values =
+            deserialize_row_versioned(row, &candidate.columns, candidate.row_format_version)?;
+        existing_rows.push(values);
+        Ok(true)
+    })?;
+    for values in &existing_rows {
+        enforce_child_foreign_keys(&candidate, values, pager, catalog)?;
+    }
+
+    table_def.foreign_keys.push(new_fk);
+    catalog.update_table(pager, &table_def)?;
+    Ok(ExecResult::Ok)
+}
+
+fn exec_alter_drop_foreign_key(
+    mut table_def: TableDef,
+    columns: &[String],
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+) -> Result<ExecResult> {
+    let matches: Vec<usize> = table_def
+        .foreign_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(i, fk)| (fk.columns == columns).then_some(i))
+        .collect();
+    if matches.is_empty() {
+        return Err(MuroError::Schema(format!(
+            "FOREIGN KEY ({}) not found in table '{}'",
+            columns.join(", "),
+            table_name
+        )));
+    }
+    if matches.len() > 1 {
+        return Err(MuroError::Schema(format!(
+            "FOREIGN KEY ({}) is ambiguous in table '{}'",
+            columns.join(", "),
+            table_name
+        )));
+    }
+    table_def.foreign_keys.remove(matches[0]);
+    catalog.update_table(pager, &table_def)?;
+    Ok(ExecResult::Ok)
+}
+
+fn map_fk_action(
+    action: crate::sql::ast::ForeignKeyAction,
+) -> crate::schema::catalog::ForeignKeyAction {
+    match action {
+        crate::sql::ast::ForeignKeyAction::Restrict => {
+            crate::schema::catalog::ForeignKeyAction::Restrict
+        }
+        crate::sql::ast::ForeignKeyAction::Cascade => {
+            crate::schema::catalog::ForeignKeyAction::Cascade
+        }
+        crate::sql::ast::ForeignKeyAction::SetNull => {
+            crate::schema::catalog::ForeignKeyAction::SetNull
+        }
     }
 }
 
@@ -171,6 +348,29 @@ pub(super) fn exec_alter_drop_column(
             )));
         }
     }
+    for fk in &table_def.foreign_keys {
+        if fk.columns.iter().any(|c| c == col_name) {
+            return Err(MuroError::Schema(format!(
+                "Cannot drop column '{}': foreign key depends on it",
+                col_name
+            )));
+        }
+    }
+    for other in catalog.list_tables(pager)? {
+        let Some(other_def) = catalog.get_table(pager, &other)? else {
+            continue;
+        };
+        if other_def
+            .foreign_keys
+            .iter()
+            .any(|fk| fk.ref_table == table_name && fk.ref_columns.iter().any(|c| c == col_name))
+        {
+            return Err(MuroError::Schema(format!(
+                "Cannot drop column '{}': referenced by foreign key from table '{}'",
+                col_name, other
+            )));
+        }
+    }
 
     // Full table rewrite: scan all rows, remove the dropped column, re-insert
     let old_columns = table_def.columns.clone();
@@ -215,6 +415,15 @@ pub(super) fn exec_alter_modify_column(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    ensure_column_not_fk_dependent(
+        &table_def,
+        &col_spec.name,
+        table_name,
+        pager,
+        catalog,
+        "MODIFY COLUMN",
+    )?;
+
     let col_idx = table_def.column_index(&col_spec.name).ok_or_else(|| {
         MuroError::Schema(format!(
             "Column '{}' not found in table '{}'",
@@ -284,6 +493,15 @@ pub(super) fn exec_alter_change_column(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
+    ensure_column_not_fk_dependent(
+        &table_def,
+        old_name,
+        table_name,
+        pager,
+        catalog,
+        "CHANGE COLUMN",
+    )?;
+
     let col_idx = table_def.column_index(old_name).ok_or_else(|| {
         MuroError::Schema(format!(
             "Column '{}' not found in table '{}'",
@@ -462,6 +680,43 @@ pub(super) fn validate_no_nulls_in_column(
         }
         Ok(true)
     })?;
+    Ok(())
+}
+
+fn ensure_column_not_fk_dependent(
+    table_def: &TableDef,
+    col_name: &str,
+    table_name: &str,
+    pager: &mut impl PageStore,
+    catalog: &mut SystemCatalog,
+    op: &str,
+) -> Result<()> {
+    for fk in &table_def.foreign_keys {
+        let is_child_side = fk.columns.iter().any(|c| c == col_name);
+        let is_self_parent_side =
+            fk.ref_table == table_name && fk.ref_columns.iter().any(|c| c == col_name);
+        if is_child_side || is_self_parent_side {
+            return Err(MuroError::Schema(format!(
+                "Cannot {} '{}': foreign key depends on it",
+                op, col_name
+            )));
+        }
+    }
+    for other in catalog.list_tables(pager)? {
+        let Some(other_def) = catalog.get_table(pager, &other)? else {
+            continue;
+        };
+        if other_def
+            .foreign_keys
+            .iter()
+            .any(|fk| fk.ref_table == table_name && fk.ref_columns.iter().any(|c| c == col_name))
+        {
+            return Err(MuroError::Schema(format!(
+                "Cannot {} '{}': referenced by foreign key from table '{}'",
+                op, col_name, other
+            )));
+        }
+    }
     Ok(())
 }
 

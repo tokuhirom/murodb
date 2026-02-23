@@ -102,15 +102,15 @@ fn test_varbinary_null() {
     assert_eq!(rows[0].get("val"), Some(&Value::Null));
 }
 
-/// Multibyte UTF-8 (Japanese 3-byte chars) — VARCHAR(n) checks byte length.
+/// Multibyte UTF-8 (Japanese 3-byte chars) — VARCHAR(n) checks character count (MySQL-compatible).
 #[test]
-fn test_varchar_multibyte_byte_count() {
+fn test_varchar_multibyte_char_count() {
     let (mut pager, mut catalog, _dir) = setup();
-    // VARCHAR(9) should fit 3 Japanese chars (3 bytes each = 9 bytes)
+    // VARCHAR(3) should fit 3 Japanese chars (3 characters, even though 9 bytes)
     exec(
         &mut pager,
         &mut catalog,
-        "CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR(9))",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR(3))",
     );
     exec(
         &mut pager,
@@ -122,14 +122,14 @@ fn test_varchar_multibyte_byte_count() {
     assert_eq!(rows[0].get("val"), Some(&Value::Varchar("あいう".into())));
 }
 
-/// VARCHAR(8) cannot fit 3 Japanese chars (9 bytes).
+/// VARCHAR(2) cannot fit 3 Japanese chars (3 characters).
 #[test]
 fn test_varchar_multibyte_overflow() {
     let (mut pager, mut catalog, _dir) = setup();
     exec(
         &mut pager,
         &mut catalog,
-        "CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR(8))",
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR(2))",
     );
     let err = exec_err(
         &mut pager,
@@ -141,6 +141,22 @@ fn test_varchar_multibyte_overflow() {
         "Expected VARCHAR length error, got: {}",
         err
     );
+}
+
+/// Emoji (4-byte UTF-8) counted as characters, not bytes.
+#[test]
+fn test_varchar_emoji_char_count() {
+    let (mut pager, mut catalog, _dir) = setup();
+    // VARCHAR(2) should fit 2 emoji (2 characters, 8 bytes)
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val VARCHAR(2))",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (1, '😀🎉')");
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t WHERE id = 1");
+    assert_eq!(rows[0].get("val"), Some(&Value::Varchar("😀🎉".into())));
 }
 
 /// TEXT type with large value (within page limit).

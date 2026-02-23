@@ -124,6 +124,7 @@ pub enum Token {
     Integer(i64),
     Float(f64),
     StringLit(String),
+    HexLiteral(Vec<u8>),
 
     // Identifiers
     Ident(String),
@@ -169,6 +170,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(token);
                 remaining = rest;
             }
+            Err(nom::Err::Failure(e)) => {
+                if e.code == nom::error::ErrorKind::HexDigit {
+                    // Determine if it's odd digits or invalid character
+                    let snippet = &remaining[..remaining.len().min(30)];
+                    return Err(format!("Invalid hex literal: {}", snippet));
+                }
+                return Err(format!(
+                    "Unexpected character at: '{}'",
+                    &remaining[..remaining.len().min(20)]
+                ));
+            }
             Err(_) => {
                 return Err(format!(
                     "Unexpected character at: '{}'",
@@ -182,12 +194,56 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 }
 
 fn lex_token(input: &str) -> IResult<&str, Token> {
+    // Check for hex literal X'...' or x'...' before keyword/ident
+    if (input.starts_with("X'") || input.starts_with("x'")) && input.len() >= 2 {
+        return lex_hex_literal(input);
+    }
     alt((
         lex_symbol,
         lex_string_literal,
         lex_number,
         lex_keyword_or_ident,
     ))(input)
+}
+
+fn lex_hex_literal(input: &str) -> IResult<&str, Token> {
+    // input starts with X' or x'
+    let rest = &input[2..]; // skip X'
+    let mut hex_end = 0usize;
+    for c in rest.chars() {
+        if c == '\'' {
+            break;
+        }
+        if !c.is_ascii_hexdigit() {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::HexDigit,
+            )));
+        }
+        hex_end += c.len_utf8();
+    }
+    let hex_str = &rest[..hex_end];
+    // Check closing quote
+    if rest.len() <= hex_end || rest.as_bytes()[hex_end] != b'\'' {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        )));
+    }
+    // Odd number of hex digits is an error
+    if !hex_str.len().is_multiple_of(2) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::HexDigit,
+        )));
+    }
+    let bytes: Vec<u8> = (0..hex_str.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
+        .collect();
+    // skip past closing quote
+    let remaining = &rest[hex_end + 1..];
+    Ok((remaining, Token::HexLiteral(bytes)))
 }
 
 fn lex_symbol(input: &str) -> IResult<&str, Token> {

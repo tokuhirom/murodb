@@ -449,6 +449,10 @@ pub(super) fn exec_select(
         // Non-aggregation path (original)
         let mut rows: Vec<Row> = Vec::new();
 
+        // Collect ORDER BY columns not present in SELECT list.
+        // These must be included in each Row for sorting, then stripped afterward.
+        let extra_order_cols = collect_extra_order_by_columns(&sel.columns, &sel.order_by);
+
         match plan {
             Plan::PkSeek { key_exprs, .. } => {
                 let pk_key = eval_pk_seek_key(&table_def, &key_exprs)?;
@@ -474,8 +478,13 @@ pub(super) fn exec_select(
                         &values,
                         Some(&fts_ctx),
                     )? {
-                        let row =
-                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                        let row = build_row_with_fts_and_extras(
+                            &table_def,
+                            &values,
+                            &sel.columns,
+                            Some(&fts_ctx),
+                            &extra_order_cols,
+                        )?;
                         rows.push(row);
                     }
                 }
@@ -517,11 +526,12 @@ pub(super) fn exec_select(
                             &values,
                             Some(&fts_ctx),
                         )? {
-                            let row = build_row_with_fts(
+                            let row = build_row_with_fts_and_extras(
                                 &table_def,
                                 &values,
                                 &sel.columns,
                                 Some(&fts_ctx),
+                                &extra_order_cols,
                             )?;
                             rows.push(row);
                         }
@@ -586,11 +596,12 @@ pub(super) fn exec_select(
                             &values,
                             Some(&fts_ctx),
                         )? {
-                            let row = build_row_with_fts(
+                            let row = build_row_with_fts_and_extras(
                                 &table_def,
                                 &values,
                                 &sel.columns,
                                 Some(&fts_ctx),
+                                &extra_order_cols,
                             )?;
                             rows.push(row);
                         }
@@ -624,11 +635,12 @@ pub(super) fn exec_select(
                             &values,
                             Some(&fts_ctx),
                         )? {
-                            let row = build_row_with_fts(
+                            let row = build_row_with_fts_and_extras(
                                 &table_def,
                                 &values,
                                 &sel.columns,
                                 Some(&fts_ctx),
+                                &extra_order_cols,
                             )?;
                             rows.push(row);
                         }
@@ -646,11 +658,12 @@ pub(super) fn exec_select(
                             &values,
                             Some(&fts_ctx),
                         )? {
-                            let row = build_row_with_fts(
+                            let row = build_row_with_fts_and_extras(
                                 &table_def,
                                 &values,
                                 &sel.columns,
                                 Some(&fts_ctx),
+                                &extra_order_cols,
                             )?;
                             rows.push(row);
                         }
@@ -683,8 +696,13 @@ pub(super) fn exec_select(
                         &values,
                         Some(&fts_ctx),
                     )? {
-                        let row =
-                            build_row_with_fts(&table_def, &values, &sel.columns, Some(&fts_ctx))?;
+                        let row = build_row_with_fts_and_extras(
+                            &table_def,
+                            &values,
+                            &sel.columns,
+                            Some(&fts_ctx),
+                            &extra_order_cols,
+                        )?;
                         rows.push(row);
                     }
                 }
@@ -707,6 +725,14 @@ pub(super) fn exec_select(
         // ORDER BY
         if let Some(order_items) = &sel.order_by {
             sort_rows(&mut rows, order_items);
+        }
+
+        // Strip extra ORDER BY columns that were injected for sorting
+        if !extra_order_cols.is_empty() {
+            for row in &mut rows {
+                row.values
+                    .retain(|(name, _)| !extra_order_cols.contains(name));
+            }
         }
 
         // OFFSET
@@ -851,11 +877,12 @@ pub(super) fn matches_where_with_fts(
     }
 }
 
-pub(super) fn build_row_with_fts(
+pub(super) fn build_row_with_fts_and_extras(
     table_def: &TableDef,
     values: &[Value],
     select_columns: &[SelectColumn],
     fts_ctx: Option<&FtsEvalContext>,
+    extra_columns: &[String],
 ) -> Result<Row> {
     let mut row_values = Vec::with_capacity(select_columns.len().max(table_def.columns.len()));
 
@@ -886,5 +913,52 @@ pub(super) fn build_row_with_fts(
         }
     }
 
+    // Append extra columns needed for ORDER BY that are not in the SELECT list
+    for col_name in extra_columns {
+        if let Some(i) = table_def.column_index(col_name) {
+            let val = values.get(i).cloned().unwrap_or(Value::Null);
+            row_values.push((col_name.clone(), val));
+        }
+    }
+
     Ok(Row { values: row_values })
+}
+
+/// Collect ORDER BY column names that are not present in the SELECT list.
+/// These columns must be temporarily included in rows for sorting.
+fn collect_extra_order_by_columns(
+    select_columns: &[SelectColumn],
+    order_by: &Option<Vec<OrderByItem>>,
+) -> Vec<String> {
+    let order_items = match order_by {
+        Some(items) => items,
+        None => return Vec::new(),
+    };
+
+    // Collect names already in SELECT
+    let mut selected_names: HashSet<String> = HashSet::new();
+    for col in select_columns {
+        match col {
+            SelectColumn::Star => return Vec::new(), // SELECT * includes everything
+            SelectColumn::Expr(Expr::ColumnRef(name), alias) => {
+                selected_names.insert(alias.clone().unwrap_or_else(|| name.clone()));
+                selected_names.insert(name.clone());
+            }
+            SelectColumn::Expr(_, Some(alias)) => {
+                selected_names.insert(alias.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // Find ORDER BY columns not in SELECT
+    let mut extra = Vec::new();
+    for item in order_items {
+        if let Expr::ColumnRef(name) = &item.expr {
+            if !selected_names.contains(name) {
+                extra.push(name.clone());
+            }
+        }
+    }
+    extra
 }

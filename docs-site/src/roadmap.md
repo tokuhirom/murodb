@@ -9,6 +9,7 @@
 - [x] MySQL-compatible integer types (TINYINT, SMALLINT, INT, BIGINT)
 - [x] VARCHAR(n), VARBINARY(n), TEXT with size validation
 - [x] UUID type (16-byte native, UUID_V4/UUID_V7 generation)
+- [x] Hex literal (`X'...'`) for VARBINARY data
 - [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
 - [x] AND, OR logical operators
 - [x] ORDER BY (ASC/DESC, multi-column), LIMIT

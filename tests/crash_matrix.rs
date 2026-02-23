@@ -49,7 +49,7 @@ enum PriorTx {
 fn setup_db(prior: PriorTx) -> (TempDir, std::path::PathBuf, std::path::PathBuf, u64, u64) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
 
@@ -459,7 +459,7 @@ fn test_crash_recovery_freelist_content_consistent() {
     // After recovery, the freelist content should match the last committed freelist
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create DB and commit a transaction that frees a page
     {
@@ -501,7 +501,7 @@ fn test_crash_page_count_monotonic() {
     // page_count should never decrease across transactions
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();

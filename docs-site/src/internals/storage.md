@@ -93,10 +93,6 @@ Facts:
 - `next_page_id = 0` marks chain end
 - DB header field `freelist_page_id` points to chain head
 
-Backward compatibility:
-
-- legacy single-page format (count + entries, without `FLMP`) is still readable
-
 ## Commit-Time Freelist Handling
 
 During `Transaction::commit` (`src/tx/transaction.rs`):

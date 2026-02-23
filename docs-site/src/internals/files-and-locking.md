@@ -28,7 +28,7 @@ If you open database path `<db_path>`, MuroDB uses:
 Example:
 
 - if `<db_path> = mydata`, files are `mydata`, `mydata.wal`, `mydata.lock`
-- if `<db_path> = mydb.db`, files are `mydb.db`, `mydb.wal`, `mydb.lock`
+- if `<db_path> = mydb.db`, files are `mydb.db`, `mydb.db.wal`, `mydb.db.lock`
 
 ## Main DB File Layout
 

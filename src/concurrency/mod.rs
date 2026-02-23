@@ -23,7 +23,9 @@ pub struct LockManager {
 
 impl LockManager {
     pub fn new(db_path: &Path) -> Result<Self> {
-        let lock_path = db_path.with_extension("lock");
+        let mut lock_os = db_path.as_os_str().to_os_string();
+        lock_os.push(".lock");
+        let lock_path = PathBuf::from(lock_os);
         let lock_file = OpenOptions::new()
             .create(true)
             .truncate(false)

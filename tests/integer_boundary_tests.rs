@@ -338,3 +338,62 @@ fn test_negative_one() {
     let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t WHERE id = 1");
     assert_eq!(rows[0].get("val"), Some(&Value::Integer(-1)));
 }
+
+// --- ORDER BY with column not in SELECT list ---
+
+#[test]
+fn test_order_by_column_not_in_select() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val TINYINT)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (2, 20)");
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (1, 10)");
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (3, 30)");
+
+    // ORDER BY id ASC — id is not in the SELECT list
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t ORDER BY id");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get("val"), Some(&Value::Integer(10)));
+    assert_eq!(rows[1].get("val"), Some(&Value::Integer(20)));
+    assert_eq!(rows[2].get("val"), Some(&Value::Integer(30)));
+    // Ensure "id" is NOT in the output rows (it was only used for sorting)
+    assert_eq!(rows[0].get("id"), None);
+
+    // ORDER BY id DESC
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT val FROM t ORDER BY id DESC",
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get("val"), Some(&Value::Integer(30)));
+    assert_eq!(rows[1].get("val"), Some(&Value::Integer(20)));
+    assert_eq!(rows[2].get("val"), Some(&Value::Integer(10)));
+}
+
+#[test]
+fn test_order_by_column_in_select() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, val TINYINT)",
+    );
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (2, 20)");
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (1, 10)");
+    exec(&mut pager, &mut catalog, "INSERT INTO t VALUES (3, 30)");
+
+    // ORDER BY id ASC — id IS in the SELECT list
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id, val FROM t ORDER BY id",
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    assert_eq!(rows[1].get("id"), Some(&Value::Integer(2)));
+    assert_eq!(rows[2].get("id"), Some(&Value::Integer(3)));
+}

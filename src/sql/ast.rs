@@ -36,7 +36,21 @@ pub enum Statement {
     Explain(Box<Statement>),
     ShowCheckpointStats,
     ShowDatabaseStats,
+    SetRuntimeOption(SetRuntimeOption),
     AnalyzeTable(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeOption {
+    CheckpointTxThreshold,
+    CheckpointWalBytesThreshold,
+    CheckpointIntervalMs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetRuntimeOption {
+    pub option: RuntimeOption,
+    pub value: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

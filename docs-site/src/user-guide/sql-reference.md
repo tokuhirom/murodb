@@ -206,6 +206,10 @@ It also exposes checkpoint policy/runtime fields:
 WAL observability:
 - `wal_file_size_bytes`
 
+### Runtime Configuration
+
+Runtime options are documented in [Runtime Configuration](runtime-config.md).
+
 ## DML (Data Manipulation Language)
 
 ### ANALYZE TABLE

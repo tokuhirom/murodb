@@ -112,6 +112,7 @@ impl Parser {
                 self.advance();
                 Statement::Rollback
             }
+            Some(Token::Set) => self.parse_set_runtime_option()?,
             Some(t) => return Err(format!("Unexpected token: {:?}", t)),
             None => return Err("Empty input".into()),
         };

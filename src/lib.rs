@@ -34,7 +34,7 @@ use crate::schema::catalog::SystemCatalog;
 use crate::schema::index::IndexType;
 use crate::sql::executor::{deserialize_row_versioned, ExecResult, Row};
 use crate::sql::prepared::PreparedStatement;
-use crate::sql::session::Session;
+use crate::sql::session::{RuntimeConfig, Session};
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::types::Value;
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
@@ -664,6 +664,18 @@ impl Database {
         self.session.execute(sql)
     }
 
+    /// Get current session runtime configuration.
+    pub fn runtime_config(&self) -> Result<RuntimeConfig> {
+        let _guard = self.lock_manager.read_lock()?;
+        Ok(self.session.runtime_config())
+    }
+
+    /// Update session runtime configuration.
+    pub fn set_runtime_config(&mut self, config: RuntimeConfig) -> Result<()> {
+        let _guard = self.lock_manager.write_lock()?;
+        self.session.set_runtime_config(config)
+    }
+
     /// Parse SQL into a reusable prepared statement template.
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         self.session.prepare(sql)
@@ -967,5 +979,24 @@ mod tests {
         let mut wal_reader = WalReader::open_plaintext(&wp).unwrap();
         let records = wal_reader.read_all().unwrap();
         assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn runtime_config_api_updates_checkpoint_policy() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("runtime_config_api.db");
+
+        let mut db = Database::create_plaintext(&db_path).unwrap();
+        db.set_runtime_config(crate::sql::session::RuntimeConfig {
+            checkpoint_tx_threshold: 7,
+            checkpoint_wal_bytes_threshold: 4096,
+            checkpoint_interval_ms: 500,
+        })
+        .unwrap();
+
+        let cfg = db.runtime_config().unwrap();
+        assert_eq!(cfg.checkpoint_tx_threshold, 7);
+        assert_eq!(cfg.checkpoint_wal_bytes_threshold, 4096);
+        assert_eq!(cfg.checkpoint_interval_ms, 500);
     }
 }

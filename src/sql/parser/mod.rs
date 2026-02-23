@@ -220,8 +220,35 @@ impl Parser {
         }
     }
 
+    fn expect_ident_value(&mut self, expected: &str) -> Result<(), String> {
+        let ident = self.expect_ident()?;
+        if ident.eq_ignore_ascii_case(expected) {
+            Ok(())
+        } else {
+            Err(format!("Expected '{}', got '{}'", expected, ident))
+        }
+    }
+
+    fn expect_string_lit(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::StringLit(s)) => Ok(s),
+            Some(t) => Err(format!("Expected string literal, got {:?}", t)),
+            None => Err("Expected string literal, got end of input".into()),
+        }
+    }
+
     fn parse_alter(&mut self) -> Result<Statement, String> {
         self.advance(); // ALTER
+        match self.peek() {
+            Some(Token::Database) => {
+                self.advance(); // DATABASE
+                return self.parse_alter_database_rekey();
+            }
+            Some(Token::Table) => {
+                // fall through to existing ALTER TABLE logic
+            }
+            _ => return Err("Expected TABLE or DATABASE after ALTER".into()),
+        }
         self.expect(&Token::Table)?;
         let table_name = self.expect_ident()?;
 
@@ -269,6 +296,15 @@ impl Parser {
             table_name,
             operation,
         }))
+    }
+
+    fn parse_alter_database_rekey(&mut self) -> Result<Statement, String> {
+        // ALTER DATABASE REKEY WITH PASSWORD '<string>'
+        self.expect_ident_value("REKEY")?;
+        self.expect(&Token::With)?;
+        self.expect_ident_value("PASSWORD")?;
+        let password = self.expect_string_lit()?;
+        Ok(Statement::AlterDatabaseRekey { password })
     }
 
     fn parse_rename(&mut self) -> Result<Statement, String> {

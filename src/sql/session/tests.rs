@@ -586,6 +586,41 @@ fn test_stats_readable_on_poisoned_session() {
 }
 
 #[test]
+fn test_rekey_wal_recreate_failure_poison_session() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    session.execute("INSERT INTO t VALUES (1)").unwrap();
+
+    session.inject_wal_recreate_failure_once_for_test();
+    let result = session.execute("ALTER DATABASE REKEY WITH PASSWORD 'next_pass'");
+    assert!(matches!(&result, Err(MuroError::SessionPoisoned(_))));
+
+    // Any regular statement is rejected after the WAL recreation failure.
+    let result = session.execute("SELECT * FROM t");
+    assert!(matches!(&result, Err(MuroError::SessionPoisoned(_))));
+
+    // Stats SQL remains available for operators.
+    match session.execute("SHOW DATABASE STATS").unwrap() {
+        ExecResult::Rows(rows) => {
+            assert_eq!(rows.len(), 18);
+        }
+        _ => panic!("Expected rows from SHOW DATABASE STATS"),
+    }
+}
+
+#[test]
 fn test_read_only_query_select_does_not_create_wal_records() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");

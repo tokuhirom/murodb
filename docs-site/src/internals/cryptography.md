@@ -77,6 +77,35 @@ Operational flexibility:
 
 It is explicit opt-in so encrypted mode remains the default posture.
 
+## Key Rotation (Rekey)
+
+`ALTER DATABASE REKEY WITH PASSWORD 'new_password'` re-encrypts all database pages with a new key derived from the new password.
+
+### Flow
+
+1. Reject if inside an active transaction or if the database is plaintext.
+2. Checkpoint WAL to flush all pending writes to the data file.
+3. Generate a new 16-byte random salt and derive a new `MasterKey` via Argon2id.
+4. Write a `.rekey` marker file (`<db_path>.rekey`) containing: magic (`REKY`), new salt, new epoch, and CRC32 checksum.
+5. For each page in the data file:
+   - Decrypt with the current key and epoch.
+   - Re-encrypt with the new key and incremented epoch.
+   - Write back to disk.
+6. `fsync` all page data.
+7. Update the file header with the new salt and epoch.
+8. `fsync` the header.
+9. Delete the `.rekey` marker file.
+10. Recreate the WAL writer with the new key.
+
+### Crash Recovery
+
+On `Database::open_with_password`, before normal open, the system checks for a `.rekey` marker file:
+
+- **Marker exists, header salt matches marker salt**: Rekey completed successfully but marker was not deleted. The marker is simply removed.
+- **Marker exists, header salt does not match**: Rekey was interrupted mid-operation. The system derives both old and new keys, identifies which pages were already re-encrypted (by attempting decryption with the new key first), re-encrypts remaining pages, updates the header, and deletes the marker.
+
+The marker file format is 36 bytes: `magic(4) || new_salt(16) || new_epoch(8) || reserved(4) || crc32(4)`.
+
 ## Non-goals
 
 - Traffic encryption (no network protocol layer here)

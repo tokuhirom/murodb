@@ -48,7 +48,7 @@ fn test_decimal_create_table_and_insert() {
     let rows = exec(&mut s, "SELECT id, price FROM t ORDER BY id");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0][1].1.to_string(), "19.99");
-    assert_eq!(rows[1][1].1.to_string(), "100.5");
+    assert_eq!(rows[1][1].1.to_string(), "100.50");
 }
 
 #[test]
@@ -91,8 +91,8 @@ fn test_decimal_exact_arithmetic() {
     exec(&mut s, "INSERT INTO t VALUES (1, 1.1, 2.2)");
 
     let rows = exec(&mut s, "SELECT a + b FROM t");
-    // Decimal arithmetic: 1.1 + 2.2 = 3.3 exactly (no float error)
-    assert_eq!(rows[0][0].1.to_string(), "3.3");
+    // Decimal arithmetic: 1.10 + 2.20 = 3.30 exactly (no float error)
+    assert_eq!(rows[0][0].1.to_string(), "3.30");
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn test_decimal_negative_values() {
     exec(&mut s, "INSERT INTO t VALUES (1, -42.5)");
 
     let rows = exec(&mut s, "SELECT val FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "-42.5");
+    assert_eq!(rows[0][0].1.to_string(), "-42.50");
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_decimal_order_by() {
     exec(&mut s, "INSERT INTO t VALUES (3, 2.71)");
 
     let rows = exec(&mut s, "SELECT val FROM t ORDER BY val ASC");
-    assert_eq!(rows[0][0].1.to_string(), "1");
+    assert_eq!(rows[0][0].1.to_string(), "1.00");
     assert_eq!(rows[1][0].1.to_string(), "2.71");
     assert_eq!(rows[2][0].1.to_string(), "3.14");
 }
@@ -154,8 +154,7 @@ fn test_decimal_group_by() {
         "SELECT cat, SUM(val) FROM t GROUP BY cat ORDER BY cat",
     );
     assert_eq!(rows.len(), 2);
-    // 1.0 as float → "1" string → Decimal with scale 0
-    assert!(rows[0][0].1.to_string() == "1" || rows[0][0].1.to_string() == "1.0");
+    assert_eq!(rows[0][0].1.to_string(), "1.0");
     assert_eq!(rows[0][1].1.to_string(), "30");
 }
 
@@ -174,7 +173,7 @@ fn test_decimal_aggregation_sum_min_max() {
     assert_eq!(rows[0][0].1.to_string(), "61.50");
 
     let rows = exec(&mut s, "SELECT MIN(val) FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "10.5");
+    assert_eq!(rows[0][0].1.to_string(), "10.50");
 
     let rows = exec(&mut s, "SELECT MAX(val) FROM t");
     assert_eq!(rows[0][0].1.to_string(), "30.75");
@@ -201,7 +200,7 @@ fn test_decimal_aggregation_avg() {
 fn test_decimal_cast_from_integer() {
     let (mut s, _dir) = setup_session();
     let rows = exec(&mut s, "SELECT CAST(42 AS DECIMAL(10,2))");
-    assert_eq!(rows[0][0].1.to_string(), "42");
+    assert_eq!(rows[0][0].1.to_string(), "42.00");
 }
 
 #[test]
@@ -234,7 +233,7 @@ fn test_decimal_cast_to_varchar() {
     exec(&mut s, "INSERT INTO t VALUES (1, 42.5)");
 
     let rows = exec(&mut s, "SELECT CAST(val AS VARCHAR) FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "42.5");
+    assert_eq!(rows[0][0].1.to_string(), "42.50");
 }
 
 #[test]
@@ -279,7 +278,7 @@ fn test_decimal_arithmetic_operations() {
     assert_eq!(rows[0][0].1.to_string(), "7.25");
 
     let rows = exec(&mut s, "SELECT a * b FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "34.125");
+    assert_eq!(rows[0][0].1.to_string(), "34.1250");
 }
 
 #[test]
@@ -292,10 +291,10 @@ fn test_decimal_integer_arithmetic() {
     exec(&mut s, "INSERT INTO t VALUES (1, 10.5)");
 
     let rows = exec(&mut s, "SELECT val + 5 FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "15.5");
+    assert_eq!(rows[0][0].1.to_string(), "15.50");
 
     let rows = exec(&mut s, "SELECT val * 2 FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "21.0");
+    assert_eq!(rows[0][0].1.to_string(), "21.00");
 }
 
 #[test]
@@ -360,7 +359,7 @@ fn test_decimal_abs_function() {
     exec(&mut s, "INSERT INTO t VALUES (1, -42.5)");
 
     let rows = exec(&mut s, "SELECT ABS(val) FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "42.5");
+    assert_eq!(rows[0][0].1.to_string(), "42.50");
 }
 
 #[test]
@@ -415,7 +414,7 @@ fn test_decimal_negation() {
     exec(&mut s, "INSERT INTO t VALUES (1, 42.5)");
 
     let rows = exec(&mut s, "SELECT -val FROM t");
-    assert_eq!(rows[0][0].1.to_string(), "-42.5");
+    assert_eq!(rows[0][0].1.to_string(), "-42.50");
 }
 
 #[test]
@@ -433,4 +432,43 @@ fn test_decimal_index() {
     let rows = exec(&mut s, "SELECT val FROM t WHERE val = 3.14");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].1.to_string(), "3.14");
+}
+
+#[test]
+fn test_decimal_precision_overflow_on_insert() {
+    let (mut s, _dir) = setup_session();
+    exec(
+        &mut s,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, d DECIMAL(5,2))",
+    );
+
+    // 1234.567 has 4 integer digits, but DECIMAL(5,2) allows only 3 integer digits (5-2)
+    let err = exec_err(&mut s, "INSERT INTO t VALUES (1, 1234.567)");
+    assert!(err.contains("out of range for DECIMAL(5,2)"));
+
+    // 999.99 should work (3 integer digits, max for DECIMAL(5,2))
+    exec(&mut s, "INSERT INTO t VALUES (1, 999.99)");
+    let rows = exec(&mut s, "SELECT d FROM t");
+    assert_eq!(rows[0][0].1.to_string(), "999.99");
+}
+
+#[test]
+fn test_decimal_scale_rounding_on_insert() {
+    let (mut s, _dir) = setup_session();
+    exec(
+        &mut s,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, d DECIMAL(10,2))",
+    );
+
+    // Extra fractional digits should be rounded
+    exec(&mut s, "INSERT INTO t VALUES (1, 3.456)");
+    let rows = exec(&mut s, "SELECT d FROM t");
+    assert_eq!(rows[0][0].1.to_string(), "3.46");
+}
+
+#[test]
+fn test_decimal_cast_precision_overflow() {
+    let (mut s, _dir) = setup_session();
+    let err = exec_err(&mut s, "SELECT CAST(12345 AS DECIMAL(4,0))");
+    assert!(err.contains("out of range for DECIMAL(4,0)"));
 }

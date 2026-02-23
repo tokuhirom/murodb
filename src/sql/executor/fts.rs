@@ -559,7 +559,23 @@ pub(super) fn validate_value(value: &Value, data_type: &DataType) -> Result<()> 
                 max
             )))
         }
-        (Value::Decimal(_), DataType::Decimal(_, _)) => Ok(()),
+        (Value::Decimal(d), DataType::Decimal(p, s)) => {
+            let max_int_digits = p - s;
+            let int_part = d.trunc().abs();
+            let int_digits = if int_part.is_zero() {
+                0u32
+            } else {
+                int_part.to_string().len() as u32
+            };
+            if int_digits > max_int_digits {
+                Err(MuroError::Execution(format!(
+                    "Value '{}' out of range for DECIMAL({},{})",
+                    d, p, s
+                )))
+            } else {
+                Ok(())
+            }
+        }
         _ => Ok(()),
     }
 }

@@ -1,5 +1,35 @@
 use super::*;
 
+/// Fit a Decimal value to the declared DECIMAL(p,s) column constraints.
+/// Rounds fractional digits to scale `s`, sets exact scale, then rejects
+/// if the integer part exceeds `p - s` digits (MySQL-compatible behavior).
+pub(super) fn fit_decimal(
+    d: rust_decimal::Decimal,
+    precision: u32,
+    scale: u32,
+) -> Result<rust_decimal::Decimal> {
+    // Round to the declared scale
+    let mut rounded = d.round_dp(scale);
+    // Set exact scale so that e.g. 42 becomes 42.00 for DECIMAL(10,2)
+    rounded.rescale(scale);
+    // Check that integer digits fit within (precision - scale)
+    let max_int_digits = precision - scale;
+    let int_part = rounded.trunc().abs();
+    // Count integer digits: the number of digits in the integer part
+    let int_digits = if int_part.is_zero() {
+        0u32
+    } else {
+        int_part.to_string().len() as u32
+    };
+    if int_digits > max_int_digits {
+        return Err(MuroError::Execution(format!(
+            "Value '{}' out of range for DECIMAL({},{})",
+            d, precision, scale
+        )));
+    }
+    Ok(rounded)
+}
+
 pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
 

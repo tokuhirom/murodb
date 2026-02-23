@@ -87,27 +87,47 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
                 val
             ))),
         },
-        DataType::Decimal(_, _) => match val {
-            Value::Integer(n) => Ok(Value::Decimal(rust_decimal::Decimal::from(*n))),
-            Value::Float(n) => {
-                use std::str::FromStr;
-                let d = rust_decimal::Decimal::from_str(&n.to_string()).map_err(|_| {
-                    MuroError::Execution(format!("Cannot cast float '{}' to DECIMAL", n))
-                })?;
-                Ok(Value::Decimal(d))
+        DataType::Decimal(p, s) => {
+            let d = match val {
+                Value::Integer(n) => rust_decimal::Decimal::from(*n),
+                Value::Float(n) => {
+                    use std::str::FromStr;
+                    rust_decimal::Decimal::from_str(&n.to_string()).map_err(|_| {
+                        MuroError::Execution(format!("Cannot cast float '{}' to DECIMAL", n))
+                    })?
+                }
+                Value::Decimal(d) => *d,
+                Value::Varchar(sv) => {
+                    use std::str::FromStr;
+                    rust_decimal::Decimal::from_str(sv.trim()).map_err(|_| {
+                        MuroError::Execution(format!("Cannot cast '{}' to DECIMAL", sv))
+                    })?
+                }
+                _ => {
+                    return Err(MuroError::Execution(format!(
+                        "Cannot cast {:?} to DECIMAL",
+                        val
+                    )))
+                }
+            };
+            // Round to declared scale, set exact scale, and validate precision
+            let mut rounded = d.round_dp(*s);
+            rounded.rescale(*s);
+            let max_int_digits = p - s;
+            let int_part = rounded.trunc().abs();
+            let int_digits = if int_part.is_zero() {
+                0u32
+            } else {
+                int_part.to_string().len() as u32
+            };
+            if int_digits > max_int_digits {
+                return Err(MuroError::Execution(format!(
+                    "Value '{}' out of range for DECIMAL({},{})",
+                    d, p, s
+                )));
             }
-            Value::Decimal(d) => Ok(Value::Decimal(*d)),
-            Value::Varchar(s) => {
-                use std::str::FromStr;
-                let d = rust_decimal::Decimal::from_str(s.trim())
-                    .map_err(|_| MuroError::Execution(format!("Cannot cast '{}' to DECIMAL", s)))?;
-                Ok(Value::Decimal(d))
-            }
-            _ => Err(MuroError::Execution(format!(
-                "Cannot cast {:?} to DECIMAL",
-                val
-            ))),
-        },
+            Ok(Value::Decimal(rounded))
+        }
         DataType::Date => match val {
             Value::Date(d) => Ok(Value::Date(*d)),
             Value::DateTime(dt) => Ok(Value::Date((*dt / 1_000_000) as i32)),

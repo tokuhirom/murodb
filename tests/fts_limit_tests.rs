@@ -184,6 +184,65 @@ fn test_fts_two_docs_query() {
     assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
 }
 
+/// FTS query with multiple matching documents (regression test for #159).
+#[test]
+fn test_fts_multi_match() {
+    let (mut pager, mut catalog, _dir) = setup();
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body TEXT)",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (1, '東京タワーの夜景がきれい')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (2, '東京タワーは観光名所です')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (3, '東京タワーに行きました')",
+    );
+    exec(
+        &mut pager,
+        &mut catalog,
+        "INSERT INTO t VALUES (4, '京都の金閣寺は素晴らしい')",
+    );
+
+    exec(
+        &mut pager,
+        &mut catalog,
+        "CREATE FULLTEXT INDEX ft ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc')",
+    );
+
+    let rows = query_rows(
+        &mut pager,
+        &mut catalog,
+        "SELECT id FROM t WHERE MATCH(body) AGAINST('東京タワー' IN NATURAL LANGUAGE MODE) > 0",
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "Expected 3 matching rows, got {}",
+        rows.len()
+    );
+
+    let mut ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| match r.get("id") {
+            Some(Value::Integer(n)) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2, 3]);
+}
+
 /// FTS with NULL body: should not crash.
 #[test]
 fn test_fts_null_body() {

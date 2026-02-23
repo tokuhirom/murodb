@@ -563,3 +563,51 @@ fn test_sql_fulltext_legacy_fixed_key_metadata_backfill() {
         assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
     }
 }
+
+#[test]
+fn test_sql_fulltext_bootstrap_key_metadata_backfill() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("bootstrap.db");
+
+    // Simulate a Pager/SystemCatalog SQL flow DB with derived bootstrap key and missing metadata.
+    {
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let bootstrap_key = pager.derive_bootstrap_fts_term_key();
+        pager.set_fts_term_key(bootstrap_key);
+        let mut catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+
+        execute(
+            "CREATE TABLE docs (id BIGINT PRIMARY KEY, body TEXT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE FULLTEXT INDEX fts_body ON docs (body)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO docs VALUES (1, '東京タワーは東京にあります')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        pager.flush_meta().unwrap();
+    }
+
+    // Opening via Database should backfill metadata with the detected bootstrap key.
+    {
+        let mut db = Database::open(&db_path, &test_key()).unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM docs WHERE MATCH(body) AGAINST('東京' IN BOOLEAN MODE) > 0 ORDER BY id",
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    }
+}

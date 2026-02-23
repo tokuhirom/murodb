@@ -16,6 +16,7 @@
 - [Benchmarks](user-guide/benchmarks.md)
 - [Full-Text Search](user-guide/full-text-search.md)
 - [Recovery](user-guide/recovery.md)
+- [Backup & Restore](user-guide/backup.md)
 - [Checkpoint Policy Tuning](user-guide/checkpoint-policy.md)
 - [Alerting & Monitoring](user-guide/alerting.md)
 - [Incident Response Runbook](user-guide/runbook.md)
@@ -35,6 +36,7 @@
 - [Durability Matrix](internals/durability-matrix.md)
 - [FTS Internals](internals/fts-internals.md)
 - [Format Migration](internals/format-migration.md)
+- [Backup](internals/backup.md)
 - [Formal Verification](internals/formal-verification.md)
 
 ---

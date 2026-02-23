@@ -638,7 +638,7 @@ impl Session {
         );
     }
 
-    fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
+    pub(crate) fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
         #[cfg(test)]
         if self.inject_checkpoint_failures_remaining > 0 {
             self.inject_checkpoint_failures_remaining -= 1;

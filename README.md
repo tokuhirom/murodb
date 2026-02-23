@@ -86,6 +86,7 @@ Internals deep dive:
 
 - `Database::execute(sql)` is the general SQL entrypoint (read/write, exclusive lock).
 - `Database::query(sql)` is read-only (shared lock, rejects write SQL).
+- `Database::backup(path)` creates a consistent snapshot of the database to a file.
 - CLI auto-routes read-only SQL to the read path; inside explicit transactions it always uses execute semantics.
 
 ## Limitations

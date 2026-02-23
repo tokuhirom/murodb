@@ -619,6 +619,57 @@ impl Pager {
         self.file.sync_all()?;
         Ok(())
     }
+
+    /// Create a byte-level copy of the database file to `dest`.
+    ///
+    /// Copies the plaintext header and all encrypted pages as raw bytes
+    /// (no decryption/re-encryption). The caller must ensure no concurrent
+    /// writes are in progress (e.g. by holding a lock) and that the WAL
+    /// has been checkpointed before calling this method.
+    ///
+    /// The resulting file is a valid MuroDB database that can be opened
+    /// with the same key/password.
+    pub fn backup_to_file(&mut self, dest: &Path) -> Result<()> {
+        // Guard: reject backup to the same file (including symlinks/hardlinks).
+        {
+            use std::os::unix::fs::MetadataExt;
+            let src_meta = self.file.metadata()?;
+            if let Ok(dest_meta) = std::fs::metadata(dest) {
+                if src_meta.dev() == dest_meta.dev() && src_meta.ino() == dest_meta.ino() {
+                    return Err(MuroError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "backup destination is the same file as the source database",
+                    )));
+                }
+            }
+        }
+
+        self.refresh_from_disk_if_changed()?;
+
+        let total_bytes = PLAINTEXT_HEADER_SIZE + self.page_count * self.page_size_on_disk() as u64;
+
+        self.file.seek(SeekFrom::Start(0))?;
+
+        let mut dest_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest)?;
+
+        // Use a fixed-size buffer to avoid BufReader's read-ahead from
+        // advancing self.file's seek position beyond total_bytes.
+        let mut remaining = total_bytes;
+        let mut buf = [0u8; 64 * 1024];
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf.len());
+            self.file.read_exact(&mut buf[..to_read])?;
+            dest_file.write_all(&buf[..to_read])?;
+            remaining -= to_read as u64;
+        }
+        dest_file.sync_all()?;
+
+        Ok(())
+    }
 }
 
 impl crate::storage::page_store::PageStore for Pager {

@@ -13,6 +13,14 @@ fn test_key() -> MasterKey {
     MasterKey::new([0x42u8; 32])
 }
 
+/// Force checkpoint after every commit via environment variables so that
+/// tests checking WAL truncation after each operation continue to pass.
+fn force_checkpoint_every_commit() {
+    std::env::set_var("MURODB_CHECKPOINT_TX_THRESHOLD", "1");
+    std::env::set_var("MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD", "0");
+    std::env::set_var("MURODB_CHECKPOINT_INTERVAL_MS", "0");
+}
+
 #[test]
 fn test_wal_write_and_read() {
     let dir = TempDir::new().unwrap();
@@ -391,6 +399,7 @@ fn test_catalog_root_durable_after_commit() {
 /// during long-running sessions.
 #[test]
 fn test_wal_is_checkpointed_after_successful_commit() {
+    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let wal_path = dir.path().join("test.db.wal");
@@ -413,6 +422,7 @@ fn test_wal_is_checkpointed_after_successful_commit() {
 /// do not accumulate during long-running sessions.
 #[test]
 fn test_wal_is_checkpointed_after_explicit_rollback() {
+    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let wal_path = dir.path().join("test.db.wal");
@@ -497,6 +507,7 @@ fn test_freelist_persisted_across_reopen() {
 /// Freelist WAL recovery: freelist is restored after crash.
 #[test]
 fn test_freelist_wal_recovery() {
+    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let wal_path = dir.path().join("test.db.wal");

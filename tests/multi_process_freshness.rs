@@ -2,8 +2,18 @@ use murodb::types::Value;
 use murodb::Database;
 use tempfile::TempDir;
 
+/// Multi-process freshness tests rely on checkpoint flushing data to the DB
+/// file after every commit so that other handles can see the changes. Force
+/// checkpoint-every-commit by setting the env-based policy.
+fn force_checkpoint_every_commit() {
+    std::env::set_var("MURODB_CHECKPOINT_TX_THRESHOLD", "1");
+    std::env::set_var("MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD", "0");
+    std::env::set_var("MURODB_CHECKPOINT_INTERVAL_MS", "0");
+}
+
 #[test]
 fn test_query_refreshes_after_other_handle_commit() {
+    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("freshness.db");
     let password = "pw";
@@ -34,6 +44,7 @@ fn test_query_refreshes_after_other_handle_commit() {
 
 #[test]
 fn test_execute_refresh_prevents_stale_page_overwrite() {
+    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("freshness_write.db");
     let password = "pw";

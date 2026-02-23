@@ -27,7 +27,9 @@ SQL runtime option names:
 Semantics:
 
 - Checkpoint runs when **any** enabled trigger fires.
-- `MURODB_CHECKPOINT_TX_THRESHOLD=1` (default): checkpoint every commit/rollback.
+- Default policy: `TX_THRESHOLD=8`, `WAL_BYTES_THRESHOLD=1048576` (1 MiB), `INTERVAL_MS=1000` (1 second).
+  This matches the "Low-latency / conservative" profile and avoids a full checkpoint on every single commit.
+- `MURODB_CHECKPOINT_TX_THRESHOLD=1`: checkpoint every commit/rollback (previous default, useful for minimal WAL growth).
 - `MURODB_CHECKPOINT_TX_THRESHOLD=0`: disable tx-count trigger.
 - `*_WAL_BYTES_THRESHOLD=0` / `*_INTERVAL_MS=0`: disabled.
 - Runtime `SET` values follow the same semantics, but are session-only and not persisted.

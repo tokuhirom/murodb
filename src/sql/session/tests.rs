@@ -19,6 +19,7 @@ fn test_commit_survives_checkpoint_failure_and_leaves_wal_for_recovery() {
     let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
 
+    session.set_checkpoint_policy_for_test(1, 0, 0);
     session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
     let result = session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
@@ -51,6 +52,7 @@ fn test_rollback_survives_checkpoint_failure_and_discards_uncommitted_data() {
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
 
+    session.set_checkpoint_policy_for_test(1, 0, 0);
     session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
@@ -83,6 +85,7 @@ fn test_commit_checkpoint_retries_transient_failure_and_clears_wal() {
     let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
 
+    session.set_checkpoint_policy_for_test(1, 0, 0);
     session.inject_checkpoint_failure_once_for_test();
     session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
@@ -124,6 +127,7 @@ fn test_auto_commit_survives_all_checkpoint_failures() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     // Inject failures that exhaust all retry attempts
     session.inject_checkpoint_failures_for_test(CHECKPOINT_MAX_ATTEMPTS);
@@ -157,6 +161,7 @@ fn test_multiple_commits_each_retry_independently() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
@@ -187,6 +192,7 @@ fn test_checkpoint_backoff_does_not_block_commit() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
@@ -222,6 +228,7 @@ fn test_checkpoint_stats_tracked() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     // Initial stats should be zero
     assert_eq!(session.checkpoint_stats().total_checkpoints, 0);
@@ -329,6 +336,7 @@ fn test_show_checkpoint_stats_sql() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     // Execute a commit to get some stats
     session
@@ -371,6 +379,7 @@ fn test_show_database_stats_sql() {
     pager.flush_meta().unwrap();
     let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
     let mut session = Session::new(pager, catalog, wal);
+    session.set_checkpoint_policy_for_test(1, 0, 0);
 
     session
         .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
@@ -541,6 +550,42 @@ fn test_set_runtime_option_rejected_inside_transaction() {
         .unwrap_err();
     assert!(matches!(err, MuroError::Execution(_)));
     assert!(format!("{}", err).contains("inside a transaction"));
+}
+
+#[test]
+fn test_default_policy_defers_checkpoints() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+    // Use the compiled-in defaults (no set_checkpoint_policy_for_test call)
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    for i in 0..5 {
+        session
+            .execute(&format!("INSERT INTO t VALUES ({})", i))
+            .unwrap();
+    }
+
+    let stats = session.database_stats();
+    // With DEFAULT_CHECKPOINT_TX_THRESHOLD=8, 6 ops (1 CREATE + 5 INSERT)
+    // should not yet trigger a tx-count checkpoint.
+    assert_eq!(
+        stats.total_checkpoints, 0,
+        "default policy should defer checkpoints for fewer than 8 ops"
+    );
+    assert!(
+        stats.deferred_checkpoints >= 6,
+        "expected at least 6 deferred checkpoints, got {}",
+        stats.deferred_checkpoints
+    );
 }
 
 mod tail;

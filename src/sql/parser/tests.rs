@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::DataType;
 
 #[test]
 fn test_parse_create_table() {

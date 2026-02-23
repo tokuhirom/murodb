@@ -27,6 +27,12 @@ fn test_create_and_reopen() {
 }
 
 #[test]
+fn test_rekey_marker_path_appends_suffix() {
+    let marker = rekey_marker_path(std::path::Path::new("/tmp/muro.db"));
+    assert_eq!(marker, std::path::PathBuf::from("/tmp/muro.db.rekey"));
+}
+
+#[test]
 fn test_write_and_read_pages() {
     let tmp = NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();

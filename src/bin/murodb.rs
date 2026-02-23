@@ -91,6 +91,9 @@ struct Cli {
 
 fn get_password(cli_password: &Option<String>) -> String {
     if let Some(pw) = cli_password {
+        eprintln!(
+            "WARNING: Passing passwords via --password can expose secrets in shell history and process lists. Prefer interactive prompt when possible."
+        );
         return pw.clone();
     }
     rpassword::read_password_from_tty(Some("Password: ")).unwrap_or_else(|e| {

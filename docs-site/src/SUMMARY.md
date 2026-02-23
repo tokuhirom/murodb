@@ -21,6 +21,7 @@
 - [Alerting & Monitoring](user-guide/alerting.md)
 - [Incident Response Runbook](user-guide/runbook.md)
 - [Limits Reference](user-guide/limits.md)
+- [Security Considerations](user-guide/security-considerations.md)
 
 # Internals
 

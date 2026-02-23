@@ -114,3 +114,8 @@ murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive
 ```
 
 See [WAL Inspection](wal-inspect.md) for exit codes and JSON schema.
+
+## Security Notes
+
+- Prefer interactive password prompt over `--password` to reduce secret exposure in process lists/history.
+- For `ALTER DATABASE REKEY`, avoid one-shot `-e` with inline password literals in production environments. This limitation is tracked in [#183](https://github.com/tokuhirom/murodb/issues/183).

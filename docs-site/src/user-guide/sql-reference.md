@@ -974,6 +974,10 @@ ALTER DATABASE REKEY WITH PASSWORD 'new_password';
 - If a crash occurs mid-rekey, the next `open_with_password` detects the marker and completes or rolls back the operation automatically.
 - After successful rekey, only the new password can open the database.
 
+**Security note:**
+- `REKEY` currently takes a SQL string literal password, which may leak through shell history/process arguments when used with CLI `-e`.
+- For safer operations, prefer interactive flows and avoid embedding secrets in command lines. Improvement is tracked in [#183](https://github.com/tokuhirom/murodb/issues/183).
+
 ## Transactions
 
 ```sql

@@ -13,7 +13,7 @@ User's passphrase
     ├──→ Page encryption  (AES-256-GCM-SIV, AAD = page_id || epoch)
     └──→ WAL encryption   (AES-256-GCM-SIV, AAD = lsn || 0)
 
-FTS term blinding (HMAC-SHA256, compile-time constant key)
+FTS term blinding (HMAC-SHA256, DB-scoped term key)
 ```
 
 The encryption system has four layers:
@@ -21,7 +21,7 @@ The encryption system has four layers:
 1. **Key derivation (KDF)** — Derive a cryptographic key from the user's passphrase
 2. **Page encryption** — Encrypt and authenticate each data page
 3. **WAL encryption** — Encrypt write-ahead log records
-4. **FTS term blinding** — Hide full-text search tokens on disk (separate from passphrase-based encryption; see below)
+4. **FTS term blinding** — Hide full-text search tokens on disk (separate from page/WAL encryption; see below)
 
 ## Encryption Suites
 
@@ -142,7 +142,11 @@ term_id = HMAC-SHA256(term_key, "tokyo")  →  32-byte hash
 
 Only hash values are stored on disk — no plaintext search terms ever reach the storage layer.
 
-**Important caveat**: The current `term_key` is a compile-time constant (`[0x55u8; 32]`) embedded in the binary, **not** derived from the user's passphrase or `MasterKey`. This means an attacker with access to MuroDB's source code (or binary) can compute term IDs for candidate tokens. The blinding prevents casual inspection of on-disk data but does not provide resistance against a determined attacker who knows the key. Deriving `term_key` from `MasterKey` is a potential future improvement.
+**Important caveats:**
+
+- In encrypted mode, `term_key` is derived from `MasterKey` + DB salt, so term IDs are database-scoped and secret-dependent.
+- In plaintext mode, `term_key` is derived from a public label + DB salt. This still hides raw tokens in casual inspection, but does not provide strong secrecy against offline dictionary guessing.
+- Legacy databases may still contain historical FTS key metadata. Open-time migration/backfill logic keeps them readable.
 
 ## Key Rotation (Epoch)
 

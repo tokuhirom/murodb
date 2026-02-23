@@ -33,6 +33,7 @@ use crate::fts::tokenizer::tokenize_bigram;
 use crate::schema::catalog::SystemCatalog;
 use crate::schema::index::IndexType;
 use crate::sql::executor::{deserialize_row_versioned, ExecResult, Row};
+use crate::sql::prepared::PreparedStatement;
 use crate::sql::session::Session;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::types::Value;
@@ -657,6 +658,27 @@ impl Database {
         self.session.execute(sql)
     }
 
+    /// Parse SQL into a reusable prepared statement template.
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+        self.session.prepare(sql)
+    }
+
+    /// Execute a prepared statement with bound values.
+    pub fn execute_prepared(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<ExecResult> {
+        let _guard = self.lock_manager.write_lock()?;
+        self.session.execute_prepared(prepared, params)
+    }
+
+    /// Convenience API: prepare+execute in one call using bound values.
+    pub fn execute_params(&mut self, sql: &str, params: &[Value]) -> Result<ExecResult> {
+        let prepared = self.prepare(sql)?;
+        self.execute_prepared(&prepared, params)
+    }
+
     /// Execute a read-only SQL query and return rows.
     ///
     /// This uses a shared lock so multiple readers can run concurrently.
@@ -664,6 +686,23 @@ impl Database {
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
         let _guard = self.lock_manager.read_lock()?;
         self.session.execute_read_only_query(sql)
+    }
+
+    /// Execute a prepared read-only query and return rows.
+    pub fn query_prepared(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<Vec<Row>> {
+        let _guard = self.lock_manager.read_lock()?;
+        self.session
+            .execute_read_only_prepared_query(prepared, params)
+    }
+
+    /// Convenience API: prepare+query in one call using bound values.
+    pub fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        let prepared = self.prepare(sql)?;
+        self.query_prepared(&prepared, params)
     }
 
     /// Re-encrypt the database with a new password-derived key.

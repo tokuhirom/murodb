@@ -380,6 +380,7 @@ impl Parser {
         let mut default_value = None;
         let mut auto_increment = false;
         let mut check_expr = None;
+        let mut constraint_expr_order = Vec::new();
 
         loop {
             match self.peek() {
@@ -400,6 +401,8 @@ impl Parser {
                 Some(Token::Default) => {
                     self.advance();
                     default_value = Some(self.parse_primary()?);
+                    constraint_expr_order.retain(|k| *k != ColumnConstraintExprKind::Default);
+                    constraint_expr_order.push(ColumnConstraintExprKind::Default);
                 }
                 Some(Token::AutoIncrement) => {
                     self.advance();
@@ -410,6 +413,8 @@ impl Parser {
                     self.expect(&Token::LParen)?;
                     check_expr = Some(self.parse_expr()?);
                     self.expect(&Token::RParen)?;
+                    constraint_expr_order.retain(|k| *k != ColumnConstraintExprKind::Check);
+                    constraint_expr_order.push(ColumnConstraintExprKind::Check);
                 }
                 _ => break,
             }
@@ -424,6 +429,7 @@ impl Parser {
             default_value,
             auto_increment,
             check_expr,
+            constraint_expr_order,
         })
     }
 

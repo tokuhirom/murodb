@@ -84,8 +84,11 @@ Internals deep dive:
 
 ## API Notes
 
-- `Database::execute(sql)` is the general SQL entrypoint (read/write, exclusive lock).
-- `Database::query(sql)` is read-only (shared lock, rejects write SQL).
+- `Database::prepare(sql)` creates a reusable prepared statement with positional `?` parameters.
+- `Database::execute_prepared(stmt, params)` executes prepared read/write SQL safely with bound values.
+- `Database::query_prepared(stmt, params)` executes prepared read-only SQL (shared lock).
+- `Database::execute_params(sql, params)` / `Database::query_params(sql, params)` are one-shot convenience wrappers.
+- `Database::execute(sql)` / `Database::query(sql)` remain available for literal SQL; `?` in these paths is rejected to prevent accidental unbound execution.
 - `Database::backup(path)` creates a consistent snapshot of the database to a file.
 - CLI auto-routes read-only SQL to the read path; inside explicit transactions it always uses execute semantics.
 

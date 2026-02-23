@@ -254,6 +254,33 @@ UPDATE t SET name = 'Alicia' WHERE id = 1;
 DELETE FROM t WHERE id = 1;
 ```
 
+### Index Hints (FORCE INDEX / USE INDEX / IGNORE INDEX)
+
+MySQL-compatible index hints allow controlling which indexes the query planner considers.
+
+```sql
+-- Force the planner to use only the specified index (skips PK seek)
+SELECT * FROM t FORCE INDEX (idx_age) WHERE age = 20;
+
+-- Suggest the planner to use the specified index (PK seek still allowed)
+SELECT * FROM t USE INDEX (idx_age) WHERE age = 20;
+
+-- Exclude the specified index from consideration
+SELECT * FROM t IGNORE INDEX (idx_age) WHERE age = 20;
+
+-- Multiple index names
+SELECT * FROM t FORCE INDEX (idx_age, idx_name) WHERE age = 20;
+
+-- Also works with UPDATE and DELETE
+UPDATE t FORCE INDEX (idx_age) SET name = 'updated' WHERE age = 20;
+DELETE FROM t IGNORE INDEX (idx_age) WHERE age = 20;
+```
+
+Behavior:
+- **FORCE INDEX**: Only the specified indexes are candidates. Primary key seek is skipped. If the specified index cannot be used for the query, falls back to full table scan (matching MySQL behavior).
+- **USE INDEX**: The specified indexes are preferred, but full table scan is also a candidate. Primary key seek is still allowed.
+- **IGNORE INDEX**: The specified indexes are excluded from consideration. All other indexes and primary key seek remain available.
+
 ## WHERE Clause
 
 ### Comparison operators

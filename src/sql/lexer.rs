@@ -98,6 +98,9 @@ pub enum Token {
     Checkpoint,
     Database,
     Stats,
+    Force,
+    Use,
+    Ignore,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
     TinyIntType,   // "TINYINT"
     SmallIntType,  // "SMALLINT"
@@ -382,6 +385,9 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "CHECKPOINT" => Token::Checkpoint,
         "DATABASE" => Token::Database,
         "STATS" => Token::Stats,
+        "FORCE" => Token::Force,
+        "USE" => Token::Use,
+        "IGNORE" => Token::Ignore,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"
             let rest = remaining.trim_start();

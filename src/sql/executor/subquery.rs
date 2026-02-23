@@ -321,6 +321,7 @@ pub(super) fn materialize_select_subqueries(
         columns,
         table_name: sel.table_name.clone(),
         table_alias: sel.table_alias.clone(),
+        index_hints: sel.index_hints.clone(),
         joins: sel.joins.clone(),
         where_clause,
         group_by: sel.group_by.clone(),

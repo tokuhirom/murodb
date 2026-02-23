@@ -715,9 +715,10 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        let (table_name, table_alias) = if self.peek() == Some(&Token::From) {
+        let (table_name, index_hints, table_alias) = if self.peek() == Some(&Token::From) {
             self.advance();
             let table_name = self.expect_ident()?;
+            let index_hints = self.parse_index_hints()?;
             let alias = if self.peek() == Some(&Token::As) {
                 self.advance();
                 Some(self.expect_ident()?)
@@ -726,9 +727,9 @@ impl Parser {
             } else {
                 None
             };
-            (Some(table_name), alias)
+            (Some(table_name), index_hints, alias)
         } else {
-            (None, None)
+            (None, Vec::new(), None)
         };
 
         // Parse JOIN clauses
@@ -893,6 +894,7 @@ impl Parser {
             columns,
             table_name,
             table_alias,
+            index_hints,
             joins,
             where_clause,
             group_by,

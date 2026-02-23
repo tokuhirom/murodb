@@ -284,6 +284,38 @@ fn test_search_malformed_overflow_cell_returns_error() {
 }
 
 #[test]
+fn test_search_malformed_leaf_key_len_returns_error() {
+    use crate::btree::node::init_leaf;
+
+    let (mut pager, path) = setup();
+
+    let root = pager.allocate_page().unwrap();
+    let root_id = root.page_id();
+    let mut root_page = Page::new(root_id);
+    init_leaf(&mut root_page);
+
+    // key_len=8, but provide only 1 byte of key payload.
+    let mut malformed = Vec::new();
+    malformed.extend_from_slice(&8u16.to_le_bytes());
+    malformed.push(b'k');
+    root_page.insert_cell(&malformed).unwrap();
+    pager.write_page(&root_page).unwrap();
+
+    let btree = BTree::open(root_id);
+    let result = btree.search(&mut pager, b"k");
+    assert!(
+        matches!(
+            result,
+            Err(MuroError::Corruption(_)) | Err(MuroError::InvalidPage)
+        ),
+        "expected corruption/invalid-page error, got: {:?}",
+        result
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn test_insert_delete_many() {
     let (mut pager, path) = setup();
     let mut btree = BTree::create(&mut pager).unwrap();

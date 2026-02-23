@@ -200,7 +200,7 @@ Real-world deployment features to make MuroDB easier to embed and operate.
     - Existing DB can migrate key and/or cipher suite safely.
     - Migration is resumable and crash-recoverable.
     - Rollback/retry procedure is documented and tested.
-- [ ] Backup API + consistent snapshot
+- [x] Backup API + consistent snapshot
   - Decision (2026-02-22):
     - Prioritize early in Phase 9 so embedded apps can take consistent backups without full writer quiesce windows.
   - Why now:

@@ -35,6 +35,7 @@
 - [Durability Matrix](internals/durability-matrix.md)
 - [FTS Internals](internals/fts-internals.md)
 - [Format Migration](internals/format-migration.md)
+- [Backup](internals/backup.md)
 - [Formal Verification](internals/formal-verification.md)
 
 ---

@@ -649,6 +649,17 @@ impl Session {
         let cache_hits = self.pager.cache_hits();
         let cache_misses = self.pager.cache_misses();
         let cache_total = cache_hits.saturating_add(cache_misses);
+        let wal_file_size_bytes = match self.wal.file_size_bytes() {
+            Ok(size) => size,
+            Err(err) => {
+                eprintln!(
+                    "WARNING: failed to read WAL file size for SHOW DATABASE STATS: path={} error={}",
+                    self.wal.wal_path().display(),
+                    err
+                );
+                0
+            }
+        };
         let cache_hit_rate_pct = if cache_total == 0 {
             0.0
         } else {
@@ -729,6 +740,7 @@ impl Session {
                 "pager_cache_hit_rate_pct",
                 format!("{:.2}", cache_hit_rate_pct),
             ),
+            stat_row("wal_file_size_bytes", wal_file_size_bytes.to_string()),
         ];
         Ok(ExecResult::Rows(rows))
     }

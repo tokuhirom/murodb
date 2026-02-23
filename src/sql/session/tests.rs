@@ -378,7 +378,7 @@ fn test_show_database_stats_sql() {
 
     match session.execute("SHOW DATABASE STATS").unwrap() {
         ExecResult::Rows(rows) => {
-            assert_eq!(rows.len(), 18);
+            assert_eq!(rows.len(), 19);
             // Verify checkpoint stats
             assert_eq!(
                 rows[0].get("stat"),
@@ -433,6 +433,53 @@ fn test_show_database_stats_sql() {
                 rows[17].get("stat"),
                 Some(&Value::Varchar("pager_cache_hit_rate_pct".to_string()))
             );
+            assert_eq!(
+                rows[18].get("stat"),
+                Some(&Value::Varchar("wal_file_size_bytes".to_string()))
+            );
+            let wal_size = match rows[18].get("value") {
+                Some(Value::Varchar(v)) => v.parse::<u64>().unwrap(),
+                other => panic!("unexpected wal_file_size_bytes value: {:?}", other),
+            };
+            assert!(wal_size > 0, "expected wal_file_size_bytes > 0");
+        }
+        _ => panic!("Expected rows from SHOW DATABASE STATS"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_show_database_stats_uses_open_wal_handle_when_path_unlinked() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+
+    std::fs::remove_file(&wal_path).unwrap();
+
+    match session.execute("SHOW DATABASE STATS").unwrap() {
+        ExecResult::Rows(rows) => {
+            let wal_row = rows
+                .iter()
+                .find(|row| {
+                    row.get("stat") == Some(&Value::Varchar("wal_file_size_bytes".to_string()))
+                })
+                .unwrap();
+            let wal_size = match wal_row.get("value") {
+                Some(Value::Varchar(v)) => v.parse::<u64>().unwrap(),
+                other => panic!("unexpected wal_file_size_bytes value: {:?}", other),
+            };
+            assert!(wal_size > 0, "expected wal_file_size_bytes > 0");
         }
         _ => panic!("Expected rows from SHOW DATABASE STATS"),
     }
@@ -552,7 +599,7 @@ fn test_stats_readable_on_poisoned_session() {
     // SHOW DATABASE STATS must still work on poisoned session
     match session.execute("SHOW DATABASE STATS").unwrap() {
         ExecResult::Rows(rows) => {
-            assert_eq!(rows.len(), 18);
+            assert_eq!(rows.len(), 19);
             // commit_in_doubt_count should be 1
             assert_eq!(
                 rows[4].get("stat"),
@@ -614,7 +661,7 @@ fn test_rekey_wal_recreate_failure_poison_session() {
     // Stats SQL remains available for operators.
     match session.execute("SHOW DATABASE STATS").unwrap() {
         ExecResult::Rows(rows) => {
-            assert_eq!(rows.len(), 18);
+            assert_eq!(rows.len(), 19);
         }
         _ => panic!("Expected rows from SHOW DATABASE STATS"),
     }

@@ -1,7 +1,7 @@
 use crate::error::{MuroError, Result};
 use crate::types::{
-    format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
-    DataType, Value,
+    format_date, format_datetime, format_uuid, parse_date_string, parse_datetime_string,
+    parse_timestamp_string, parse_uuid_string, DataType, Value,
 };
 
 pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
@@ -115,6 +115,7 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
                 Value::Date(d) => format_date(*d),
                 Value::DateTime(dt) => format_datetime(*dt),
                 Value::Timestamp(ts) => format_datetime(*ts),
+                Value::Uuid(b) => format_uuid(b),
                 _ => val.to_string(),
             };
             Ok(Value::Varchar(s))
@@ -122,8 +123,32 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::Varbinary(_) => match val {
             Value::Varbinary(b) => Ok(Value::Varbinary(b.clone())),
             Value::Varchar(s) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
+            Value::Uuid(b) => Ok(Value::Varbinary(b.to_vec())),
             _ => Err(MuroError::Execution(format!(
                 "Cannot cast {:?} to varbinary",
+                val
+            ))),
+        },
+        DataType::Uuid => match val {
+            Value::Uuid(b) => Ok(Value::Uuid(*b)),
+            Value::Varchar(s) => {
+                let bytes = parse_uuid_string(s)
+                    .ok_or_else(|| MuroError::Execution(format!("Cannot cast '{}' to UUID", s)))?;
+                Ok(Value::Uuid(bytes))
+            }
+            Value::Varbinary(b) => {
+                if b.len() != 16 {
+                    return Err(MuroError::Execution(format!(
+                        "VARBINARY must be 16 bytes to cast to UUID, got {}",
+                        b.len()
+                    )));
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(b);
+                Ok(Value::Uuid(bytes))
+            }
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to UUID",
                 val
             ))),
         },

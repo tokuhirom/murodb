@@ -8,6 +8,7 @@
 - [x] CREATE FULLTEXT INDEX (bigram, BM25, NATURAL/BOOLEAN mode, snippet)
 - [x] MySQL-compatible integer types (TINYINT, SMALLINT, INT, BIGINT)
 - [x] VARCHAR(n), VARBINARY(n), TEXT with size validation
+- [x] UUID type (16-byte native, UUID_V4/UUID_V7 generation)
 - [x] Hex literal (`X'...'`) for VARBINARY data
 - [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
 - [x] AND, OR logical operators
@@ -89,6 +90,7 @@ MySQL-compatible scalar functions.
     - Timezone handling policy is explicit (especially TIMESTAMP input/output normalization).
     - Invalid dates/times reject with deterministic errors.
 - [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
+- [x] UUID type with UUID_V4() and UUID_V7() generation functions
 - [ ] BLOB (skipped for now)
   - Decision (2026-02-22): defer and move focus to Phase 7 performance work.
   - Why skipped now:

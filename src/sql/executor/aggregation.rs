@@ -686,6 +686,7 @@ pub(super) fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Orde
         (Some(Value::Timestamp(a)), Some(Value::DateTime(b))) => a.cmp(b),
         (Some(Value::Varchar(a)), Some(Value::Varchar(b))) => a.cmp(b),
         (Some(Value::Varbinary(a)), Some(Value::Varbinary(b))) => a.cmp(b),
+        (Some(Value::Uuid(a)), Some(Value::Uuid(b))) => a.cmp(b),
         (Some(Value::Null), _) | (None, _) => std::cmp::Ordering::Less,
         (_, Some(Value::Null)) | (_, None) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,

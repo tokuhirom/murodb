@@ -115,6 +115,7 @@ pub enum Token {
     VarbinaryType, // "VARBINARY"
     TextType,      // "TEXT"
     BooleanType,   // "BOOLEAN" / "BOOL"
+    UuidType,      // "UUID"
 
     // Special function names
     FtsSnippet, // "fts_snippet"
@@ -468,6 +469,7 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "VARCHAR" => Token::VarcharType,
         "VARBINARY" => Token::VarbinaryType,
         "TEXT" => Token::TextType,
+        "UUID" => Token::UuidType,
         "FTS_SNIPPET" => Token::FtsSnippet,
         _ => Token::Ident(word.to_string()),
     };

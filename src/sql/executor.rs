@@ -24,7 +24,7 @@ use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
 use crate::types::{
     format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
-    DataType, Value, ValueKey,
+    parse_uuid_string, DataType, Value, ValueKey,
 };
 
 mod aggregation;

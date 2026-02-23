@@ -42,6 +42,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&b);
                 }
+                DataType::Uuid => panic!("integer value reached UUID serializer"),
             },
             Value::Float(n) => match columns[i].data_type {
                 DataType::TinyInt => buf.extend_from_slice(&(*n as i8).to_le_bytes()),
@@ -64,6 +65,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&b);
                 }
+                DataType::Uuid => panic!("float value reached UUID serializer"),
             },
             Value::Date(d) => match columns[i].data_type {
                 DataType::Date => buf.extend_from_slice(&d.to_le_bytes()),
@@ -118,6 +120,9 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
             }
             Value::Varbinary(b) => {
                 buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                buf.extend_from_slice(b);
+            }
+            Value::Uuid(b) => {
                 buf.extend_from_slice(b);
             }
             Value::Null => {} // already skipped
@@ -272,6 +277,15 @@ pub fn deserialize_row_versioned(
                 values.push(Value::Varbinary(data[offset..offset + len].to_vec()));
                 offset += len;
             }
+            DataType::Uuid => {
+                if offset + 16 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&data[offset..offset + 16]);
+                values.push(Value::Uuid(bytes));
+                offset += 16;
+            }
         }
     }
 
@@ -367,8 +381,13 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Timestamp(n), DataType::Date) => encode_i32((*n / 1_000_000) as i32).to_vec(),
         (Value::Timestamp(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
         (Value::Timestamp(n), _) => encode_i64(*n).to_vec(),
+        (Value::Varchar(s), DataType::Uuid) => {
+            // Parse UUID string for UUID column key encoding
+            parse_uuid_string(s).map_or_else(|| s.as_bytes().to_vec(), |b| b.to_vec())
+        }
         (Value::Varchar(s), _) => s.as_bytes().to_vec(),
         (Value::Varbinary(b), _) => b.clone(),
+        (Value::Uuid(b), _) => b.to_vec(),
         (Value::Null, _) => Vec::new(),
     }
 }

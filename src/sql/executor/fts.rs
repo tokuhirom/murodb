@@ -508,6 +508,7 @@ pub(super) fn value_to_fts_text(value: &Value) -> Option<String> {
         Value::DateTime(n) => Some(format_datetime(*n)),
         Value::Timestamp(n) => Some(format_datetime(*n)),
         Value::Varbinary(_) => None,
+        Value::Uuid(b) => Some(crate::types::format_uuid(b)),
     }
 }
 

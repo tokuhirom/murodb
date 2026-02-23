@@ -18,6 +18,7 @@ pub(super) fn value_to_expr(v: &Value) -> Expr {
         },
         Value::Varchar(s) => Expr::StringLiteral(s.clone()),
         Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
+        Value::Uuid(b) => Expr::StringLiteral(crate::types::format_uuid(b)),
         Value::Null => Expr::Null,
     }
 }

@@ -15,6 +15,7 @@
 | VARCHAR(n) | variable | max n bytes (optional) |
 | TEXT | variable | unbounded text |
 | VARBINARY(n) | variable | max n bytes (optional) |
+| UUID | 16 bytes | 128-bit UUID (RFC 9562), stored as fixed-length binary |
 | NULL | 0 bytes | null value |
 
 Temporal semantics:
@@ -546,6 +547,38 @@ Returns `base` raised to the power of `exp`.
 
 ```sql
 SELECT POWER(2, 10);  -- 1024
+```
+
+### UUID Functions
+
+#### UUID_V4()
+
+Generates a random UUID (version 4, RFC 9562).
+
+```sql
+SELECT UUID_V4();  -- e.g. '550e8400-e29b-41d4-a716-446655440000'
+```
+
+#### UUID_V7()
+
+Generates a time-ordered UUID (version 7, RFC 9562). UUIDs generated later sort after earlier ones, making them suitable for primary keys with time-ordered insertion.
+
+```sql
+CREATE TABLE events (id UUID PRIMARY KEY, data VARCHAR);
+INSERT INTO events VALUES (UUID_V7(), 'event data');
+```
+
+UUID values are displayed as lowercase hyphenated hex strings (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). String literals in UUID format (with or without hyphens) are automatically parsed when inserted into UUID columns.
+
+```sql
+-- Both forms are accepted:
+INSERT INTO t VALUES ('550e8400-e29b-41d4-a716-446655440000', 'with hyphens');
+INSERT INTO t VALUES ('550e8400e29b41d4a716446655440000', 'without hyphens');
+
+-- Cast between UUID and VARCHAR/VARBINARY:
+SELECT CAST(id AS VARCHAR) FROM t;
+SELECT CAST('550e8400-e29b-41d4-a716-446655440000' AS UUID);
+SELECT CAST(id AS VARBINARY) FROM t;  -- 16-byte binary
 ```
 
 ### Date/Time Functions

@@ -452,6 +452,7 @@ impl Parser {
                     Ok(DataType::Varbinary(size))
                 }
                 Some(Token::TextType) => Ok(DataType::Text),
+                Some(Token::UuidType) => Ok(DataType::Uuid),
                 Some(t) => Err(format!("Expected data type, got {:?}", t)),
                 None => Err("Expected data type".into()),
             },

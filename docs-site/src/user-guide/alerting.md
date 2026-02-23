@@ -90,14 +90,9 @@ Breakdown counters for freelist sanitization events:
 
 ## WAL Size Monitoring
 
-`wal_file_size_bytes` is not currently exposed via `SHOW DATABASE STATS`.
-
-Track WAL size at the file level and correlate with `failed_checkpoints`:
-
-```bash
-ls -lh mydb.wal
-```
-
+`SHOW DATABASE STATS` exposes WAL size as `wal_file_size_bytes`.
+Use this SQL-native metric first and correlate with `failed_checkpoints`.
+If `wal_file_size_bytes` is `0`, the WAL file is currently absent.
 Persistent growth together with `failed_checkpoints > 0` indicates checkpoint truncate failures.
 
 ## Monitoring Patterns
@@ -114,7 +109,7 @@ fn check_health(db: &mut Database) {
         // Parse result and check thresholds
         // Alert on commit_in_doubt_count > 0
         // Alert on failed_checkpoints > 0
-        // Track WAL file size via filesystem metrics
+        // Track wal_file_size_bytes
     }
 }
 ```
@@ -144,6 +139,7 @@ if !report.skipped.is_empty() {
 |---|---|---|---|
 | `commit_in_doubt_count` | `> 0` | Critical | Session poisoned; reopen required |
 | `failed_checkpoints` | `> 0` | Warning | WAL growing; checkpoint failing |
+| `wal_file_size_bytes` | Increasing trend | Warning | WAL growth; correlate with checkpoint failures |
 | `freelist_sanitize_count` | `> 0` | Info | Freelist self-healed |
 | `freelist_out_of_range_total` | `> 0` | Info | Invalid freelist entries removed (range) |
 | `freelist_duplicates_total` | `> 0` | Info | Invalid freelist entries removed (duplicates) |

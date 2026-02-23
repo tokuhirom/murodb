@@ -718,6 +718,7 @@ impl Database {
 
     /// Flush all data to disk.
     pub fn flush(&mut self) -> Result<()> {
+        let _guard = self.lock_manager.write_lock()?;
         let catalog_root = self.session.catalog().root_page_id();
         let pager = self.session.pager_mut();
         pager.set_catalog_root(catalog_root);
@@ -744,5 +745,46 @@ impl Database {
     /// pager, catalog, and WAL writer, and manages explicit transaction state.
     pub fn into_session(self) -> Session {
         self.session
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    #[test]
+    fn flush_waits_while_read_lock_is_held() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("flush_lock.db");
+
+        let mut db1 = Database::create_plaintext(&db_path).unwrap();
+        db1.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        db1.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        let db2 = Database::open_plaintext(&db_path).unwrap();
+        let read_guard = db2.lock_manager.read_lock().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut db = db1;
+            db.flush().unwrap();
+            tx.send(()).unwrap();
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            rx.try_recv().is_err(),
+            "flush completed even though another handle held a read lock"
+        );
+
+        drop(read_guard);
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("flush should complete after read lock is released");
+        handle.join().unwrap();
     }
 }

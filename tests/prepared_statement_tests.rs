@@ -1,4 +1,5 @@
 use murodb::sql::executor::ExecResult;
+use murodb::types::parse_uuid_string;
 use murodb::types::Value;
 use murodb::Database;
 use tempfile::TempDir;
@@ -151,4 +152,47 @@ fn test_prepared_rows_affected() {
         ExecResult::RowsAffected(n) => assert_eq!(n, 2),
         other => panic!("expected RowsAffected, got {other:?}"),
     }
+}
+
+#[test]
+fn test_prepared_ddl_default_params_preserve_cast_wrapped_types() {
+    let (mut db, _dir) = setup_db();
+
+    let stmt = db
+        .prepare(
+            "CREATE TABLE t (
+                id BIGINT PRIMARY KEY,
+                d DATE DEFAULT ?,
+                dt DATETIME DEFAULT ?,
+                ts TIMESTAMP DEFAULT ?,
+                dec DECIMAL(10,2) DEFAULT ?,
+                u UUID DEFAULT ?
+            )",
+        )
+        .unwrap();
+
+    let uuid = parse_uuid_string("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let dec = rust_decimal::Decimal::new(12345, 2);
+    db.execute_prepared(
+        &stmt,
+        &[
+            Value::Date(20260223),
+            Value::DateTime(20260223112233),
+            Value::Timestamp(20260223112234),
+            Value::Decimal(dec),
+            Value::Uuid(uuid),
+        ],
+    )
+    .unwrap();
+
+    db.execute("INSERT INTO t (id) VALUES (1)").unwrap();
+    let rows = db
+        .query("SELECT d, dt, ts, dec, u FROM t WHERE id = 1")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("d"), Some(&Value::Date(20260223)));
+    assert_eq!(rows[0].get("dt"), Some(&Value::DateTime(20260223112233)));
+    assert_eq!(rows[0].get("ts"), Some(&Value::Timestamp(20260223112234)));
+    assert_eq!(rows[0].get("dec"), Some(&Value::Decimal(dec)));
+    assert_eq!(rows[0].get("u"), Some(&Value::Uuid(uuid)));
 }

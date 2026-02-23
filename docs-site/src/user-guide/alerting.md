@@ -92,7 +92,6 @@ Breakdown counters for freelist sanitization events:
 
 `SHOW DATABASE STATS` exposes WAL size as `wal_file_size_bytes`.
 Use this SQL-native metric first and correlate with `failed_checkpoints`.
-If `wal_file_size_bytes` is `0`, the WAL file is currently absent.
 Persistent growth together with `failed_checkpoints > 0` indicates checkpoint truncate failures.
 
 ## Monitoring Patterns

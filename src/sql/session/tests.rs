@@ -447,8 +447,9 @@ fn test_show_database_stats_sql() {
     }
 }
 
+#[cfg(unix)]
 #[test]
-fn test_show_database_stats_reports_zero_when_wal_path_is_absent() {
+fn test_show_database_stats_uses_open_wal_handle_when_path_unlinked() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let wal_path = dir.path().join("test.wal");
@@ -474,7 +475,11 @@ fn test_show_database_stats_reports_zero_when_wal_path_is_absent() {
                     row.get("stat") == Some(&Value::Varchar("wal_file_size_bytes".to_string()))
                 })
                 .unwrap();
-            assert_eq!(wal_row.get("value"), Some(&Value::Varchar("0".to_string())));
+            let wal_size = match wal_row.get("value") {
+                Some(Value::Varchar(v)) => v.parse::<u64>().unwrap(),
+                other => panic!("unexpected wal_file_size_bytes value: {:?}", other),
+            };
+            assert!(wal_size > 0, "expected wal_file_size_bytes > 0");
         }
         _ => panic!("Expected rows from SHOW DATABASE STATS"),
     }

@@ -11,7 +11,6 @@ SHOW DATABASE STATS;
 ```
 
 Note the values of `commit_in_doubt_count`, `failed_checkpoints`, `wal_file_size_bytes`, `freelist_sanitize_count`, `freelist_out_of_range_total`, and `freelist_duplicates_total`.
-If `wal_file_size_bytes` is `0`, the WAL file is currently absent.
 
 If the database cannot be opened, inspect the WAL without modifying it:
 

@@ -204,7 +204,7 @@ It also exposes checkpoint policy/runtime fields:
 - `checkpoint_policy_interval_ms`
 
 WAL observability:
-- `wal_file_size_bytes` (`0` when WAL file is absent)
+- `wal_file_size_bytes`
 
 ## DML (Data Manipulation Language)
 

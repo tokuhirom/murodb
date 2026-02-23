@@ -311,6 +311,29 @@ SELECT * FROM t LIMIT 10;
 SELECT * FROM t LIMIT 10 OFFSET 5;
 ```
 
+## Literals
+
+### Hex Literal (Binary)
+
+Binary data can be specified using the `X'...'` syntax (SQL standard / MySQL compatible):
+
+```sql
+-- Insert binary data
+INSERT INTO t (id, data) VALUES (1, X'DEADBEEF');
+
+-- Empty binary literal
+INSERT INTO t (id, data) VALUES (2, X'');
+
+-- Case-insensitive (both X and x are accepted)
+INSERT INTO t (id, data) VALUES (3, x'cafebabe');
+
+-- Use in WHERE clause
+SELECT * FROM t WHERE data = X'DEADBEEF';
+```
+
+The hex string must contain an even number of hex digits (`0-9`, `A-F`, `a-f`).
+Odd-length hex strings and invalid characters produce a parse error.
+
 ## Expressions
 
 ### Arithmetic operators

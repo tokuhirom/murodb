@@ -26,7 +26,7 @@ use crate::concurrency::LockManager;
 use crate::crypto::aead::MasterKey;
 use crate::crypto::kdf;
 use crate::crypto::suite::EncryptionSuite;
-use crate::error::Result;
+use crate::error::{MuroError, Result};
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
@@ -153,17 +153,32 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn initialize_fts_term_key(pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<()> {
-    let key = if let Some(existing) = catalog.get_fts_term_key(pager)? {
-        existing
-    } else {
-        // Bootstrap value for databases that predate catalog-persisted FTS term keys.
-        let generated = pager.derive_bootstrap_fts_term_key();
-        catalog.set_fts_term_key(pager, generated)?;
-        generated
+fn initialize_fts_term_key(pager: &mut Pager, catalog: Option<&mut SystemCatalog>) -> Result<bool> {
+    let Some(catalog) = catalog else {
+        pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
+        return Ok(false);
     };
-    pager.set_fts_term_key(key);
-    Ok(())
+
+    match catalog.get_fts_term_key(pager) {
+        Ok(Some(existing)) => {
+            pager.set_fts_term_key(existing);
+            Ok(false)
+        }
+        Ok(None) => {
+            // Bootstrap value for databases that predate catalog-persisted FTS term keys.
+            let generated = pager.derive_bootstrap_fts_term_key();
+            catalog.set_fts_term_key(pager, generated)?;
+            pager.set_fts_term_key(generated);
+            Ok(true)
+        }
+        // Some tests build DB files through Pager-only flows where catalog_root is unset (0).
+        // For those files, keep FTS usable via in-memory bootstrap without catalog writes.
+        Err(MuroError::InvalidPage) if pager.catalog_root() == 0 => {
+            pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl Database {
@@ -171,7 +186,7 @@ impl Database {
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, &mut catalog)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -194,7 +209,7 @@ impl Database {
     pub fn create_plaintext(path: &Path) -> Result<Self> {
         let mut pager = Pager::create_plaintext(path)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, &mut catalog)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -270,7 +285,19 @@ impl Database {
         let mut pager = Pager::open(path, master_key)?;
         let catalog_root = pager.catalog_root();
         let mut catalog = SystemCatalog::open(catalog_root);
-        initialize_fts_term_key(&mut pager, &mut catalog)?;
+        let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+        let migrated = initialize_fts_term_key(
+            &mut pager,
+            if has_uninitialized_catalog {
+                None
+            } else {
+                Some(&mut catalog)
+            },
+        )?;
+        if migrated {
+            pager.set_catalog_root(catalog.root_page_id());
+            pager.flush_meta()?;
+        }
         let wal = WalWriter::create(&wp, master_key)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -315,7 +342,19 @@ impl Database {
         let mut pager = Pager::open_plaintext(path)?;
         let catalog_root = pager.catalog_root();
         let mut catalog = SystemCatalog::open(catalog_root);
-        initialize_fts_term_key(&mut pager, &mut catalog)?;
+        let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+        let migrated = initialize_fts_term_key(
+            &mut pager,
+            if has_uninitialized_catalog {
+                None
+            } else {
+                Some(&mut catalog)
+            },
+        )?;
+        if migrated {
+            pager.set_catalog_root(catalog.root_page_id());
+            pager.flush_meta()?;
+        }
         let wal = WalWriter::create_plaintext(&wp)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -338,7 +377,7 @@ impl Database {
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, &mut catalog)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 

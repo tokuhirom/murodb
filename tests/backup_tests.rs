@@ -198,3 +198,82 @@ fn test_backup_to_symlink_of_source_rejected() {
         err
     );
 }
+
+#[test]
+fn test_backup_after_rekey_uses_new_password() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("source.db");
+    let backup_path = dir.path().join("backup.db");
+
+    {
+        let mut db = murodb::Database::create_with_password(&db_path, "old_pass").unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, v VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'before_rekey')")
+            .unwrap();
+        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new_pass'")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (2, 'after_rekey')")
+            .unwrap();
+
+        db.backup(&backup_path).unwrap();
+    }
+
+    // Backup should require the NEW password and contain all rows.
+    assert!(murodb::Database::open_with_password(&backup_path, "old_pass").is_err());
+    let mut backup = murodb::Database::open_with_password(&backup_path, "new_pass").unwrap();
+    let rows = query_rows(&mut backup, "SELECT id, v FROM t ORDER BY id");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values[1].1,
+        Value::Varchar("before_rekey".to_string())
+    );
+    assert_eq!(
+        rows[1].values[1].1,
+        Value::Varchar("after_rekey".to_string())
+    );
+}
+
+#[test]
+fn test_rekey_on_backup_does_not_affect_source() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("source.db");
+    let backup_path = dir.path().join("backup.db");
+
+    {
+        let mut db = murodb::Database::create_with_password(&db_path, "source_pass").unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, v VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'source_data')")
+            .unwrap();
+        db.backup(&backup_path).unwrap();
+    }
+
+    // Rekey the BACKUP only.
+    {
+        let mut backup = murodb::Database::open_with_password(&backup_path, "source_pass").unwrap();
+        backup
+            .execute("ALTER DATABASE REKEY WITH PASSWORD 'backup_pass'")
+            .unwrap();
+    }
+
+    // Source must still open with original password and not with backup password.
+    assert!(murodb::Database::open_with_password(&db_path, "backup_pass").is_err());
+    let mut source = murodb::Database::open_with_password(&db_path, "source_pass").unwrap();
+    let rows = query_rows(&mut source, "SELECT id, v FROM t");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].values[1].1,
+        Value::Varchar("source_data".to_string())
+    );
+
+    // Backup must now open with its new password and not with old source password.
+    assert!(murodb::Database::open_with_password(&backup_path, "source_pass").is_err());
+    let mut backup = murodb::Database::open_with_password(&backup_path, "backup_pass").unwrap();
+    let rows = query_rows(&mut backup, "SELECT id, v FROM t");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].values[1].1,
+        Value::Varchar("source_data".to_string())
+    );
+}

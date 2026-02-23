@@ -118,6 +118,14 @@ impl Parser {
             self.advance();
         }
 
+        // Reject trailing unparsed tokens
+        if self.peek().is_some() {
+            return Err(format!(
+                "Unexpected trailing token: {:?}",
+                self.peek().unwrap()
+            ));
+        }
+
         Ok(stmt)
     }
 
@@ -715,10 +723,9 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        let (table_name, index_hints, table_alias) = if self.peek() == Some(&Token::From) {
+        let (table_name, table_alias, index_hints) = if self.peek() == Some(&Token::From) {
             self.advance();
             let table_name = self.expect_ident()?;
-            let index_hints = self.parse_index_hints()?;
             let alias = if self.peek() == Some(&Token::As) {
                 self.advance();
                 Some(self.expect_ident()?)
@@ -727,9 +734,10 @@ impl Parser {
             } else {
                 None
             };
-            (Some(table_name), index_hints, alias)
+            let index_hints = self.parse_index_hints()?;
+            (Some(table_name), alias, index_hints)
         } else {
-            (None, Vec::new(), None)
+            (None, None, Vec::new())
         };
 
         // Parse JOIN clauses

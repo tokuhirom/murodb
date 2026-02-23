@@ -272,13 +272,29 @@ fn test_force_index_with_alias() {
     let (mut pager, mut catalog, _dir) = setup();
     setup_test_table(&mut pager, &mut catalog);
 
-    // Index hint should work before table alias
+    // MySQL syntax: FROM tbl_name [AS alias] [index_hint]
     let rows = query_rows(
-        "SELECT * FROM t FORCE INDEX (idx_age) WHERE age = 20",
+        "SELECT * FROM t AS x FORCE INDEX (idx_age) WHERE age = 20",
         &mut pager,
         &mut catalog,
     );
     assert_eq!(rows.len(), 1);
+
+    // Alias without AS keyword
+    let rows = query_rows(
+        "SELECT * FROM t x FORCE INDEX (idx_age) WHERE age = 20",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(rows.len(), 1);
+
+    // EXPLAIN should show correct plan with alias + hint
+    let access = get_explain_access_type(
+        "EXPLAIN SELECT * FROM t AS x FORCE INDEX (idx_age) WHERE id = 1",
+        &mut pager,
+        &mut catalog,
+    );
+    assert_eq!(access, "ALL", "FORCE INDEX with alias should skip PK seek");
 }
 
 // ==================== Range query with hints ====================

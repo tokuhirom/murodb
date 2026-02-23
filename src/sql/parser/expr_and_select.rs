@@ -611,6 +611,17 @@ impl Parser {
     pub(super) fn parse_unary(&mut self) -> Result<Expr, String> {
         if self.peek() == Some(&Token::Minus) {
             self.advance();
+            // Handle i64::MIN: the lexer cannot parse 9223372036854775808 as i64,
+            // so it becomes an Ident. We detect this case and parse "-{digits}" as i64.
+            if let Some(Token::Ident(s)) = self.peek() {
+                if s.chars().all(|c| c.is_ascii_digit()) {
+                    let neg_str = format!("-{}", s);
+                    if let Ok(n) = neg_str.parse::<i64>() {
+                        self.advance();
+                        return Ok(Expr::IntLiteral(n));
+                    }
+                }
+            }
             let operand = self.parse_primary()?;
             // Optimize: if it's an integer literal, negate it directly
             match operand {

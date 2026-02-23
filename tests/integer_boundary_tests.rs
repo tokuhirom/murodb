@@ -215,13 +215,10 @@ fn test_bigint_min_max() {
         &mut catalog,
         "CREATE TABLE t (id BIGINT PRIMARY KEY, val BIGINT)",
     );
-    // i64::MIN (-9223372036854775808) cannot be represented as a literal because
-    // the parser handles it as -(9223372036854775808) which overflows i64.
-    // Use i64::MIN + 1 instead.
     exec(
         &mut pager,
         &mut catalog,
-        "INSERT INTO t VALUES (1, -9223372036854775807)",
+        "INSERT INTO t VALUES (1, -9223372036854775808)",
     );
     exec(
         &mut pager,
@@ -230,7 +227,7 @@ fn test_bigint_min_max() {
     );
 
     let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t WHERE id = 1");
-    assert_eq!(rows[0].get("val"), Some(&Value::Integer(i64::MIN + 1)));
+    assert_eq!(rows[0].get("val"), Some(&Value::Integer(i64::MIN)));
     let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t WHERE id = 2");
     assert_eq!(rows[0].get("val"), Some(&Value::Integer(i64::MAX)));
 }

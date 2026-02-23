@@ -24,6 +24,17 @@ pub struct Page {
 }
 
 impl Page {
+    fn read_u16_at(&self, offset: usize) -> Option<u16> {
+        let end = offset.checked_add(2)?;
+        if end > PAGE_SIZE {
+            return None;
+        }
+        Some(u16::from_le_bytes([
+            self.data[offset],
+            self.data[offset + 1],
+        ]))
+    }
+
     pub fn new(page_id: PageId) -> Self {
         let mut page = Page {
             data: [0u8; PAGE_SIZE],
@@ -116,11 +127,14 @@ impl Page {
             return None;
         }
         let ptr_offset = PAGE_HEADER_SIZE + (index as usize) * CELL_POINTER_SIZE;
-        let cell_offset =
-            u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize;
-        let len = u16::from_le_bytes(self.data[cell_offset..cell_offset + 2].try_into().unwrap())
-            as usize;
-        Some(&self.data[cell_offset + 2..cell_offset + 2 + len])
+        let cell_offset = self.read_u16_at(ptr_offset)? as usize;
+        let len = self.read_u16_at(cell_offset)? as usize;
+        let payload_start = cell_offset.checked_add(2)?;
+        let payload_end = payload_start.checked_add(len)?;
+        if payload_end > PAGE_SIZE {
+            return None;
+        }
+        Some(&self.data[payload_start..payload_end])
     }
 
     /// Get a mutable reference to cell payload by index.
@@ -129,11 +143,14 @@ impl Page {
             return None;
         }
         let ptr_offset = PAGE_HEADER_SIZE + (index as usize) * CELL_POINTER_SIZE;
-        let cell_offset =
-            u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize;
-        let len = u16::from_le_bytes(self.data[cell_offset..cell_offset + 2].try_into().unwrap())
-            as usize;
-        Some((cell_offset + 2, len))
+        let cell_offset = self.read_u16_at(ptr_offset)? as usize;
+        let len = self.read_u16_at(cell_offset)? as usize;
+        let payload_start = cell_offset.checked_add(2)?;
+        let payload_end = payload_start.checked_add(len)?;
+        if payload_end > PAGE_SIZE {
+            return None;
+        }
+        Some((payload_start, len))
     }
 
     /// Remove cell at the given index by swapping pointers with the last cell.
@@ -167,9 +184,7 @@ impl Page {
             return None;
         }
         let ptr_offset = PAGE_HEADER_SIZE + (index as usize) * CELL_POINTER_SIZE;
-        Some(u16::from_le_bytes(
-            self.data[ptr_offset..ptr_offset + 2].try_into().unwrap(),
-        ))
+        self.read_u16_at(ptr_offset)
     }
 
     /// Get the raw page bytes.
@@ -256,5 +271,24 @@ mod tests {
         }
         assert!(count > 50); // should fit many 32-byte cells
         assert_eq!(page.cell_count(), count);
+    }
+
+    #[test]
+    fn test_cell_returns_none_on_invalid_pointer() {
+        let mut page = Page::new(1);
+        page.insert_cell(b"ok").unwrap();
+        page.set_cell_pointer(0, PAGE_SIZE as u16);
+        assert_eq!(page.cell(0), None);
+        assert_eq!(page.cell_offset_and_len(0), None);
+    }
+
+    #[test]
+    fn test_cell_returns_none_on_invalid_length() {
+        let mut page = Page::new(1);
+        page.insert_cell(b"ok").unwrap();
+        let ptr = page.cell_pointer(0).unwrap() as usize;
+        page.data[ptr..ptr + 2].copy_from_slice(&(u16::MAX).to_le_bytes());
+        assert_eq!(page.cell(0), None);
+        assert_eq!(page.cell_offset_and_len(0), None);
     }
 }

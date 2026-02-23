@@ -54,7 +54,7 @@ Record tags on wire:
 3. Execute directly on pager/catalog (no implicit WAL transaction)
 
 `query` is a `&mut self` API because the session may refresh pager/catalog state from disk before read execution.
-For concurrent readers in one process, open additional handles (`Database::open_reader`) and query from each handle.
+For concurrent readers in one process, open additional read-only handles (`Database::open_reader`) and query from each handle.
 
 If an explicit transaction is active, read statements are executed in the transaction context (`execute_in_tx`) so uncommitted writes remain visible to that session.
 

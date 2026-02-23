@@ -80,7 +80,7 @@ API behavior:
 - `Database::query(...)` acquires shared read lock.
 - `Database::execute(...)` acquires exclusive write lock.
 - `Database::query(...)` is a `&mut self` API because read execution may refresh pager/catalog metadata from disk before running.
-- For multiple concurrent readers within one process, use separate handles (for example `Database::open_reader()`).
+- For multiple concurrent readers within one process, use separate read-only handles (for example `Database::open_reader()`).
 
 Important granularity note:
 

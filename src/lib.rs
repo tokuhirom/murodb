@@ -37,8 +37,6 @@ use crate::sql::prepared::PreparedStatement;
 use crate::sql::session::Session;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::types::Value;
-use crate::wal::reader::WalReader;
-use crate::wal::record::Lsn;
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
@@ -54,6 +52,12 @@ pub struct Database {
     db_path: PathBuf,
     #[allow(dead_code)]
     encryption_suite: EncryptionSuite,
+}
+
+/// Read-only database handle for concurrent query workloads.
+pub struct DatabaseReader {
+    session: Session,
+    lock_manager: LockManager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,19 +165,6 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     sync_dir(wal_path);
 
     Ok(dest)
-}
-
-fn wal_next_lsn(
-    path: &Path,
-    suite: EncryptionSuite,
-    master_key: Option<&MasterKey>,
-) -> Result<Lsn> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    let mut reader = WalReader::open_with_suite(path, suite, master_key)?;
-    let records = reader.read_all()?;
-    Ok(records.len() as Lsn)
 }
 
 fn fts_value_to_text(value: &Value) -> Option<&str> {
@@ -727,7 +718,9 @@ impl Database {
     ///
     /// This is useful when you want concurrent readers without manually
     /// re-opening the same path and re-supplying key material.
-    pub fn open_reader(&self) -> Result<Self> {
+    ///
+    /// The returned handle is read-only and does not expose write APIs.
+    pub fn open_reader(&self) -> Result<DatabaseReader> {
         let path = self.db_path.as_path();
         let wp = wal_path(path);
         match self.encryption_suite {
@@ -746,16 +739,13 @@ impl Database {
                     LEGACY_SQL_FTS_TERM_KEY,
                     false,
                 )?;
-                let next_lsn = wal_next_lsn(&wp, EncryptionSuite::Plaintext, None)?;
-                let wal = WalWriter::open_plaintext(&wp, next_lsn)?;
+                // Reader handles never write WAL; fixed LSN is acceptable.
+                let wal = WalWriter::open_plaintext(&wp, 0)?;
                 let lock_manager = LockManager::new(path)?;
                 let session = Session::new(pager, catalog, wal);
-                Ok(Database {
+                Ok(DatabaseReader {
                     session,
                     lock_manager,
-                    master_key: None,
-                    db_path: path.to_path_buf(),
-                    encryption_suite: EncryptionSuite::Plaintext,
                 })
             }
             EncryptionSuite::Aes256GcmSiv => {
@@ -776,16 +766,13 @@ impl Database {
                     LEGACY_SQL_FTS_TERM_KEY,
                     false,
                 )?;
-                let next_lsn = wal_next_lsn(&wp, EncryptionSuite::Aes256GcmSiv, Some(master_key))?;
-                let wal = WalWriter::open(&wp, master_key, next_lsn)?;
+                // Reader handles never write WAL; fixed LSN is acceptable.
+                let wal = WalWriter::open(&wp, master_key, 0)?;
                 let lock_manager = LockManager::new(path)?;
                 let session = Session::new(pager, catalog, wal);
-                Ok(Database {
+                Ok(DatabaseReader {
                     session,
                     lock_manager,
-                    master_key: Some(master_key.clone()),
-                    db_path: path.to_path_buf(),
-                    encryption_suite: EncryptionSuite::Aes256GcmSiv,
                 })
             }
         }
@@ -840,6 +827,36 @@ impl Database {
     /// pager, catalog, and WAL writer, and manages explicit transaction state.
     pub fn into_session(self) -> Session {
         self.session
+    }
+}
+
+impl DatabaseReader {
+    /// Parse SQL into a reusable prepared statement template.
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+        self.session.prepare(sql)
+    }
+
+    /// Execute a read-only SQL query and return rows.
+    pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
+        let _guard = self.lock_manager.read_lock()?;
+        self.session.execute_read_only_query(sql)
+    }
+
+    /// Execute a prepared read-only query and return rows.
+    pub fn query_prepared(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<Vec<Row>> {
+        let _guard = self.lock_manager.read_lock()?;
+        self.session
+            .execute_read_only_prepared_query(prepared, params)
+    }
+
+    /// Convenience API: prepare+query in one call using bound values.
+    pub fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        let prepared = self.prepare(sql)?;
+        self.query_prepared(&prepared, params)
     }
 }
 

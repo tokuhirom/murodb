@@ -334,6 +334,23 @@ fn test_parse_unary_minus() {
 }
 
 #[test]
+fn test_parse_i64_min_literal() {
+    // i64::MIN = -9223372036854775808
+    // The lexer cannot parse 9223372036854775808 as i64 (overflow), so the parser
+    // must handle the combined "-9223372036854775808" as a special case.
+    let stmt = parse_sql("SELECT * FROM t WHERE id = -9223372036854775808").unwrap();
+    if let Statement::Select(sel) = stmt {
+        if let Some(Expr::BinaryOp { right, .. }) = sel.where_clause {
+            assert!(matches!(*right, Expr::IntLiteral(n) if n == i64::MIN));
+        } else {
+            panic!("Expected BinaryOp");
+        }
+    } else {
+        panic!("Expected Select");
+    }
+}
+
+#[test]
 fn test_parse_default_value() {
     let stmt = parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, status INT DEFAULT 0)").unwrap();
     if let Statement::CreateTable(ct) = stmt {

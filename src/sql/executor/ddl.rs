@@ -370,7 +370,7 @@ pub(super) fn exec_create_fulltext_index(
         )));
     }
 
-    let mut fts_index = FtsIndex::create(pager, SQL_FTS_TERM_KEY)?;
+    let mut fts_index = FtsIndex::create(pager, pager.fts_term_key()?)?;
     let initial_fts_root = fts_index.root_page_id();
 
     let build_res: Result<PageId> = (|| {

@@ -9,4 +9,5 @@ pub trait PageStore {
     fn write_page(&mut self, page: &Page) -> Result<()>;
     fn allocate_page(&mut self) -> Result<Page>;
     fn free_page(&mut self, page_id: PageId);
+    fn fts_term_key(&self) -> Result<[u8; 32]>;
 }

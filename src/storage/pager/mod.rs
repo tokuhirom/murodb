@@ -6,6 +6,7 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 
 use crate::crypto::aead::MasterKey;
+use crate::crypto::hmac_util::{derive_fts_term_key, derive_fts_term_key_plaintext};
 use crate::crypto::suite::{EncryptionSuite, PageCipher};
 use crate::error::{MuroError, Result};
 use crate::storage::freelist::{FreeList, SanitizeReport};
@@ -631,6 +632,15 @@ impl Pager {
         &self.path
     }
 
+    /// Derive the FULLTEXT term key from the current master key and database salt.
+    pub fn fts_term_key(&self) -> Result<[u8; 32]> {
+        if let Some(master_key) = self.master_key.as_ref() {
+            Ok(derive_fts_term_key(master_key, &self.salt))
+        } else {
+            Ok(derive_fts_term_key_plaintext(&self.salt))
+        }
+    }
+
     /// Re-encrypt all pages with a new master key and salt.
     ///
     /// This performs a full re-encryption of every page in the database file:
@@ -901,6 +911,10 @@ impl crate::storage::page_store::PageStore for Pager {
 
     fn free_page(&mut self, page_id: PageId) {
         Pager::free_page(self, page_id)
+    }
+
+    fn fts_term_key(&self) -> Result<[u8; 32]> {
+        Pager::fts_term_key(self)
     }
 }
 

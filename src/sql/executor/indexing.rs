@@ -408,7 +408,7 @@ pub(super) fn insert_into_secondary_indexes(
                 }
             };
             root_page_id = meta_btree.root_page_id();
-            let mut fts = FtsIndex::open(root_page_id, SQL_FTS_TERM_KEY);
+            let mut fts = FtsIndex::open(root_page_id, pager.fts_term_key()?);
             fts.apply_pending(pager, &[FtsPendingOp::Add { doc_id, text }])?;
             idx.btree_root = fts.root_page_id();
         }
@@ -463,7 +463,7 @@ pub(super) fn delete_from_secondary_indexes(
             let mut meta_btree = BTree::open(root_page_id);
             if let Some(doc_id) = fts_get_doc_id(&meta_btree, pager, pk_key)? {
                 root_page_id = meta_btree.root_page_id();
-                let mut fts = FtsIndex::open(root_page_id, SQL_FTS_TERM_KEY);
+                let mut fts = FtsIndex::open(root_page_id, pager.fts_term_key()?);
                 fts.apply_pending(pager, &[FtsPendingOp::Remove { doc_id, text }])?;
                 root_page_id = fts.root_page_id();
                 meta_btree = BTree::open(root_page_id);

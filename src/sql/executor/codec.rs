@@ -1,5 +1,35 @@
 use super::*;
 
+/// Fit a Decimal value to the declared DECIMAL(p,s) column constraints.
+/// Rounds fractional digits to scale `s`, sets exact scale, then rejects
+/// if the integer part exceeds `p - s` digits (MySQL-compatible behavior).
+pub(super) fn fit_decimal(
+    d: rust_decimal::Decimal,
+    precision: u32,
+    scale: u32,
+) -> Result<rust_decimal::Decimal> {
+    // Round to the declared scale
+    let mut rounded = d.round_dp(scale);
+    // Set exact scale so that e.g. 42 becomes 42.00 for DECIMAL(10,2)
+    rounded.rescale(scale);
+    // Check that integer digits fit within (precision - scale)
+    let max_int_digits = precision - scale;
+    let int_part = rounded.trunc().abs();
+    // Count integer digits: the number of digits in the integer part
+    let int_digits = if int_part.is_zero() {
+        0u32
+    } else {
+        int_part.to_string().len() as u32
+    };
+    if int_digits > max_int_digits {
+        return Err(MuroError::Execution(format!(
+            "Value '{}' out of range for DECIMAL({},{})",
+            d, precision, scale
+        )));
+    }
+    Ok(rounded)
+}
+
 pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -30,6 +60,10 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::BigInt => buf.extend_from_slice(&n.to_le_bytes()),
                 DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
                 DataType::Double => buf.extend_from_slice(&(*n as f64).to_le_bytes()),
+                DataType::Decimal(_, _) => {
+                    let d = rust_decimal::Decimal::from(*n);
+                    buf.extend_from_slice(&d.serialize());
+                }
                 DataType::Date => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
                 DataType::DateTime | DataType::Timestamp => buf.extend_from_slice(&n.to_le_bytes()),
                 DataType::Varchar(_) | DataType::Text => {
@@ -42,6 +76,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&b);
                 }
+                DataType::Uuid => panic!("integer value reached UUID serializer"),
             },
             Value::Float(n) => match columns[i].data_type {
                 DataType::TinyInt => buf.extend_from_slice(&(*n as i8).to_le_bytes()),
@@ -50,8 +85,13 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::BigInt => buf.extend_from_slice(&(*n as i64).to_le_bytes()),
                 DataType::Float => buf.extend_from_slice(&(*n as f32).to_le_bytes()),
                 DataType::Double => buf.extend_from_slice(&n.to_le_bytes()),
+                DataType::Decimal(_, _) => {
+                    // Use string representation to avoid floating-point artifacts
+                    use std::str::FromStr;
+                    let d = rust_decimal::Decimal::from_str(&n.to_string()).unwrap_or_default();
+                    buf.extend_from_slice(&d.serialize());
+                }
                 DataType::Date | DataType::DateTime | DataType::Timestamp => {
-                    // Coercion should reject this path before serialize_row.
                     panic!("float value reached date/time serializer")
                 }
                 DataType::Varchar(_) | DataType::Text => {
@@ -64,6 +104,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&b);
                 }
+                DataType::Uuid => panic!("float value reached UUID serializer"),
             },
             Value::Date(d) => match columns[i].data_type {
                 DataType::Date => buf.extend_from_slice(&d.to_le_bytes()),
@@ -118,6 +159,12 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
             }
             Value::Varbinary(b) => {
                 buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                buf.extend_from_slice(b);
+            }
+            Value::Decimal(d) => {
+                buf.extend_from_slice(&d.serialize());
+            }
+            Value::Uuid(b) => {
                 buf.extend_from_slice(b);
             }
             Value::Null => {} // already skipped
@@ -272,6 +319,24 @@ pub fn deserialize_row_versioned(
                 values.push(Value::Varbinary(data[offset..offset + len].to_vec()));
                 offset += len;
             }
+            DataType::Decimal(_, _) => {
+                if offset + 16 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&data[offset..offset + 16]);
+                values.push(Value::Decimal(rust_decimal::Decimal::deserialize(bytes)));
+                offset += 16;
+            }
+            DataType::Uuid => {
+                if offset + 16 > data.len() {
+                    return Err(MuroError::InvalidPage);
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&data[offset..offset + 16]);
+                values.push(Value::Uuid(bytes));
+                offset += 16;
+            }
         }
     }
 
@@ -320,6 +385,13 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Integer(n), DataType::Double) => encode_f64(*n as f64).to_vec(),
         (Value::Integer(n), DataType::Date) => encode_i32(*n as i32).to_vec(),
         (Value::Integer(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
+        (Value::Integer(n), DataType::Decimal(_, s)) => {
+            let mut d = rust_decimal::Decimal::from(*n);
+            d.rescale(*s);
+            let raw = d.mantissa();
+            let unsigned = (raw as u128) ^ (1u128 << 127);
+            unsigned.to_be_bytes().to_vec()
+        }
         (Value::Integer(n), _) => encode_i64(*n).to_vec(),
         (Value::Float(n), DataType::TinyInt) => {
             float_as_integral_i64(*n).map_or_else(impossible_int_seek_key, |v| {
@@ -355,6 +427,14 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Float(_), DataType::Date | DataType::DateTime | DataType::Timestamp) => {
             impossible_int_seek_key()
         }
+        (Value::Float(n), DataType::Decimal(_, s)) => {
+            use std::str::FromStr;
+            let mut d = rust_decimal::Decimal::from_str(&n.to_string()).unwrap_or_default();
+            d.rescale(*s);
+            let raw = d.mantissa();
+            let unsigned = (raw as u128) ^ (1u128 << 127);
+            unsigned.to_be_bytes().to_vec()
+        }
         (Value::Float(n), _) => encode_f64(*n).to_vec(),
         (Value::Date(n), DataType::Date) => encode_i32(*n).to_vec(),
         (Value::Date(n), DataType::DateTime | DataType::Timestamp) => {
@@ -367,8 +447,25 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
         (Value::Timestamp(n), DataType::Date) => encode_i32((*n / 1_000_000) as i32).to_vec(),
         (Value::Timestamp(n), DataType::DateTime | DataType::Timestamp) => encode_i64(*n).to_vec(),
         (Value::Timestamp(n), _) => encode_i64(*n).to_vec(),
+        (Value::Decimal(d), DataType::Decimal(_, s)) => {
+            let mut d = *d;
+            d.rescale(*s);
+            let raw = d.mantissa();
+            let unsigned = (raw as u128) ^ (1u128 << 127);
+            unsigned.to_be_bytes().to_vec()
+        }
+        (Value::Decimal(d), _) => {
+            let raw = d.mantissa();
+            let unsigned = (raw as u128) ^ (1u128 << 127);
+            unsigned.to_be_bytes().to_vec()
+        }
+        (Value::Varchar(s), DataType::Uuid) => {
+            // Parse UUID string for UUID column key encoding
+            parse_uuid_string(s).map_or_else(|| s.as_bytes().to_vec(), |b| b.to_vec())
+        }
         (Value::Varchar(s), _) => s.as_bytes().to_vec(),
         (Value::Varbinary(b), _) => b.clone(),
+        (Value::Uuid(b), _) => b.to_vec(),
         (Value::Null, _) => Vec::new(),
     }
 }

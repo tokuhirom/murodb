@@ -1,3 +1,5 @@
+use crate::crypto::kdf;
+use crate::crypto::suite::EncryptionSuite;
 use crate::error::{MuroError, Result};
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::ast::Statement;
@@ -109,6 +111,8 @@ pub struct Session {
     last_checkpoint_at: std::time::Instant,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
+    #[cfg(test)]
+    inject_wal_recreate_fail_once: bool,
 }
 
 impl Session {
@@ -142,6 +146,8 @@ impl Session {
             last_checkpoint_at: std::time::Instant::now(),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
+            #[cfg(test)]
+            inject_wal_recreate_fail_once: false,
         }
     }
 
@@ -171,6 +177,7 @@ impl Session {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
+            Statement::AlterDatabaseRekey { ref password } => self.handle_rekey(password),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
@@ -250,6 +257,7 @@ impl Session {
             | Statement::Update(_)
             | Statement::Delete(_)
             | Statement::AnalyzeTable(_)
+            | Statement::AlterDatabaseRekey { .. }
             | Statement::Begin
             | Statement::Commit
             | Statement::Rollback => false,
@@ -308,6 +316,72 @@ impl Session {
         // Reload catalog from disk since in-memory catalog may have been modified
         let catalog_root = self.pager.catalog_root();
         self.catalog = SystemCatalog::open(catalog_root);
+        Ok(ExecResult::Ok)
+    }
+
+    /// Handle ALTER DATABASE REKEY WITH PASSWORD '<new_password>'.
+    ///
+    /// Re-encrypts all pages with a new key derived from the new password.
+    /// Must not be called inside an active transaction.
+    fn handle_rekey(&mut self, new_password: &str) -> Result<ExecResult> {
+        // Reject if inside an active transaction
+        if self.active_tx.is_some() {
+            return Err(MuroError::Execution(
+                "ALTER DATABASE REKEY cannot be used inside a transaction".into(),
+            ));
+        }
+
+        // Reject if plaintext mode
+        if self.pager.encryption_suite() == EncryptionSuite::Plaintext {
+            return Err(MuroError::Execution(
+                "ALTER DATABASE REKEY is not supported for plaintext databases".into(),
+            ));
+        }
+
+        // Checkpoint WAL to ensure all committed data is flushed to the DB file
+        self.try_checkpoint_truncate_with_retry()
+            .map_err(|(_, e)| {
+                MuroError::Execution(format!(
+                    "ALTER DATABASE REKEY failed: WAL checkpoint failed: {}",
+                    e
+                ))
+            })?;
+
+        // Generate new salt and derive new key
+        let new_salt = kdf::generate_salt();
+        let new_key = kdf::derive_key(new_password.as_bytes(), &new_salt)?;
+
+        // Re-encrypt all pages
+        self.pager.rekey(&new_key, new_salt)?;
+
+        // Recreate WAL writer with new key
+        let wal_path = self.wal.wal_path().to_path_buf();
+        #[cfg(test)]
+        if self.inject_wal_recreate_fail_once {
+            self.inject_wal_recreate_fail_once = false;
+            let err = MuroError::Io(std::io::Error::other(
+                "injected WAL recreate failure after rekey",
+            ));
+            let msg = format!(
+                "session poisoned after rekey because WAL writer recreation failed: {}",
+                err
+            );
+            self.poisoned = Some(msg.clone());
+            return Err(MuroError::SessionPoisoned(msg));
+        }
+
+        self.wal = match WalWriter::create(&wal_path, &new_key) {
+            Ok(wal) => wal,
+            Err(e) => {
+                let msg = format!(
+                    "session poisoned after rekey because WAL writer recreation failed: {}",
+                    e
+                );
+                self.poisoned = Some(msg.clone());
+                return Err(MuroError::SessionPoisoned(msg));
+            }
+        };
+
         Ok(ExecResult::Ok)
     }
 
@@ -638,7 +712,7 @@ impl Session {
         );
     }
 
-    fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
+    pub(crate) fn try_checkpoint_truncate_once(&mut self) -> Result<()> {
         #[cfg(test)]
         if self.inject_checkpoint_failures_remaining > 0 {
             self.inject_checkpoint_failures_remaining -= 1;
@@ -680,6 +754,11 @@ impl Session {
     #[cfg(test)]
     fn inject_checkpoint_failures_for_test(&mut self, count: usize) {
         self.inject_checkpoint_failures_remaining = count;
+    }
+
+    #[cfg(test)]
+    fn inject_wal_recreate_failure_once_for_test(&mut self) {
+        self.inject_wal_recreate_fail_once = true;
     }
 
     #[cfg(test)]

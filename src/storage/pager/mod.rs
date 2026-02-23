@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -15,7 +15,7 @@ use crate::wal::record::crc32;
 /// Plaintext file header size (written before any encrypted pages).
 /// Layout:
 ///   0..8    Magic "MURODB01"
-///   8..12   Format version (u32 LE) — currently 4
+///   8..12   Format version (u32 LE) — currently 5
 ///   12..28  Salt (16 bytes, for Argon2 KDF)
 ///   28..36  Catalog root page ID (u64 LE)
 ///   36..44  Page count (u64 LE)
@@ -26,7 +26,9 @@ use crate::wal::record::crc32;
 ///   72..76  Header CRC32 (u32 LE, over bytes 0..72)
 const PLAINTEXT_HEADER_SIZE: u64 = 76;
 const MAGIC: &[u8; 8] = b"MURODB01";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
+/// Previous format version that is read-compatible (no overflow cells in v4 databases).
+const FORMAT_VERSION_COMPAT: u32 = 4;
 
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
@@ -52,7 +54,9 @@ pub struct DbEncryptionInfo {
 
 pub struct Pager {
     file: File,
+    path: PathBuf,
     crypto: PageCipher,
+    master_key: Option<MasterKey>,
     encryption_suite: EncryptionSuite,
     page_count: u64,
     epoch: u64,
@@ -105,7 +109,9 @@ impl Pager {
 
         let mut pager = Pager {
             file,
+            path: path.to_path_buf(),
             crypto,
+            master_key: master_key.cloned(),
             encryption_suite: suite,
             page_count: 0,
             epoch: 0,
@@ -170,7 +176,9 @@ impl Pager {
 
         let mut pager = Pager {
             file,
+            path: path.to_path_buf(),
             crypto,
+            master_key: master_key.cloned(),
             encryption_suite: snapshot.encryption_suite,
             page_count: 0,
             epoch: 0,
@@ -283,7 +291,7 @@ impl Pager {
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        if version != FORMAT_VERSION {
+        if version != FORMAT_VERSION && version != FORMAT_VERSION_COMPAT {
             return Err(MuroError::Wal(format!(
                 "unsupported database format version {}",
                 version
@@ -339,38 +347,44 @@ impl Pager {
         let first_page = self.read_page_from_disk(self.freelist_page_id)?;
         let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
 
-        if FreeList::is_multi_page_format(data_area) {
-            // Multi-page chain: walk the chain with cycle detection
-            let mut visited = std::collections::HashSet::new();
-            visited.insert(self.freelist_page_id);
-            let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
-            pages_data_owned.push(data_area.to_vec());
-            // Read next pointer from first page (offset 4, after 4-byte magic)
-            let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
-            while next_page_id != 0 {
-                if !visited.insert(next_page_id) {
-                    return Err(MuroError::Corruption(format!(
-                        "freelist chain cycle detected at page {}",
-                        next_page_id
-                    )));
-                }
-                if next_page_id >= self.page_count {
-                    return Err(MuroError::Corruption(format!(
-                        "freelist chain references page {} beyond page_count {}",
-                        next_page_id, self.page_count
-                    )));
-                }
-                let next_page = self.read_page_from_disk(next_page_id)?;
-                let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
-                next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
-                pages_data_owned.push(next_data.to_vec());
-            }
-            let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
-            self.freelist = FreeList::deserialize_pages(&pages_refs);
-        } else {
-            // Legacy single-page format
-            self.freelist = FreeList::deserialize(data_area);
+        // Require multi-page FLMP format; legacy single-page format is no longer supported.
+        if data_area.len() < 4
+            || data_area[0..4] != crate::storage::freelist::FREELIST_MULTI_PAGE_MAGIC
+        {
+            return Err(MuroError::Corruption(
+                "Legacy single-page freelist format detected. \
+                 Please recreate the database or migrate using an older version of MuroDB."
+                    .to_string(),
+            ));
         }
+
+        // Multi-page chain: walk the chain with cycle detection
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(self.freelist_page_id);
+        let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
+        pages_data_owned.push(data_area.to_vec());
+        // Read next pointer from first page (offset 4, after 4-byte magic)
+        let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
+        while next_page_id != 0 {
+            if !visited.insert(next_page_id) {
+                return Err(MuroError::Corruption(format!(
+                    "freelist chain cycle detected at page {}",
+                    next_page_id
+                )));
+            }
+            if next_page_id >= self.page_count {
+                return Err(MuroError::Corruption(format!(
+                    "freelist chain references page {} beyond page_count {}",
+                    next_page_id, self.page_count
+                )));
+            }
+            let next_page = self.read_page_from_disk(next_page_id)?;
+            let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+            next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
+            pages_data_owned.push(next_data.to_vec());
+        }
+        let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
+        self.freelist = FreeList::deserialize_pages(&pages_refs);
 
         // Remove out-of-range and duplicated freelist entries.
         let report = self.freelist.sanitize(self.page_count);
@@ -611,6 +625,265 @@ impl Pager {
         self.file.sync_all()?;
         Ok(())
     }
+
+    /// Get the database file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Re-encrypt all pages with a new master key and salt.
+    ///
+    /// This performs a full re-encryption of every page in the database file:
+    /// 1. Writes a `.rekey` marker file for crash safety
+    /// 2. Reads each page with the current key/epoch, re-encrypts with new key/epoch
+    /// 3. Syncs all pages to disk
+    /// 4. Updates the header with new salt/epoch
+    /// 5. Removes the marker file
+    ///
+    /// If a crash occurs mid-rekey, the marker file enables recovery on next open.
+    pub fn rekey(&mut self, new_key: &MasterKey, new_salt: [u8; 16]) -> Result<()> {
+        if self.encryption_suite == EncryptionSuite::Plaintext {
+            return Err(MuroError::Execution(
+                "rekey is not supported for plaintext databases".to_string(),
+            ));
+        }
+        let old_master_key = self.master_key.as_ref().ok_or_else(|| {
+            MuroError::Encryption("missing in-memory master key for rekey operation".to_string())
+        })?;
+
+        let new_epoch = self.epoch + 1;
+        let new_crypto = PageCipher::new(self.encryption_suite, Some(new_key))?;
+        let old_epoch = self.epoch;
+
+        // Write .rekey marker file for crash recovery
+        let marker_path = rekey_marker_path(&self.path);
+        write_rekey_marker(&marker_path, &new_salt, new_epoch, old_master_key, new_key)?;
+
+        // Re-encrypt all pages
+        let page_count = self.page_count;
+        let page_size_on_disk = self.page_size_on_disk();
+        for page_id in 0..page_count {
+            // Read with current crypto/epoch
+            let offset = PLAINTEXT_HEADER_SIZE + page_id * page_size_on_disk as u64;
+            self.file.seek(SeekFrom::Start(offset))?;
+            let mut encrypted = vec![0u8; page_size_on_disk];
+            self.file.read_exact(&mut encrypted)?;
+
+            let mut plaintext = [0u8; PAGE_SIZE];
+            let plaintext_len =
+                self.crypto
+                    .decrypt_into(page_id, old_epoch, &encrypted, &mut plaintext)?;
+            if plaintext_len != PAGE_SIZE {
+                return Err(MuroError::InvalidPage);
+            }
+
+            // Re-encrypt with new crypto/epoch
+            let mut new_encrypted = vec![0u8; page_size_on_disk];
+            let written =
+                new_crypto.encrypt_into(page_id, new_epoch, &plaintext, &mut new_encrypted)?;
+            if written != page_size_on_disk {
+                return Err(MuroError::Encryption(
+                    "unexpected encrypted page size during rekey".to_string(),
+                ));
+            }
+
+            // Write back
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.write_all(&new_encrypted)?;
+        }
+
+        // Sync all page data to disk
+        self.file.sync_data()?;
+
+        // Update in-memory state
+        self.crypto = new_crypto;
+        self.master_key = Some(new_key.clone());
+        self.salt = new_salt;
+        self.epoch = new_epoch;
+
+        // Write new header and sync
+        self.write_plaintext_header()?;
+        self.file.sync_all()?;
+
+        // Remove marker file
+        let _ = std::fs::remove_file(&marker_path);
+
+        // Clear page cache since all pages changed
+        self.cache.clear();
+
+        Ok(())
+    }
+
+    /// Create a byte-level copy of the database file to `dest`.
+    ///
+    /// Copies the plaintext header and all encrypted pages as raw bytes
+    /// (no decryption/re-encryption). The caller must ensure no concurrent
+    /// writes are in progress (e.g. by holding a lock) and that the WAL
+    /// has been checkpointed before calling this method.
+    ///
+    /// The resulting file is a valid MuroDB database that can be opened
+    /// with the same key/password.
+    pub fn backup_to_file(&mut self, dest: &Path) -> Result<()> {
+        // Guard: reject backup to the same file (including symlinks/hardlinks).
+        {
+            use std::os::unix::fs::MetadataExt;
+            let src_meta = self.file.metadata()?;
+            if let Ok(dest_meta) = std::fs::metadata(dest) {
+                if src_meta.dev() == dest_meta.dev() && src_meta.ino() == dest_meta.ino() {
+                    return Err(MuroError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "backup destination is the same file as the source database",
+                    )));
+                }
+            }
+        }
+
+        self.refresh_from_disk_if_changed()?;
+
+        let total_bytes = PLAINTEXT_HEADER_SIZE + self.page_count * self.page_size_on_disk() as u64;
+
+        self.file.seek(SeekFrom::Start(0))?;
+
+        let mut dest_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest)?;
+
+        // Use a fixed-size buffer to avoid BufReader's read-ahead from
+        // advancing self.file's seek position beyond total_bytes.
+        let mut remaining = total_bytes;
+        let mut buf = [0u8; 64 * 1024];
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf.len());
+            self.file.read_exact(&mut buf[..to_read])?;
+            dest_file.write_all(&buf[..to_read])?;
+            remaining -= to_read as u64;
+        }
+        dest_file.sync_all()?;
+
+        Ok(())
+    }
+}
+
+/// Path for the .rekey crash-safety marker file.
+pub fn rekey_marker_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".rekey");
+    PathBuf::from(s)
+}
+
+/// Marker file layout:
+///   0..4    Magic "REKY"
+///   4..20   new_salt (16 bytes)
+///  20..28   new_epoch (u64 LE)
+///  28..32   flags (bit0: wrapped old key present)
+///  32..36   CRC32 of bytes 0..32
+///  36..96   wrapped_old_key (optional; 60 bytes)
+const REKEY_MARKER_MAGIC: &[u8; 4] = b"REKY";
+const REKEY_MARKER_SIZE: usize = 36;
+const REKEY_MARKER_FLAG_WRAPPED_OLD_KEY: u32 = 1;
+const REKEY_MARKER_WRAP_PAGE_ID: u64 = u64::MAX;
+const REKEY_WRAPPED_OLD_KEY_LEN: usize = crate::crypto::aead::PageCrypto::overhead() + 32;
+
+#[derive(Debug, Clone)]
+pub struct RekeyMarker {
+    pub new_salt: [u8; 16],
+    pub new_epoch: u64,
+    pub wrapped_old_key: Option<Vec<u8>>,
+}
+
+fn write_rekey_marker(
+    path: &Path,
+    new_salt: &[u8; 16],
+    new_epoch: u64,
+    old_key: &MasterKey,
+    new_key: &MasterKey,
+) -> Result<()> {
+    let wrap_cipher = PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(new_key))?;
+    let wrapped_old_key =
+        wrap_cipher.encrypt(REKEY_MARKER_WRAP_PAGE_ID, new_epoch, old_key.as_bytes())?;
+    if wrapped_old_key.len() != REKEY_WRAPPED_OLD_KEY_LEN {
+        return Err(MuroError::Encryption(
+            "unexpected wrapped old key size in rekey marker".to_string(),
+        ));
+    }
+
+    let mut buf = vec![0u8; REKEY_MARKER_SIZE + REKEY_WRAPPED_OLD_KEY_LEN];
+    buf[0..4].copy_from_slice(REKEY_MARKER_MAGIC);
+    buf[4..20].copy_from_slice(new_salt);
+    buf[20..28].copy_from_slice(&new_epoch.to_le_bytes());
+    buf[28..32].copy_from_slice(&REKEY_MARKER_FLAG_WRAPPED_OLD_KEY.to_le_bytes());
+    let checksum = crc32(&buf[0..32]);
+    buf[32..36].copy_from_slice(&checksum.to_le_bytes());
+    buf[36..36 + REKEY_WRAPPED_OLD_KEY_LEN].copy_from_slice(&wrapped_old_key);
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(&buf)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Read and validate a .rekey marker file.
+pub fn read_rekey_marker(path: &Path) -> Result<RekeyMarker> {
+    let mut file = File::open(path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    if buf.len() < REKEY_MARKER_SIZE {
+        return Err(MuroError::Corruption(
+            "rekey marker file is too short".to_string(),
+        ));
+    }
+
+    if &buf[0..4] != REKEY_MARKER_MAGIC {
+        return Err(MuroError::Corruption(
+            "rekey marker file has invalid magic".to_string(),
+        ));
+    }
+    let stored_crc = u32::from_le_bytes(buf[32..36].try_into().unwrap());
+    let computed_crc = crc32(&buf[0..32]);
+    if stored_crc != computed_crc {
+        return Err(MuroError::Corruption(
+            "rekey marker file is corrupted".to_string(),
+        ));
+    }
+
+    let mut new_salt = [0u8; 16];
+    new_salt.copy_from_slice(&buf[4..20]);
+    let new_epoch = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+    let flags = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+
+    let wrapped_old_key = if flags & REKEY_MARKER_FLAG_WRAPPED_OLD_KEY != 0 {
+        if buf.len() < REKEY_MARKER_SIZE + REKEY_WRAPPED_OLD_KEY_LEN {
+            return Err(MuroError::Corruption(
+                "rekey marker file missing wrapped old key payload".to_string(),
+            ));
+        }
+        Some(buf[36..36 + REKEY_WRAPPED_OLD_KEY_LEN].to_vec())
+    } else {
+        None
+    };
+
+    Ok(RekeyMarker {
+        new_salt,
+        new_epoch,
+        wrapped_old_key,
+    })
+}
+
+pub fn unwrap_rekey_old_key(
+    new_key: &MasterKey,
+    new_epoch: u64,
+    wrapped_old_key: &[u8],
+) -> Result<MasterKey> {
+    let unwrap_cipher = PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(new_key))?;
+    let old_key_bytes =
+        unwrap_cipher.decrypt(REKEY_MARKER_WRAP_PAGE_ID, new_epoch, wrapped_old_key)?;
+    MasterKey::from_slice(&old_key_bytes)
 }
 
 impl crate::storage::page_store::PageStore for Pager {

@@ -17,14 +17,14 @@ use crate::sql::ast::*;
 use crate::sql::eval::{eval_expr, is_truthy};
 use crate::sql::parser::parse_sql;
 use crate::sql::planner::{
-    choose_nested_loop_order, estimate_plan_rows_hint, plan_cost_hint_with_stats, plan_select,
-    IndexPlanStat, JoinLoopOrder, Plan, PlannerStats,
+    choose_nested_loop_order, estimate_plan_rows_hint, plan_cost_hint_with_stats,
+    plan_select_with_hints, IndexPlanStat, JoinLoopOrder, Plan, PlannerStats,
 };
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
 use crate::types::{
     format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
-    DataType, Value, ValueKey,
+    parse_uuid_string, DataType, Value, ValueKey,
 };
 
 mod aggregation;
@@ -124,8 +124,9 @@ pub fn execute_statement(
         | Statement::Commit
         | Statement::Rollback
         | Statement::ShowCheckpointStats
-        | Statement::ShowDatabaseStats => Err(MuroError::Execution(
-            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS must be handled by Session".into(),
+        | Statement::ShowDatabaseStats
+        | Statement::AlterDatabaseRekey { .. } => Err(MuroError::Execution(
+            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS/ALTER DATABASE REKEY must be handled by Session".into(),
         )),
     }
 }

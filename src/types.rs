@@ -5,11 +5,13 @@ use std::hash::{Hash, Hasher};
 pub enum Value {
     Integer(i64),
     Float(f64),
+    Decimal(rust_decimal::Decimal),
     Date(i32),      // YYYYMMDD
     DateTime(i64),  // YYYYMMDDhhmmss
     Timestamp(i64), // YYYYMMDDhhmmss
     Varchar(String),
     Varbinary(Vec<u8>),
+    Uuid([u8; 16]),
     Null,
 }
 
@@ -29,6 +31,19 @@ impl Value {
         match self {
             Value::Integer(v) => Some(*v as f64),
             Value::Float(v) => Some(*v),
+            Value::Decimal(d) => {
+                use rust_decimal::prelude::ToPrimitive;
+                d.to_f64()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_decimal(&self) -> Option<rust_decimal::Decimal> {
+        match self {
+            Value::Decimal(d) => Some(*d),
+            Value::Integer(n) => Some(rust_decimal::Decimal::from(*n)),
+            Value::Float(n) => rust_decimal::Decimal::try_from(*n).ok(),
             _ => None,
         }
     }
@@ -53,11 +68,13 @@ impl fmt::Display for Value {
         match self {
             Value::Integer(v) => write!(f, "{}", v),
             Value::Float(v) => write!(f, "{}", v),
+            Value::Decimal(v) => write!(f, "{}", v),
             Value::Date(v) => write!(f, "{}", format_date(*v)),
             Value::DateTime(v) => write!(f, "{}", format_datetime(*v)),
             Value::Timestamp(v) => write!(f, "{}", format_datetime(*v)),
             Value::Varchar(v) => write!(f, "{}", v),
             Value::Varbinary(v) => write!(f, "<binary {} bytes>", v.len()),
+            Value::Uuid(b) => write!(f, "{}", format_uuid(b)),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -77,6 +94,9 @@ impl PartialEq for ValueKey {
                     _ => canonical_f64_bits(*a) == canonical_f64_bits(*b),
                 }
             }
+            (Value::Decimal(a), Value::Decimal(b)) => a == b,
+            (Value::Decimal(a), Value::Integer(b)) => *a == rust_decimal::Decimal::from(*b),
+            (Value::Integer(a), Value::Decimal(b)) => rust_decimal::Decimal::from(*a) == *b,
             (Value::Integer(a), Value::Float(b)) => int_float_equal(*a, *b),
             (Value::Float(a), Value::Integer(b)) => int_float_equal(*b, *a),
             (a @ Value::Date(_), b @ Value::Date(_))
@@ -92,6 +112,7 @@ impl PartialEq for ValueKey {
             }
             (Value::Varchar(a), Value::Varchar(b)) => a == b,
             (Value::Varbinary(a), Value::Varbinary(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -122,6 +143,20 @@ impl Hash for ValueKey {
                     canonical_f64_bits(*n).hash(state);
                 }
             }
+            Value::Decimal(d) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let normalized = d.normalize();
+                // If the Decimal is an exact integer, hash as Integer for cross-type consistency
+                if normalized.scale() == 0 {
+                    if let Some(i) = normalized.to_i64() {
+                        0u8.hash(state);
+                        i.hash(state);
+                        return;
+                    }
+                }
+                10u8.hash(state);
+                normalized.serialize().hash(state);
+            }
             Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) => {
                 3u8.hash(state);
                 temporal_key(&self.0).hash(state);
@@ -132,6 +167,10 @@ impl Hash for ValueKey {
             }
             Value::Varbinary(b) => {
                 7u8.hash(state);
+                b.hash(state);
+            }
+            Value::Uuid(b) => {
+                9u8.hash(state);
                 b.hash(state);
             }
             Value::Null => {
@@ -179,6 +218,33 @@ fn temporal_key(v: &Value) -> i64 {
         Value::DateTime(dt) | Value::Timestamp(dt) => *dt,
         _ => unreachable!("temporal_key called for non-temporal value"),
     }
+}
+
+/// Format a 16-byte UUID as a lowercase hyphenated string.
+pub fn format_uuid(bytes: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// Parse a UUID string (with or without hyphens) into 16 bytes.
+pub fn parse_uuid_string(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim();
+    // Remove hyphens
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -262,12 +328,14 @@ pub enum DataType {
     BigInt,
     Float,
     Double,
+    Decimal(u32, u32), // (precision, scale)
     Date,
     DateTime,
     Timestamp,
     Varchar(Option<u32>),
     Varbinary(Option<u32>),
     Text,
+    Uuid,
 }
 
 impl fmt::Display for DataType {
@@ -279,6 +347,7 @@ impl fmt::Display for DataType {
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::Float => write!(f, "FLOAT"),
             DataType::Double => write!(f, "DOUBLE"),
+            DataType::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
             DataType::Date => write!(f, "DATE"),
             DataType::DateTime => write!(f, "DATETIME"),
             DataType::Timestamp => write!(f, "TIMESTAMP"),
@@ -287,6 +356,7 @@ impl fmt::Display for DataType {
             DataType::Varbinary(None) => write!(f, "VARBINARY"),
             DataType::Varbinary(Some(n)) => write!(f, "VARBINARY({})", n),
             DataType::Text => write!(f, "TEXT"),
+            DataType::Uuid => write!(f, "UUID"),
         }
     }
 }

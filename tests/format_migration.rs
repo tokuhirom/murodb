@@ -1,4 +1,4 @@
-/// Tests for database format validation policy (v4-only).
+/// Tests for database format validation policy (v4/v5 compatible).
 use murodb::crypto::aead::MasterKey;
 use murodb::crypto::suite::EncryptionSuite;
 use murodb::storage::pager::Pager;
@@ -48,7 +48,7 @@ fn test_v4_roundtrip() {
 
     let header = read_raw_header_v4(&db_path);
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let suite_id = u32::from_le_bytes(header[68..72].try_into().unwrap());
     assert_eq!(suite_id, EncryptionSuite::Aes256GcmSiv.id());
     let stored_crc = u32::from_le_bytes(header[72..76].try_into().unwrap());
@@ -83,7 +83,7 @@ fn test_pre_v4_rejected() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    for version in [1u32, 2u32, 3u32] {
+    for version in [1u32, 2u32, 3u32, 6u32] {
         let mut header = [0u8; 76];
         header[0..8].copy_from_slice(b"MURODB01");
         header[8..12].copy_from_slice(&version.to_le_bytes());

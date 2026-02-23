@@ -309,7 +309,9 @@ fn save_failure_artifacts(
     let _ = fs::create_dir_all(artifact_dir);
     let _ = fs::copy(db_path, artifact_dir.join("stress.db"));
     // Also copy the WAL file if present
-    let wal_path = db_path.with_extension("wal");
+    let mut wal_os = db_path.as_os_str().to_os_string();
+    wal_os.push(".wal");
+    let wal_path = PathBuf::from(wal_os);
     if wal_path.exists() {
         let _ = fs::copy(&wal_path, artifact_dir.join("stress.wal"));
     }

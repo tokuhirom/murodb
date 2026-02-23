@@ -15,6 +15,10 @@
 | VARCHAR(n) | variable | max n bytes (optional) |
 | TEXT | variable | unbounded text |
 | VARBINARY(n) | variable | max n bytes (optional) |
+| FLOAT | 4 bytes | Single-precision IEEE 754 |
+| DOUBLE | 8 bytes | Double-precision IEEE 754 |
+| DECIMAL(p,s) | 16 bytes | Fixed-point exact numeric (precision 1-28, scale 0-p). Alias: NUMERIC(p,s). Default: DECIMAL(10,0) |
+| UUID | 16 bytes | 128-bit UUID (RFC 9562), stored as fixed-length binary |
 | NULL | 0 bytes | null value |
 
 Temporal semantics:
@@ -254,6 +258,33 @@ UPDATE t SET name = 'Alicia' WHERE id = 1;
 DELETE FROM t WHERE id = 1;
 ```
 
+### Index Hints (FORCE INDEX / USE INDEX / IGNORE INDEX)
+
+MySQL-compatible index hints allow controlling which indexes the query planner considers.
+
+```sql
+-- Force the planner to use only the specified index (skips PK seek)
+SELECT * FROM t FORCE INDEX (idx_age) WHERE age = 20;
+
+-- Suggest the planner to use the specified index (PK seek still allowed)
+SELECT * FROM t USE INDEX (idx_age) WHERE age = 20;
+
+-- Exclude the specified index from consideration
+SELECT * FROM t IGNORE INDEX (idx_age) WHERE age = 20;
+
+-- Multiple index names
+SELECT * FROM t FORCE INDEX (idx_age, idx_name) WHERE age = 20;
+
+-- Also works with UPDATE and DELETE
+UPDATE t FORCE INDEX (idx_age) SET name = 'updated' WHERE age = 20;
+DELETE FROM t IGNORE INDEX (idx_age) WHERE age = 20;
+```
+
+Behavior:
+- **FORCE INDEX**: Only the specified indexes are candidates. Primary key seek is skipped. If the specified index cannot be used for the query, falls back to full table scan (matching MySQL behavior).
+- **USE INDEX**: The specified indexes are preferred, but full table scan is also a candidate. Primary key seek is still allowed.
+- **IGNORE INDEX**: The specified indexes are excluded from consideration. All other indexes and primary key seek remain available.
+
 ## WHERE Clause
 
 ### Comparison operators
@@ -310,6 +341,29 @@ SELECT * FROM t ORDER BY name DESC, id ASC;
 SELECT * FROM t LIMIT 10;
 SELECT * FROM t LIMIT 10 OFFSET 5;
 ```
+
+## Literals
+
+### Hex Literal (Binary)
+
+Binary data can be specified using the `X'...'` syntax (SQL standard / MySQL compatible):
+
+```sql
+-- Insert binary data
+INSERT INTO t (id, data) VALUES (1, X'DEADBEEF');
+
+-- Empty binary literal
+INSERT INTO t (id, data) VALUES (2, X'');
+
+-- Case-insensitive (both X and x are accepted)
+INSERT INTO t (id, data) VALUES (3, x'cafebabe');
+
+-- Use in WHERE clause
+SELECT * FROM t WHERE data = X'DEADBEEF';
+```
+
+The hex string must contain an even number of hex digits (`0-9`, `A-F`, `a-f`).
+Odd-length hex strings and invalid characters produce a parse error.
 
 ## Expressions
 
@@ -457,12 +511,15 @@ SELECT REGEXP_LIKE(name, '^hello') FROM t;
 
 ### Numeric Functions
 
+All numeric functions support INTEGER, FLOAT, DOUBLE, and DECIMAL types.
+
 #### ABS(n)
 
 Returns the absolute value.
 
 ```sql
-SELECT ABS(-42);  -- 42
+SELECT ABS(-42);    -- 42
+SELECT ABS(-3.14);  -- 3.14 (DECIMAL)
 ```
 
 #### CEIL(n) / CEILING(n) / FLOOR(n)
@@ -470,16 +527,17 @@ SELECT ABS(-42);  -- 42
 Returns the ceiling or floor. (Identity for integer types.)
 
 ```sql
-SELECT CEIL(42);   -- 42
-SELECT FLOOR(42);  -- 42
+SELECT CEIL(3.14);   -- 4
+SELECT FLOOR(3.14);  -- 3
 ```
 
 #### ROUND(n [, decimals])
 
-Rounds a number. (Identity for integer types.)
+Rounds a number to `decimals` decimal places (default 0). Works with DECIMAL for exact rounding.
 
 ```sql
-SELECT ROUND(42);  -- 42
+SELECT ROUND(3.1459, 2);  -- 3.15 (DECIMAL)
+SELECT ROUND(42);          -- 42
 ```
 
 #### MOD(a, b)
@@ -496,6 +554,38 @@ Returns `base` raised to the power of `exp`.
 
 ```sql
 SELECT POWER(2, 10);  -- 1024
+```
+
+### UUID Functions
+
+#### UUID_V4()
+
+Generates a random UUID (version 4, RFC 9562).
+
+```sql
+SELECT UUID_V4();  -- e.g. '550e8400-e29b-41d4-a716-446655440000'
+```
+
+#### UUID_V7()
+
+Generates a time-ordered UUID (version 7, RFC 9562). UUIDs generated later sort after earlier ones, making them suitable for primary keys with time-ordered insertion.
+
+```sql
+CREATE TABLE events (id UUID PRIMARY KEY, data VARCHAR);
+INSERT INTO events VALUES (UUID_V7(), 'event data');
+```
+
+UUID values are displayed as lowercase hyphenated hex strings (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). String literals in UUID format (with or without hyphens) are automatically parsed when inserted into UUID columns.
+
+```sql
+-- Both forms are accepted:
+INSERT INTO t VALUES ('550e8400-e29b-41d4-a716-446655440000', 'with hyphens');
+INSERT INTO t VALUES ('550e8400e29b41d4a716446655440000', 'without hyphens');
+
+-- Cast between UUID and VARCHAR/VARBINARY:
+SELECT CAST(id AS VARCHAR) FROM t;
+SELECT CAST('550e8400-e29b-41d4-a716-446655440000' AS UUID);
+SELECT CAST(id AS VARBINARY) FROM t;  -- 16-byte binary
 ```
 
 ### Date/Time Functions
@@ -592,7 +682,7 @@ SELECT CAST(42 AS VARCHAR);    -- '42'
 SELECT CAST(val AS BIGINT) FROM t;
 ```
 
-Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DECIMAL(p,s), DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
 
 ## Aggregation & GROUP BY
 
@@ -806,6 +896,26 @@ EXPLAIN SELECT * FROM t WHERE a >= 100 AND a <= 110;
 - Supported targets are `SELECT`, `UPDATE`, and `DELETE`.
 - Output is currently a single-row summary (not a full operator tree).
 - JOIN/subquery internals are summarized in `Extra` rather than emitted as multiple plan rows.
+
+## ALTER DATABASE
+
+### REKEY (Password Change)
+
+Re-encrypts all database pages with a new password-derived key. A new random salt is generated for key derivation.
+
+```sql
+ALTER DATABASE REKEY WITH PASSWORD 'new_password';
+```
+
+**Requirements:**
+- The database must be opened in encrypted mode (not plaintext).
+- Cannot be used inside an active transaction (`BEGIN` ... `COMMIT`/`ROLLBACK`).
+- The WAL is checkpointed before re-encryption begins.
+
+**Crash safety:**
+- A `.rekey` marker file is written before re-encryption starts.
+- If a crash occurs mid-rekey, the next `open_with_password` detects the marker and completes or rolls back the operation automatically.
+- After successful rekey, only the new password can open the database.
 
 ## Transactions
 

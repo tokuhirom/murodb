@@ -118,6 +118,14 @@ impl Parser {
             self.advance();
         }
 
+        // Reject trailing unparsed tokens
+        if self.peek().is_some() {
+            return Err(format!(
+                "Unexpected trailing token: {:?}",
+                self.peek().unwrap()
+            ));
+        }
+
         Ok(stmt)
     }
 
@@ -212,8 +220,35 @@ impl Parser {
         }
     }
 
+    fn expect_ident_value(&mut self, expected: &str) -> Result<(), String> {
+        let ident = self.expect_ident()?;
+        if ident.eq_ignore_ascii_case(expected) {
+            Ok(())
+        } else {
+            Err(format!("Expected '{}', got '{}'", expected, ident))
+        }
+    }
+
+    fn expect_string_lit(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::StringLit(s)) => Ok(s),
+            Some(t) => Err(format!("Expected string literal, got {:?}", t)),
+            None => Err("Expected string literal, got end of input".into()),
+        }
+    }
+
     fn parse_alter(&mut self) -> Result<Statement, String> {
         self.advance(); // ALTER
+        match self.peek() {
+            Some(Token::Database) => {
+                self.advance(); // DATABASE
+                return self.parse_alter_database_rekey();
+            }
+            Some(Token::Table) => {
+                // fall through to existing ALTER TABLE logic
+            }
+            _ => return Err("Expected TABLE or DATABASE after ALTER".into()),
+        }
         self.expect(&Token::Table)?;
         let table_name = self.expect_ident()?;
 
@@ -261,6 +296,15 @@ impl Parser {
             table_name,
             operation,
         }))
+    }
+
+    fn parse_alter_database_rekey(&mut self) -> Result<Statement, String> {
+        // ALTER DATABASE REKEY WITH PASSWORD '<string>'
+        self.expect_ident_value("REKEY")?;
+        self.expect(&Token::With)?;
+        self.expect_ident_value("PASSWORD")?;
+        let password = self.expect_string_lit()?;
+        Ok(Statement::AlterDatabaseRekey { password })
     }
 
     fn parse_rename(&mut self) -> Result<Statement, String> {
@@ -444,6 +488,44 @@ impl Parser {
                     Ok(DataType::Varbinary(size))
                 }
                 Some(Token::TextType) => Ok(DataType::Text),
+                Some(Token::UuidType) => Ok(DataType::Uuid),
+                Some(Token::DecimalType) => {
+                    // Parse optional (precision, scale) with defaults (10, 0)
+                    if self.peek() == Some(&Token::LParen) {
+                        self.advance(); // (
+                        let precision = match self.advance() {
+                            Some(Token::Integer(n)) if (1..=28).contains(&n) => n as u32,
+                            Some(Token::Integer(n)) => {
+                                return Err(format!(
+                                    "DECIMAL precision must be between 1 and 28, got {}",
+                                    n
+                                ))
+                            }
+                            _ => return Err("Expected integer precision for DECIMAL".into()),
+                        };
+                        let scale = if self.peek() == Some(&Token::Comma) {
+                            self.advance(); // ,
+                            match self.advance() {
+                                Some(Token::Integer(n)) if (0..=precision as i64).contains(&n) => {
+                                    n as u32
+                                }
+                                Some(Token::Integer(n)) => {
+                                    return Err(format!(
+                                        "DECIMAL scale must be between 0 and {}, got {}",
+                                        precision, n
+                                    ))
+                                }
+                                _ => return Err("Expected integer scale for DECIMAL".into()),
+                            }
+                        } else {
+                            0
+                        };
+                        self.expect(&Token::RParen)?;
+                        Ok(DataType::Decimal(precision, scale))
+                    } else {
+                        Ok(DataType::Decimal(10, 0))
+                    }
+                }
                 Some(t) => Err(format!("Expected data type, got {:?}", t)),
                 None => Err("Expected data type".into()),
             },
@@ -715,7 +797,7 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        let (table_name, table_alias) = if self.peek() == Some(&Token::From) {
+        let (table_name, table_alias, index_hints) = if self.peek() == Some(&Token::From) {
             self.advance();
             let table_name = self.expect_ident()?;
             let alias = if self.peek() == Some(&Token::As) {
@@ -726,9 +808,10 @@ impl Parser {
             } else {
                 None
             };
-            (Some(table_name), alias)
+            let index_hints = self.parse_index_hints()?;
+            (Some(table_name), alias, index_hints)
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         // Parse JOIN clauses
@@ -893,6 +976,7 @@ impl Parser {
             columns,
             table_name,
             table_alias,
+            index_hints,
             joins,
             where_clause,
             group_by,

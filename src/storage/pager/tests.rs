@@ -270,12 +270,13 @@ fn test_freelist_page_id_persistence() {
         let _p0 = pager.allocate_page().unwrap();
         pager.write_page(&_p0).unwrap();
         let fl_page = pager.allocate_page().unwrap();
-        // Write freelist data into the page (after header)
+        // Write freelist data into the page using multi-page FLMP format
+        let pages = pager.freelist_mut().serialize_pages(&[fl_page.page_id()]);
         let mut fl = Page::new(fl_page.page_id());
-        let freelist_data = pager.freelist_mut().serialize();
+        let freelist_data = &pages[0].1;
         fl.data[crate::storage::page::PAGE_HEADER_SIZE
             ..crate::storage::page::PAGE_HEADER_SIZE + freelist_data.len()]
-            .copy_from_slice(&freelist_data);
+            .copy_from_slice(freelist_data);
         pager.write_page(&fl).unwrap();
         pager.set_freelist_page_id(fl_page.page_id());
         pager.flush_meta().unwrap();

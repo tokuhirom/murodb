@@ -8,6 +8,8 @@
 - [x] CREATE FULLTEXT INDEX (bigram, BM25, NATURAL/BOOLEAN mode, snippet)
 - [x] MySQL-compatible integer types (TINYINT, SMALLINT, INT, BIGINT)
 - [x] VARCHAR(n), VARBINARY(n), TEXT with size validation
+- [x] UUID type (16-byte native, UUID_V4/UUID_V7 generation)
+- [x] Hex literal (`X'...'`) for VARBINARY data
 - [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
 - [x] AND, OR logical operators
 - [x] ORDER BY (ASC/DESC, multi-column), LIMIT
@@ -88,6 +90,11 @@ MySQL-compatible scalar functions.
     - Timezone handling policy is explicit (especially TIMESTAMP input/output normalization).
     - Invalid dates/times reject with deterministic errors.
 - [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
+- [x] UUID type with UUID_V4() and UUID_V7() generation functions
+- [x] DECIMAL(p,s) / NUMERIC(p,s) fixed-point exact numeric type
+  - 96-bit mantissa via `rust_decimal`, precision 1-28, 16-byte storage
+  - Full arithmetic, comparison, CAST, aggregation (SUM/AVG/MIN/MAX), ORDER BY, GROUP BY, INDEX support
+  - MySQL-compatible: NUMERIC alias, default DECIMAL(10,0), DECIMAL+INT→DECIMAL, DECIMAL+FLOAT→FLOAT
 - [ ] BLOB (skipped for now)
   - Decision (2026-02-22): defer and move focus to Phase 7 performance work.
   - Why skipped now:
@@ -105,6 +112,7 @@ MySQL-compatible scalar functions.
     - Covered by unit/integration tests (`cargo test` green as of 2026-02-22).
     - Added WAL recovery integration tests for overflow chains (torn WAL tail and post-sync partial-write replay paths).
     - Benchmarked on 2026-02-22 (`murodb_bench`, commit `829ad18145c2`) with no severe small-record regression signal.
+    - Implemented B-tree value overflow pages (2026-02-23): large row values (>~4073 bytes) now spill to overflow page chains transparently. Format version bumped to 5 (backward-compatible with v4).
   - Done when:
     - Overflow chain format is versioned and crash-safe.
     - WAL/recovery covers partial-write and torn-tail scenarios for overflow chains.
@@ -162,18 +170,11 @@ MySQL-compatible scalar functions.
 
 ## Phase 8 — Security (Future)
 
-- [ ] Key rotation (epoch-based re-encryption)
-  - Progress:
-    - Extended WAL `MetaUpdate` to persist `epoch` alongside `catalog_root` / `page_count` / `freelist_page_id`.
-    - WAL recovery now restores the latest committed `epoch` value into DB metadata.
-    - Added backward-compatible decode defaults (`epoch=0`) for legacy WAL MetaUpdate records.
-  - Decision (2026-02-22):
-    - Deferred for now due to low immediate demand relative to implementation/operational complexity.
-    - Keep current work as groundwork and resume when concrete user or compliance requirements arise.
-  - Done when:
-    - Online/offline rotation flow is available with resumable progress.
-    - WAL + data file epoch mismatch handling is crash-safe.
-    - Rotation metrics/events are visible via inspection commands.
+- [x] Key rotation (epoch-based re-encryption)
+  - Implemented `ALTER DATABASE REKEY WITH PASSWORD 'newpass'` for password change with full page re-encryption.
+  - New random salt generated on each rotation; epoch incremented.
+  - Crash-safe via `.rekey` marker file with automatic recovery on next open.
+  - Rejects inside transactions and on plaintext databases.
 
 ## Phase 9 — Practical Embedded DB (Next)
 
@@ -191,12 +192,11 @@ Real-world deployment features to make MuroDB easier to embed and operate.
     - Algorithm + KDF are selected by explicit config at DB creation.
     - Supported suites are versioned, discoverable, and recorded in metadata.
     - Wrong-suite open errors are deterministic and actionable.
-- [ ] Rekey / algorithm migration
-  - Done when:
-    - Existing DB can migrate key and/or cipher suite safely.
-    - Migration is resumable and crash-recoverable.
-    - Rollback/retry procedure is documented and tested.
-- [ ] Backup API + consistent snapshot
+- [x] Rekey / algorithm migration
+  - Rekey implemented via `ALTER DATABASE REKEY WITH PASSWORD 'newpass'`.
+  - Crash-recoverable via `.rekey` marker file.
+  - Algorithm migration (cipher suite change) deferred to future work.
+- [x] Backup API + consistent snapshot
   - Decision (2026-02-22):
     - Prioritize early in Phase 9 so embedded apps can take consistent backups without full writer quiesce windows.
   - Why now:

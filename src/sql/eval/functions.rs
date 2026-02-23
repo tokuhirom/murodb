@@ -404,6 +404,7 @@ pub(super) fn eval_function_call(
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n.abs())),
                 Value::Float(n) => Ok(Value::Float(n.abs())),
+                Value::Decimal(d) => Ok(Value::Decimal(d.abs())),
                 _ => Err(MuroError::Execution("ABS requires numeric argument".into())),
             }
         }
@@ -417,6 +418,7 @@ pub(super) fn eval_function_call(
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n)),
                 Value::Float(n) => Ok(Value::Float(n.ceil())),
+                Value::Decimal(d) => Ok(Value::Decimal(d.ceil())),
                 _ => Err(MuroError::Execution(
                     "CEIL requires numeric argument".into(),
                 )),
@@ -431,6 +433,7 @@ pub(super) fn eval_function_call(
             match val {
                 Value::Integer(n) => Ok(Value::Integer(n)),
                 Value::Float(n) => Ok(Value::Float(n.floor())),
+                Value::Decimal(d) => Ok(Value::Decimal(d.floor())),
                 _ => Err(MuroError::Execution(
                     "FLOOR requires numeric argument".into(),
                 )),
@@ -460,6 +463,16 @@ pub(super) fn eval_function_call(
                     let factor = 10f64.powi(scale as i32);
                     Ok(Value::Float((n * factor).round() / factor))
                 }
+                Value::Decimal(d) => {
+                    let scale = if args.len() == 2 {
+                        eval_expr(&args[1], columns)?.as_i64().ok_or_else(|| {
+                            MuroError::Execution("ROUND scale must be integer".into())
+                        })? as u32
+                    } else {
+                        0
+                    };
+                    Ok(Value::Decimal(d.round_dp(scale)))
+                }
                 _ => Err(MuroError::Execution(
                     "ROUND requires numeric argument".into(),
                 )),
@@ -478,6 +491,12 @@ pub(super) fn eval_function_call(
                         return Err(MuroError::Execution("Division by zero".into()));
                     }
                     Ok(Value::Integer(a % b))
+                }
+                (Value::Decimal(a), Value::Decimal(b)) => {
+                    if b.is_zero() {
+                        return Err(MuroError::Execution("Division by zero".into()));
+                    }
+                    Ok(Value::Decimal(a.checked_rem(*b).unwrap_or_default()))
                 }
                 (a, b) if a.as_f64().is_some() && b.as_f64().is_some() => {
                     let a = a.as_f64().unwrap();
@@ -518,6 +537,16 @@ pub(super) fn eval_function_call(
                     "POWER requires numeric arguments".into(),
                 )),
             }
+        }
+
+        // UUID functions
+        "UUID_V4" => {
+            check_args(name, args, 0)?;
+            Ok(Value::Uuid(*uuid::Uuid::new_v4().as_bytes()))
+        }
+        "UUID_V7" => {
+            check_args(name, args, 0)?;
+            Ok(Value::Uuid(*uuid::Uuid::now_v7().as_bytes()))
         }
 
         _ => Err(MuroError::Execution(format!("Unknown function: {}", name))),

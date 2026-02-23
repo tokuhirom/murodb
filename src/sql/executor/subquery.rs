@@ -4,6 +4,7 @@ pub(super) fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::IntLiteral(*n),
         Value::Float(n) => Expr::FloatLiteral(*n),
+        Value::Decimal(d) => Expr::StringLiteral(d.to_string()),
         Value::Date(n) => Expr::Cast {
             expr: Box::new(Expr::StringLiteral(format_date(*n))),
             target_type: DataType::Date,
@@ -18,6 +19,7 @@ pub(super) fn value_to_expr(v: &Value) -> Expr {
         },
         Value::Varchar(s) => Expr::StringLiteral(s.clone()),
         Value::Varbinary(b) => Expr::BlobLiteral(b.clone()),
+        Value::Uuid(b) => Expr::StringLiteral(crate::types::format_uuid(b)),
         Value::Null => Expr::Null,
     }
 }
@@ -321,6 +323,7 @@ pub(super) fn materialize_select_subqueries(
         columns,
         table_name: sel.table_name.clone(),
         table_alias: sel.table_alias.clone(),
+        index_hints: sel.index_hints.clone(),
         joins: sel.joins.clone(),
         where_clause,
         group_by: sel.group_by.clone(),

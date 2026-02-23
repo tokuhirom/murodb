@@ -30,7 +30,7 @@ use crate::error::Result;
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
-use crate::storage::pager::Pager;
+use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
@@ -53,7 +53,30 @@ pub enum DatabaseEncryption {
 }
 
 fn wal_path(db_path: &Path) -> PathBuf {
-    db_path.with_extension("wal")
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".wal");
+    PathBuf::from(s)
+}
+
+/// Migrate legacy sidecar files that used `with_extension()` (which replaces
+/// the extension) to the new append-suffix naming.
+/// e.g. `mydb.wal` → `mydb.db.wal` when db_path is `mydb.db`.
+fn migrate_legacy_sidecar_paths(db_path: &Path) {
+    for suffix in &["wal", "lock"] {
+        let legacy = db_path.with_extension(suffix);
+        let new = {
+            let mut s = db_path.as_os_str().to_os_string();
+            s.push(".");
+            s.push(suffix);
+            PathBuf::from(s)
+        };
+        // Only migrate when the paths actually differ (i.e. db_path had an extension)
+        // and the legacy file exists but the new one does not.
+        if legacy != new && legacy.exists() && !new.exists() {
+            let _ = std::fs::rename(&legacy, &new);
+            sync_dir(&new);
+        }
+    }
 }
 
 /// Best-effort directory fsync to persist metadata (new file, rename, truncate).
@@ -206,6 +229,7 @@ impl Database {
         master_key: &MasterKey,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
+        migrate_legacy_sidecar_paths(path);
         let wp = wal_path(path);
         let mut recovery_report = None;
 
@@ -251,6 +275,7 @@ impl Database {
         path: &Path,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
+        migrate_legacy_sidecar_paths(path);
         let wp = wal_path(path);
         let mut recovery_report = None;
 
@@ -316,7 +341,11 @@ impl Database {
     }
 
     /// Open an existing database with a password.
+    ///
+    /// If a `.rekey` marker file exists (from a crashed rekey operation), this
+    /// will attempt to complete the recovery before opening normally.
     pub fn open_with_password(path: &Path, password: &str) -> Result<Self> {
+        Self::recover_interrupted_rekey(path, password)?;
         let info = Pager::read_encryption_info_from_file(path)?;
         if info.suite != EncryptionSuite::Aes256GcmSiv {
             return Err(crate::error::MuroError::Encryption(format!(
@@ -344,6 +373,7 @@ impl Database {
         password: &str,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
+        Self::recover_interrupted_rekey(path, password)?;
         let info = Pager::read_encryption_info_from_file(path)?;
         if info.suite != EncryptionSuite::Aes256GcmSiv {
             return Err(crate::error::MuroError::Encryption(format!(
@@ -354,6 +384,106 @@ impl Database {
         let salt = info.salt;
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         Self::open_with_recovery_mode_and_report(path, &master_key, recovery_mode)
+    }
+
+    /// Recover from a crashed rekey operation.
+    ///
+    /// If a `.rekey` marker file exists, this checks whether the rekey completed
+    /// (header salt matches marker salt) or needs to be re-run.
+    fn recover_interrupted_rekey(path: &Path, password: &str) -> Result<()> {
+        let marker = rekey_marker_path(path);
+        if !marker.exists() {
+            return Ok(());
+        }
+
+        let marker_info = read_rekey_marker(&marker)?;
+        let new_salt = marker_info.new_salt;
+        let new_epoch = marker_info.new_epoch;
+
+        // Read current DB header to check if rekey already completed
+        let info = Pager::read_encryption_info_from_file(path)?;
+        if info.salt == new_salt {
+            // Rekey completed successfully, just remove stale marker
+            let _ = std::fs::remove_file(&marker);
+            return Ok(());
+        }
+
+        // Rekey was interrupted mid-way. We need to complete it.
+        // Derive new key from password + marker's new salt.
+        let new_key = kdf::derive_key(password.as_bytes(), &new_salt)?;
+
+        // Derive old key from wrapped marker payload.
+        let wrapped_old_key = marker_info.wrapped_old_key.ok_or_else(|| {
+            crate::error::MuroError::Execution(
+                "rekey recovery marker is missing wrapped old key; automatic recovery is unavailable".to_string(),
+            )
+        })?;
+        let old_key = unwrap_rekey_old_key(&new_key, new_epoch, &wrapped_old_key)?;
+        let old_epoch = new_epoch.saturating_sub(1);
+
+        // Open the file directly for recovery
+        let old_crypto =
+            crate::crypto::suite::PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(&old_key))?;
+        let new_crypto =
+            crate::crypto::suite::PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(&new_key))?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+
+        // Re-read header for page_count
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut header = [0u8; 76];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut header)?;
+        let page_count = u64::from_le_bytes(header[36..44].try_into().unwrap());
+
+        let page_size_on_disk =
+            crate::storage::page::PAGE_SIZE + crate::crypto::aead::PageCrypto::overhead();
+
+        for page_id in 0..page_count {
+            let offset = 76 + page_id * page_size_on_disk as u64;
+            file.seek(SeekFrom::Start(offset))?;
+            let mut encrypted = vec![0u8; page_size_on_disk];
+            file.read_exact(&mut encrypted)?;
+
+            // Try decrypting with new key/epoch first (page already re-encrypted)
+            let mut plaintext = [0u8; crate::storage::page::PAGE_SIZE];
+            let decrypt_result =
+                new_crypto.decrypt_into(page_id, new_epoch, &encrypted, &mut plaintext);
+
+            if decrypt_result.is_err() {
+                // Page was not yet re-encrypted; decrypt with old key/epoch
+                let len =
+                    old_crypto.decrypt_into(page_id, old_epoch, &encrypted, &mut plaintext)?;
+                if len != crate::storage::page::PAGE_SIZE {
+                    return Err(crate::error::MuroError::InvalidPage);
+                }
+
+                // Re-encrypt with new key/epoch
+                let mut new_encrypted = vec![0u8; page_size_on_disk];
+                new_crypto.encrypt_into(page_id, new_epoch, &plaintext, &mut new_encrypted)?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&new_encrypted)?;
+            }
+        }
+
+        file.sync_data()?;
+
+        // Update header with new salt and epoch
+        header[12..28].copy_from_slice(&new_salt);
+        header[44..52].copy_from_slice(&new_epoch.to_le_bytes());
+        let checksum = crate::wal::record::crc32(&header[0..72]);
+        header[72..76].copy_from_slice(&checksum.to_le_bytes());
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header)?;
+        file.sync_all()?;
+
+        // Remove marker
+        let _ = std::fs::remove_file(&marker);
+
+        Ok(())
     }
 
     /// Execute a SQL statement. Returns the result.
@@ -382,6 +512,20 @@ impl Database {
         let pager = self.session.pager_mut();
         pager.set_catalog_root(catalog_root);
         pager.flush_meta()
+    }
+
+    /// Create a consistent backup of the database to `dest`.
+    ///
+    /// Acquires a write lock, checkpoints the WAL (flushing all committed
+    /// data to the main file), then performs a byte-level copy of the
+    /// database file. The backup file is a valid MuroDB database that can
+    /// be opened directly with the same key/password.
+    pub fn backup<P: AsRef<Path>>(&mut self, dest: P) -> Result<()> {
+        let _guard = self.lock_manager.write_lock()?;
+        // Checkpoint WAL so all committed data is in the data file.
+        self.session.try_checkpoint_truncate_once()?;
+        // Copy the data file bytes.
+        self.session.pager_mut().backup_to_file(dest.as_ref())
     }
 
     /// Create a `Session` that supports BEGIN/COMMIT/ROLLBACK.

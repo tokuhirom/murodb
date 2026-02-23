@@ -210,13 +210,36 @@ pub fn encode_composite_key(
                     _ => buf.extend_from_slice(&encode_i64(*n)),
                 }
             }
+            Value::Decimal(d) => {
+                buf.push(0x01);
+                let mut d = *d;
+                if let DataType::Decimal(_, s) = dt {
+                    d.rescale(*s);
+                }
+                let raw = d.mantissa();
+                let unsigned = (raw as u128) ^ (1u128 << 127);
+                buf.extend_from_slice(&unsigned.to_be_bytes());
+            }
             Value::Varchar(s) => {
                 buf.push(0x01);
-                encode_byte_stuffed(&mut buf, s.as_bytes());
+                if **dt == DataType::Uuid {
+                    // Parse UUID string for UUID column key encoding
+                    if let Some(uuid_bytes) = crate::types::parse_uuid_string(s) {
+                        buf.extend_from_slice(&uuid_bytes);
+                    } else {
+                        encode_byte_stuffed(&mut buf, s.as_bytes());
+                    }
+                } else {
+                    encode_byte_stuffed(&mut buf, s.as_bytes());
+                }
             }
             Value::Varbinary(b) => {
                 buf.push(0x01);
                 encode_byte_stuffed(&mut buf, b);
+            }
+            Value::Uuid(b) => {
+                buf.push(0x01);
+                buf.extend_from_slice(b);
             }
         }
     }

@@ -16,7 +16,7 @@ fn test_key() -> MasterKey {
 #[test]
 fn test_wal_write_and_read() {
     let dir = TempDir::new().unwrap();
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
@@ -64,7 +64,7 @@ fn test_wal_write_and_read() {
 fn test_recovery_replays_committed_only() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create database
     {
@@ -177,7 +177,7 @@ fn test_recovery_restores_metadata_prevents_page_reuse() {
 fn test_permissive_open_quarantines_malformed_wal() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let _pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -217,7 +217,7 @@ fn test_permissive_open_quarantines_malformed_wal() {
 fn test_truncated_wal_tail_recovery() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create database with one page
     {
@@ -284,7 +284,7 @@ fn test_truncated_wal_tail_recovery() {
 fn test_corrupt_tail_frame_recovery() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -393,7 +393,7 @@ fn test_catalog_root_durable_after_commit() {
 fn test_wal_is_checkpointed_after_successful_commit() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
     db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
@@ -415,7 +415,7 @@ fn test_wal_is_checkpointed_after_successful_commit() {
 fn test_wal_is_checkpointed_after_explicit_rollback() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
     db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
@@ -499,7 +499,7 @@ fn test_freelist_persisted_across_reopen() {
 fn test_freelist_wal_recovery() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create DB, insert and delete to create freelist entries
     {
@@ -579,7 +579,7 @@ fn test_rollback_discards_freed_pages() {
 fn test_interleaved_txs_with_tail_corruption() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -656,7 +656,7 @@ fn test_interleaved_txs_with_tail_corruption() {
 fn test_corruption_at_transaction_boundary() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -717,7 +717,7 @@ fn test_corruption_at_transaction_boundary() {
 fn test_committed_tx_then_aborted_tx_then_crash() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     {
         let mut pager = Pager::create(&db_path, &test_key()).unwrap();
@@ -793,7 +793,7 @@ fn test_committed_tx_then_aborted_tx_then_crash() {
 fn test_multi_tx_committed_then_crash_mid_commit() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create DB and insert 3 committed transactions
     {
@@ -915,7 +915,7 @@ fn test_recovery_catalog_page_count_data_consistency() {
 fn test_recovery_truncates_wal_durably() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     // Create DB with some data
     {

@@ -1,8 +1,9 @@
 use crate::error::{MuroError, Result};
 use crate::types::{
-    format_date, format_datetime, parse_date_string, parse_datetime_string, parse_timestamp_string,
-    DataType, Value,
+    format_date, format_datetime, format_uuid, parse_date_string, parse_datetime_string,
+    parse_timestamp_string, parse_uuid_string, DataType, Value,
 };
+use rust_decimal::prelude::ToPrimitive;
 
 pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
     const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
@@ -47,6 +48,12 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => match val {
             Value::Integer(n) => Ok(Value::Integer(*n)),
             Value::Float(n) => Ok(Value::Integer(float_to_i64_checked(*n)?)),
+            Value::Decimal(d) => {
+                let truncated = d.trunc();
+                truncated.to_i64().map(Value::Integer).ok_or_else(|| {
+                    MuroError::Execution(format!("Decimal '{}' out of range for integer cast", d))
+                })
+            }
             Value::Varchar(s) => {
                 let n: i64 = s
                     .trim()
@@ -62,6 +69,12 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::Float | DataType::Double => match val {
             Value::Integer(n) => Ok(Value::Float(float_checked(*n as f64, target_type)?)),
             Value::Float(n) => Ok(Value::Float(float_checked(*n, target_type)?)),
+            Value::Decimal(d) => {
+                let n = d.to_f64().ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot cast Decimal '{}' to float", d))
+                })?;
+                Ok(Value::Float(float_checked(n, target_type)?))
+            }
             Value::Varchar(s) => {
                 let n: f64 = s
                     .trim()
@@ -74,6 +87,47 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
                 val
             ))),
         },
+        DataType::Decimal(p, s) => {
+            let d = match val {
+                Value::Integer(n) => rust_decimal::Decimal::from(*n),
+                Value::Float(n) => {
+                    use std::str::FromStr;
+                    rust_decimal::Decimal::from_str(&n.to_string()).map_err(|_| {
+                        MuroError::Execution(format!("Cannot cast float '{}' to DECIMAL", n))
+                    })?
+                }
+                Value::Decimal(d) => *d,
+                Value::Varchar(sv) => {
+                    use std::str::FromStr;
+                    rust_decimal::Decimal::from_str(sv.trim()).map_err(|_| {
+                        MuroError::Execution(format!("Cannot cast '{}' to DECIMAL", sv))
+                    })?
+                }
+                _ => {
+                    return Err(MuroError::Execution(format!(
+                        "Cannot cast {:?} to DECIMAL",
+                        val
+                    )))
+                }
+            };
+            // Round to declared scale, set exact scale, and validate precision
+            let mut rounded = d.round_dp(*s);
+            rounded.rescale(*s);
+            let max_int_digits = p - s;
+            let int_part = rounded.trunc().abs();
+            let int_digits = if int_part.is_zero() {
+                0u32
+            } else {
+                int_part.to_string().len() as u32
+            };
+            if int_digits > max_int_digits {
+                return Err(MuroError::Execution(format!(
+                    "Value '{}' out of range for DECIMAL({},{})",
+                    d, p, s
+                )));
+            }
+            Ok(Value::Decimal(rounded))
+        }
         DataType::Date => match val {
             Value::Date(d) => Ok(Value::Date(*d)),
             Value::DateTime(dt) => Ok(Value::Date((*dt / 1_000_000) as i32)),
@@ -115,6 +169,7 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
                 Value::Date(d) => format_date(*d),
                 Value::DateTime(dt) => format_datetime(*dt),
                 Value::Timestamp(ts) => format_datetime(*ts),
+                Value::Uuid(b) => format_uuid(b),
                 _ => val.to_string(),
             };
             Ok(Value::Varchar(s))
@@ -122,8 +177,32 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::Varbinary(_) => match val {
             Value::Varbinary(b) => Ok(Value::Varbinary(b.clone())),
             Value::Varchar(s) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
+            Value::Uuid(b) => Ok(Value::Varbinary(b.to_vec())),
             _ => Err(MuroError::Execution(format!(
                 "Cannot cast {:?} to varbinary",
+                val
+            ))),
+        },
+        DataType::Uuid => match val {
+            Value::Uuid(b) => Ok(Value::Uuid(*b)),
+            Value::Varchar(s) => {
+                let bytes = parse_uuid_string(s)
+                    .ok_or_else(|| MuroError::Execution(format!("Cannot cast '{}' to UUID", s)))?;
+                Ok(Value::Uuid(bytes))
+            }
+            Value::Varbinary(b) => {
+                if b.len() != 16 {
+                    return Err(MuroError::Execution(format!(
+                        "VARBINARY must be 16 bytes to cast to UUID, got {}",
+                        b.len()
+                    )));
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(b);
+                Ok(Value::Uuid(bytes))
+            }
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to UUID",
                 val
             ))),
         },

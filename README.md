@@ -86,11 +86,12 @@ Internals deep dive:
 
 - `Database::execute(sql)` is the general SQL entrypoint (read/write, exclusive lock).
 - `Database::query(sql)` is read-only (shared lock, rejects write SQL).
+- `Database::backup(path)` creates a consistent snapshot of the database to a file.
 - CLI auto-routes read-only SQL to the read path; inside explicit transactions it always uses execute semantics.
 
 ## Limitations
 
-- A single row must fit within one 4,096-byte page (~4,048 bytes of user data). Row overflow is not supported.
+- Rows with values exceeding ~4,073 bytes automatically use overflow pages. Keys must fit inline (max ~4,071 bytes).
 - See [Limits Reference](https://tokuhirom.github.io/murodb/user-guide/limits.html) for full details on data type ranges, column counts, and other limits.
 
 ## Repository Layout

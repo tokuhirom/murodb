@@ -5,6 +5,7 @@
 use crate::btree::key_encoding::compare_keys;
 use crate::btree::node::*;
 use crate::error::{MuroError, Result};
+use crate::storage::overflow;
 use crate::storage::page::{Page, PageId};
 use crate::storage::page_store::PageStore;
 
@@ -64,9 +65,22 @@ impl BTree {
             Some(NodeType::Leaf) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    if let Some((k, v)) = leaf_entry(&page, i) {
+                    if let Some(k) = leaf_key(&page, i) {
                         match compare_keys(key, k) {
-                            std::cmp::Ordering::Equal => return Ok(Some(v.to_vec())),
+                            std::cmp::Ordering::Equal => {
+                                // Check for overflow
+                                let cell = page.cell(i + 1).unwrap();
+                                if is_overflow_cell(cell) {
+                                    let (total_len, first_page) =
+                                        decode_overflow_metadata(cell).unwrap();
+                                    let value = overflow::read_overflow_chain(
+                                        pager, first_page, total_len,
+                                    )?;
+                                    return Ok(Some(value));
+                                }
+                                let (_, v) = decode_leaf_cell(cell);
+                                return Ok(Some(v.to_vec()));
+                            }
                             std::cmp::Ordering::Less => return Ok(None),
                             std::cmp::Ordering::Greater => continue,
                         }
@@ -140,14 +154,24 @@ impl BTree {
         for i in 0..n {
             if let Some(k) = leaf_key(&page, i) {
                 if compare_keys(key, k) == std::cmp::Ordering::Equal {
-                    // Key exists - rebuild the page with updated value
+                    // Free old overflow chain if the existing cell is overflow
+                    let old_cell = page.cell(i + 1).unwrap();
+                    if is_overflow_cell(old_cell) {
+                        if let Some((_, first_page)) = decode_overflow_metadata(old_cell) {
+                            overflow::free_overflow_chain(pager, first_page)?;
+                        }
+                    }
+
+                    // Encode new cell (possibly with overflow)
+                    let new_cell_bytes = self.encode_cell_with_overflow(pager, key, value)?;
+
+                    // Rebuild the page with updated value
                     let mut new_page = Page::new(page_id);
                     init_leaf(&mut new_page);
                     for j in 0..n {
                         if j == i {
-                            let cell = encode_leaf_cell(key, value);
                             new_page
-                                .insert_cell(&cell)
+                                .insert_cell(&new_cell_bytes)
                                 .map_err(|_| MuroError::PageOverflow)?;
                         } else if let Some(cell_data) = page.cell(j + 1) {
                             new_page
@@ -172,8 +196,8 @@ impl BTree {
             }
         }
 
-        // Try to insert into the page
-        let cell = encode_leaf_cell(key, value);
+        // Encode cell (possibly with overflow)
+        let cell = self.encode_cell_with_overflow(pager, key, value)?;
 
         // Rebuild page with the new entry at the correct position
         let mut new_page = Page::new(page_id);
@@ -183,59 +207,83 @@ impl BTree {
         for i in 0..n {
             if i == pos && !inserted {
                 if new_page.insert_cell(&cell).is_err() {
-                    // Need to split
-                    return self.split_leaf(pager, &page, key, value, pos);
+                    // Need to split — work with raw cells to preserve overflow pointers
+                    return self.split_leaf_raw(pager, &page, &cell, pos);
                 }
                 inserted = true;
             }
             if let Some(cell_data) = page.cell(i + 1) {
                 if new_page.insert_cell(cell_data).is_err() {
-                    return self.split_leaf(pager, &page, key, value, pos);
+                    return self.split_leaf_raw(pager, &page, &cell, pos);
                 }
             }
         }
         if !inserted && new_page.insert_cell(&cell).is_err() {
-            return self.split_leaf(pager, &page, key, value, pos);
+            return self.split_leaf_raw(pager, &page, &cell, pos);
         }
 
         pager.write_page(&new_page)?;
         Ok(None)
     }
 
-    fn split_leaf(
+    /// Encode a key+value as a leaf cell, using overflow if needed.
+    fn encode_cell_with_overflow(
+        &self,
+        pager: &mut impl PageStore,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Vec<u8>> {
+        if needs_overflow(key, value) {
+            let total_value_len = u32::try_from(value.len()).map_err(|_| {
+                MuroError::Execution(format!(
+                    "value too large: {} bytes exceeds maximum of {} bytes",
+                    value.len(),
+                    u32::MAX
+                ))
+            })?;
+            let mut cell = encode_overflow_leaf_cell(key, total_value_len);
+            let first_page = overflow::write_overflow_chain(pager, value)?;
+            set_overflow_page_id(&mut cell, first_page);
+            Ok(cell)
+        } else {
+            Ok(encode_leaf_cell(key, value))
+        }
+    }
+
+    /// Split a leaf node, working with raw cell bytes to preserve overflow pointers.
+    fn split_leaf_raw(
         &self,
         pager: &mut impl PageStore,
         old_page: &Page,
-        new_key: &[u8],
-        new_value: &[u8],
+        new_cell: &[u8],
         insert_pos: u16,
     ) -> Result<Option<SplitResult>> {
         let old_id = old_page.page_id();
         let n = num_entries(old_page);
 
-        // Collect all entries including the new one
-        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(n as usize + 1);
+        // Collect all raw cells including the new one
+        let mut cells: Vec<Vec<u8>> = Vec::with_capacity(n as usize + 1);
         for i in 0..n {
             if i == insert_pos {
-                entries.push((new_key.to_vec(), new_value.to_vec()));
+                cells.push(new_cell.to_vec());
             }
-            if let Some((k, v)) = leaf_entry(old_page, i) {
-                entries.push((k.to_vec(), v.to_vec()));
+            if let Some(cell_data) = old_page.cell(i + 1) {
+                cells.push(cell_data.to_vec());
             }
         }
         if insert_pos == n {
-            entries.push((new_key.to_vec(), new_value.to_vec()));
+            cells.push(new_cell.to_vec());
         }
 
-        let mid = entries.len() / 2;
-        let median_key = entries[mid].0.clone();
+        let mid = cells.len() / 2;
+        let (median_key, _) = decode_leaf_cell(&cells[mid]);
+        let median_key = median_key.to_vec();
 
         // Left page (reuse old page id)
         let mut left = Page::new(old_id);
         init_leaf(&mut left);
-        for (k, v) in &entries[..mid] {
-            let cell = encode_leaf_cell(k, v);
-            left.insert_cell(&cell)
+        for cell in &cells[..mid] {
+            left.insert_cell(cell)
                 .map_err(|_| MuroError::PageOverflow)?;
         }
 
@@ -243,10 +291,9 @@ impl BTree {
         let mut right = pager.allocate_page()?;
         let right_id = right.page_id();
         init_leaf(&mut right);
-        for (k, v) in &entries[mid..] {
-            let cell = encode_leaf_cell(k, v);
+        for cell in &cells[mid..] {
             right
-                .insert_cell(&cell)
+                .insert_cell(cell)
                 .map_err(|_| MuroError::PageOverflow)?;
         }
 
@@ -305,37 +352,10 @@ impl BTree {
                 }
             }
 
-            // If the split child was the right-most child, we need to update the right child
-            // and insert the new key pointing to the old right child
             let old_right = right_child(&page).ok_or(MuroError::InvalidPage)?;
 
             entries.insert(pos as usize, new_cell);
 
-            // Update the right-child pointers:
-            // The entry at `pos` has left_child = child_page_id (the left half after split)
-            // The entry at `pos+1` (if it was previously at `pos`) should have its left child updated
-            // Actually, we need to fix the child after the newly inserted key to point to split.right_page_id
-            // The entry after pos should have left_child = split.right_page_id
-
-            // Re-encode: for the entry at pos, left_child = child_page_id, key = split.median_key
-            // For entry at pos+1, its left_child should be split.right_page_id
-
-            // Actually let's think more carefully:
-            // Before split, the child at pos was child_page_id.
-            // After split, child_page_id is the left half, split.right_page_id is the right half.
-            // We insert median_key between them.
-
-            // In the internal node:
-            // Entry at pos: left_child=child_page_id (left half), key=split.median_key
-            // The next child pointer is either the left_child of entry pos+1, or right_child if pos is last.
-            // That next child pointer should be split.right_page_id.
-
-            // But wait, our entries list now has the new entry at pos with left_child=child_page_id.
-            // The entry that was previously at pos has not changed. If child_idx was Some(i),
-            // then the old entry at i had left_child = child_page_id (the original).
-            // After split, the old entry at i should now have left_child = split.right_page_id.
-
-            // Fix: update the left_child of the entry after the new one
             if (pos as usize + 1) < entries.len() {
                 let old_entry = &entries[pos as usize + 1];
                 let (_, old_key) = decode_internal_cell(old_entry);
@@ -344,9 +364,6 @@ impl BTree {
             }
 
             let new_right = if child_idx.is_none() {
-                // The split child was the rightmost child
-                // Update: the new entry at pos has left_child = child_page_id (old right child = left half)
-                // The new right child of this internal node = split.right_page_id
                 split.right_page_id
             } else {
                 old_right
@@ -465,6 +482,16 @@ impl BTree {
                 }
 
                 if let Some(idx) = found_idx {
+                    // Free overflow chain if this is an overflow cell
+                    let cell = page.cell(idx + 1).unwrap();
+                    if is_overflow_cell(cell) {
+                        if let Some((_, first_page)) = decode_overflow_metadata(cell) {
+                            if first_page != overflow::NO_OVERFLOW_PAGE {
+                                overflow::free_overflow_chain(pager, first_page)?;
+                            }
+                        }
+                    }
+
                     let mut new_page = Page::new(page_id);
                     init_leaf(&mut new_page);
                     for i in 0..n {
@@ -504,7 +531,6 @@ impl BTree {
                     self.delete_from_page(pager, child_page_id, key, depth + 1)?;
 
                 if deleted && underfull {
-                    // Try to rebalance: merge or redistribute with a sibling
                     self.try_rebalance(pager, page_id, child_idx)?;
                 }
 
@@ -519,9 +545,10 @@ impl BTree {
 
     /// Iterate over all key-value pairs in sorted order.
     /// Calls the callback with (key, value) for each entry.
+    /// For overflow cells, the full value is reconstructed before calling the callback.
     pub fn scan<F>(&self, pager: &mut impl PageStore, mut callback: F) -> Result<()>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<bool>, // return false to stop
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
         self.scan_page(pager, self.root_page_id, &mut callback, 0)
     }
@@ -547,10 +574,17 @@ impl BTree {
             Some(NodeType::Leaf) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    if let Some((k, v)) = leaf_entry(&page, i) {
-                        if !callback(k, v)? {
+                    let cell = page.cell(i + 1).unwrap();
+                    let (k, v) = decode_leaf_cell(cell);
+                    if is_overflow_cell(cell) {
+                        let (total_len, first_page) = decode_overflow_metadata(cell).unwrap();
+                        let full_value =
+                            overflow::read_overflow_chain(pager, first_page, total_len)?;
+                        if !callback(k, &full_value)? {
                             return Ok(());
                         }
+                    } else if !callback(k, v)? {
+                        return Ok(());
                     }
                 }
                 Ok(())
@@ -604,10 +638,17 @@ impl BTree {
             Some(NodeType::Leaf) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    if let Some((k, v)) = leaf_entry(&page, i) {
-                        if compare_keys(k, start_key) != std::cmp::Ordering::Less
-                            && !callback(k, v)?
-                        {
+                    let cell = page.cell(i + 1).unwrap();
+                    let (k, v) = decode_leaf_cell(cell);
+                    if compare_keys(k, start_key) != std::cmp::Ordering::Less {
+                        if is_overflow_cell(cell) {
+                            let (total_len, first_page) = decode_overflow_metadata(cell).unwrap();
+                            let full_value =
+                                overflow::read_overflow_chain(pager, first_page, total_len)?;
+                            if !callback(k, &full_value)? {
+                                return Ok(());
+                            }
+                        } else if !callback(k, v)? {
                             return Ok(());
                         }
                     }
@@ -659,10 +700,8 @@ impl BTree {
         }
 
         // Determine the child and its sibling for merging
-        // We'll try to merge the child with its left sibling if possible, or right sibling.
         let (left_child_id, right_child_id, separator_idx) = match child_idx {
             Some(0) => {
-                // Child is leftmost; merge with right sibling
                 let left = internal_left_child(&parent, 0).ok_or(MuroError::InvalidPage)?;
                 let right = if n > 1 {
                     internal_left_child(&parent, 1).ok_or(MuroError::InvalidPage)?
@@ -672,7 +711,6 @@ impl BTree {
                 (left, right, 0u16)
             }
             Some(i) => {
-                // Merge with left sibling
                 let left = if i == 1 {
                     internal_left_child(&parent, 0).ok_or(MuroError::InvalidPage)?
                 } else {
@@ -682,7 +720,6 @@ impl BTree {
                 (left, right, i - 1)
             }
             None => {
-                // Child is rightmost; merge with its left sibling
                 let left = internal_left_child(&parent, n - 1).ok_or(MuroError::InvalidPage)?;
                 let right = right_child(&parent).ok_or(MuroError::InvalidPage)?;
                 (left, right, n - 1)
@@ -703,27 +740,26 @@ impl BTree {
         let left_entries = num_entries(&left_page);
         let right_entries = num_entries(&right_page);
 
-        // Collect all entries from both leaves
-        let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> =
+        // Collect all raw cells from both leaves (preserves overflow pointers)
+        let mut all_cells: Vec<Vec<u8>> =
             Vec::with_capacity((left_entries + right_entries) as usize);
         for i in 0..left_entries {
-            if let Some((k, v)) = leaf_entry(&left_page, i) {
-                all_entries.push((k.to_vec(), v.to_vec()));
+            if let Some(cell_data) = left_page.cell(i + 1) {
+                all_cells.push(cell_data.to_vec());
             }
         }
         for i in 0..right_entries {
-            if let Some((k, v)) = leaf_entry(&right_page, i) {
-                all_entries.push((k.to_vec(), v.to_vec()));
+            if let Some(cell_data) = right_page.cell(i + 1) {
+                all_cells.push(cell_data.to_vec());
             }
         }
 
-        // Try to fit all entries into a single page
+        // Try to fit all cells into a single page
         let mut merged = Page::new(left_child_id);
         init_leaf(&mut merged);
         let mut fits = true;
-        for (k, v) in &all_entries {
-            let cell = encode_leaf_cell(k, v);
-            if merged.insert_cell(&cell).is_err() {
+        for cell in &all_cells {
+            if merged.insert_cell(cell).is_err() {
                 fits = false;
                 break;
             }
@@ -739,8 +775,6 @@ impl BTree {
             let old_right = right_child(&parent).ok_or(MuroError::InvalidPage)?;
             let mut new_parent = Page::new(parent_page_id);
 
-            // Determine new right child: if we removed the last separator,
-            // the merged node becomes the right child
             let new_right = if separator_idx == n - 1 && child_idx.is_none() {
                 left_child_id
             } else {
@@ -750,14 +784,10 @@ impl BTree {
             init_internal(&mut new_parent, new_right);
             for i in 0..n {
                 if i == separator_idx {
-                    // Skip the separator entry
-                    // But if the entry after the separator pointed to right_child_id,
-                    // update its left_child to left_child_id
                     continue;
                 }
                 if let Some(cell_data) = parent.cell(i + 1) {
                     if i == separator_idx + 1 {
-                        // Update this entry's left_child to point to the merged node
                         let (_, entry_key) = decode_internal_cell(cell_data);
                         let new_cell = encode_internal_cell(left_child_id, entry_key);
                         new_parent
@@ -771,9 +801,7 @@ impl BTree {
                 }
             }
 
-            // Handle the case where the right child was the merged right node
             if child_idx.is_none() {
-                // The rightmost child was merged into the left - update right_child
                 set_right_child(&mut new_parent, left_child_id);
             }
 
@@ -783,7 +811,7 @@ impl BTree {
         Ok(())
     }
 
-    /// Collect all page IDs in this B-tree (for freeing).
+    /// Collect all page IDs in this B-tree (for freeing), including overflow pages.
     pub fn collect_all_pages(&self, pager: &mut impl PageStore) -> Result<Vec<PageId>> {
         let mut pages = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -813,7 +841,24 @@ impl BTree {
         pages.push(page_id);
         let page = pager.read_page(page_id)?;
         match node_type(&page) {
-            Some(NodeType::Leaf) => Ok(()),
+            Some(NodeType::Leaf) => {
+                // Collect overflow pages for each overflow cell
+                let n = num_entries(&page);
+                for i in 0..n {
+                    if let Some(cell) = page.cell(i + 1) {
+                        if is_overflow_cell(cell) {
+                            if let Some((_, first_page)) = decode_overflow_metadata(cell) {
+                                if first_page != overflow::NO_OVERFLOW_PAGE {
+                                    let overflow_pages =
+                                        overflow::collect_overflow_pages(pager, first_page)?;
+                                    pages.extend(overflow_pages);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
             Some(NodeType::Internal) => {
                 let n = num_entries(&page);
                 for i in 0..n {

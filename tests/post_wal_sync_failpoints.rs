@@ -30,7 +30,7 @@ fn setup_with_post_sync_failure(
 ) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
@@ -183,7 +183,7 @@ fn test_flush_meta_failure_recovery_metadata_correct() {
 fn test_write_page_failure_with_freed_pages_recovery() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
@@ -228,7 +228,7 @@ fn test_write_page_failure_with_freed_pages_recovery() {
 fn test_flush_meta_failure_with_freed_pages_recovery() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
 
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();

@@ -371,9 +371,9 @@ pub(super) fn exec_create_fulltext_index(
     }
 
     let mut fts_index = FtsIndex::create(pager, SQL_FTS_TERM_KEY)?;
-    let fts_root = fts_index.root_page_id();
+    let initial_fts_root = fts_index.root_page_id();
 
-    let build_res: Result<()> = (|| {
+    let build_res: Result<PageId> = (|| {
         let data_btree = BTree::open(table_def.data_btree_root);
         let mut pending = Vec::new();
         let mut mappings = Vec::new();
@@ -396,17 +396,22 @@ pub(super) fn exec_create_fulltext_index(
 
         fts_index.apply_pending(pager, &pending)?;
 
-        let mut meta_btree = BTree::open(fts_root);
+        // Use the updated root after apply_pending (root may have changed due to B-tree splits)
+        let mut meta_btree = BTree::open(fts_index.root_page_id());
         for (pk_key, doc_id) in &mappings {
             fts_put_doc_mapping(&mut meta_btree, pager, pk_key, *doc_id)?;
         }
         fts_set_next_doc_id(&mut meta_btree, pager, next_doc_id)?;
-        Ok(())
+        // Return the final root after all B-tree modifications
+        Ok(meta_btree.root_page_id())
     })();
-    if let Err(e) = build_res {
-        free_btree_pages(pager, fts_root);
-        return Err(e);
-    }
+    let final_fts_root = match build_res {
+        Ok(root) => root,
+        Err(e) => {
+            free_btree_pages(pager, initial_fts_root);
+            return Err(e);
+        }
+    };
 
     let idx_def = IndexDef {
         name: fi.index_name.clone(),
@@ -414,7 +419,7 @@ pub(super) fn exec_create_fulltext_index(
         column_names: vec![fi.column_name.clone()],
         index_type: IndexType::Fulltext,
         is_unique: false,
-        btree_root: fts_root,
+        btree_root: final_fts_root,
         stats_distinct_keys: 0,
         stats_num_min: 0,
         stats_num_max: 0,

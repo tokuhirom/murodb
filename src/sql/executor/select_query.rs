@@ -183,7 +183,7 @@ pub(super) fn exec_select(
         })
         .collect();
 
-    let plan = plan_select(
+    let plan = plan_select_with_hints(
         table_name,
         &table_def.pk_columns,
         &index_stats,
@@ -191,6 +191,7 @@ pub(super) fn exec_select(
         PlannerStats {
             table_rows: table_def.stats_row_count,
         },
+        &sel.index_hints,
     );
 
     let need_aggregation = has_aggregates(&sel.columns, &sel.having) || sel.group_by.is_some();

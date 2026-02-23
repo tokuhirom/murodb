@@ -176,9 +176,9 @@ fn test_text_large_value() {
     assert_eq!(rows[0].get("val"), Some(&Value::Varchar(data)));
 }
 
-/// TEXT type with page-exceeding value → PageOverflow.
+/// TEXT type with page-exceeding value uses overflow pages.
 #[test]
-fn test_text_page_overflow() {
+fn test_text_large_overflow() {
     let (mut pager, mut catalog, _dir) = setup();
     exec(
         &mut pager,
@@ -187,11 +187,13 @@ fn test_text_page_overflow() {
     );
     let data = "t".repeat(5000);
     let sql = format!("INSERT INTO t VALUES (1, '{}')", data);
-    let err = exec_err(&mut pager, &mut catalog, &sql);
-    assert!(
-        err.contains("overflow") || err.contains("Overflow") || err.contains("capacity"),
-        "Expected page overflow error, got: {}",
-        err
+    exec(&mut pager, &mut catalog, &sql);
+
+    let rows = query_rows(&mut pager, &mut catalog, "SELECT val FROM t WHERE id = 1");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("val"),
+        Some(&murodb::types::Value::Varchar(data))
     );
 }
 

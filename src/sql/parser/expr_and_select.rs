@@ -71,6 +71,9 @@ impl Parser {
                     | Token::On
                     | Token::Union
                     | Token::Semicolon
+                    | Token::Force
+                    | Token::Use
+                    | Token::Ignore
             )
         )
     }
@@ -102,9 +105,65 @@ impl Parser {
         Ok(columns)
     }
 
+    /// Parse optional index hints: FORCE INDEX (idx1, idx2) | USE INDEX (idx1) | IGNORE INDEX (idx1)
+    pub(super) fn parse_index_hints(&mut self) -> Result<Vec<IndexHint>, String> {
+        let mut hints = Vec::new();
+        loop {
+            let hint_type = match self.peek() {
+                Some(Token::Force) => {
+                    if self.tokens.get(self.pos + 1) == Some(&Token::Index) {
+                        self.advance(); // FORCE
+                        self.advance(); // INDEX
+                        Some(IndexHintType::Force)
+                    } else {
+                        break;
+                    }
+                }
+                Some(Token::Use) => {
+                    if self.tokens.get(self.pos + 1) == Some(&Token::Index) {
+                        self.advance(); // USE
+                        self.advance(); // INDEX
+                        Some(IndexHintType::Use)
+                    } else {
+                        break;
+                    }
+                }
+                Some(Token::Ignore) => {
+                    if self.tokens.get(self.pos + 1) == Some(&Token::Index) {
+                        self.advance(); // IGNORE
+                        self.advance(); // INDEX
+                        Some(IndexHintType::Ignore)
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            };
+            if let Some(ht) = hint_type {
+                self.expect(&Token::LParen)?;
+                let mut index_names = Vec::new();
+                loop {
+                    index_names.push(self.expect_ident()?);
+                    if self.peek() == Some(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                hints.push(IndexHint {
+                    hint_type: ht,
+                    index_names,
+                });
+            }
+        }
+        Ok(hints)
+    }
+
     pub(super) fn parse_update(&mut self) -> Result<Update, String> {
         self.advance(); // UPDATE
         let table_name = self.expect_ident()?;
+        let index_hints = self.parse_index_hints()?;
         self.expect(&Token::Set)?;
 
         let mut assignments = Vec::new();
@@ -130,6 +189,7 @@ impl Parser {
 
         Ok(Update {
             table_name,
+            index_hints,
             assignments,
             where_clause,
         })
@@ -139,6 +199,7 @@ impl Parser {
         self.advance(); // DELETE
         self.expect(&Token::From)?;
         let table_name = self.expect_ident()?;
+        let index_hints = self.parse_index_hints()?;
 
         let where_clause = if self.peek() == Some(&Token::Where) {
             self.advance();
@@ -149,6 +210,7 @@ impl Parser {
 
         Ok(Delete {
             table_name,
+            index_hints,
             where_clause,
         })
     }
@@ -366,7 +428,7 @@ impl Parser {
 
         let columns = self.parse_select_columns()?;
 
-        let (table_name, table_alias) = if self.peek() == Some(&Token::From) {
+        let (table_name, table_alias, index_hints) = if self.peek() == Some(&Token::From) {
             self.advance();
             let table_name = self.expect_ident()?;
             let alias = if self.peek() == Some(&Token::As) {
@@ -377,9 +439,10 @@ impl Parser {
             } else {
                 None
             };
-            (Some(table_name), alias)
+            let index_hints = self.parse_index_hints()?;
+            (Some(table_name), alias, index_hints)
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         let mut joins = Vec::new();
@@ -539,6 +602,7 @@ impl Parser {
             columns,
             table_name,
             table_alias,
+            index_hints,
             joins,
             where_clause,
             group_by,
@@ -650,6 +714,10 @@ impl Parser {
             Some(Token::StringLit(s)) => {
                 self.advance();
                 Ok(Expr::StringLiteral(s))
+            }
+            Some(Token::HexLiteral(bytes)) => {
+                self.advance();
+                Ok(Expr::BlobLiteral(bytes))
             }
             Some(Token::Null) => {
                 self.advance();

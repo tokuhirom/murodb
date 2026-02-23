@@ -1,5 +1,18 @@
 use crate::types::DataType;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexHintType {
+    Force,
+    Use,
+    Ignore,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexHint {
+    pub hint_type: IndexHintType,
+    pub index_names: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     CreateTable(CreateTable),
@@ -24,6 +37,7 @@ pub enum Statement {
     ShowCheckpointStats,
     ShowDatabaseStats,
     AnalyzeTable(String),
+    AlterDatabaseRekey { password: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +167,7 @@ pub struct Select {
     pub columns: Vec<SelectColumn>,
     pub table_name: Option<String>,
     pub table_alias: Option<String>,
+    pub index_hints: Vec<IndexHint>,
     pub joins: Vec<JoinClause>,
     pub where_clause: Option<Expr>,
     pub group_by: Option<Vec<Expr>>,
@@ -177,6 +192,7 @@ pub struct OrderByItem {
 #[derive(Debug, Clone)]
 pub struct Update {
     pub table_name: String,
+    pub index_hints: Vec<IndexHint>,
     pub assignments: Vec<(String, Expr)>,
     pub where_clause: Option<Expr>,
 }
@@ -184,6 +200,7 @@ pub struct Update {
 #[derive(Debug, Clone)]
 pub struct Delete {
     pub table_name: String,
+    pub index_hints: Vec<IndexHint>,
     pub where_clause: Option<Expr>,
 }
 

@@ -651,6 +651,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::StringLiteral(s))
             }
+            Some(Token::HexLiteral(bytes)) => {
+                self.advance();
+                Ok(Expr::BlobLiteral(bytes))
+            }
             Some(Token::Null) => {
                 self.advance();
                 Ok(Expr::Null)

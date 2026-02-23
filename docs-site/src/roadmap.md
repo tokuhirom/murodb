@@ -8,6 +8,7 @@
 - [x] CREATE FULLTEXT INDEX (bigram, BM25, NATURAL/BOOLEAN mode, snippet)
 - [x] MySQL-compatible integer types (TINYINT, SMALLINT, INT, BIGINT)
 - [x] VARCHAR(n), VARBINARY(n), TEXT with size validation
+- [x] Hex literal (`X'...'`) for VARBINARY data
 - [x] WHERE with comparison operators (=, !=, <, >, <=, >=)
 - [x] AND, OR logical operators
 - [x] ORDER BY (ASC/DESC, multi-column), LIMIT

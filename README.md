@@ -90,7 +90,7 @@ Internals deep dive:
 
 ## Limitations
 
-- A single row must fit within one 4,096-byte page (~4,048 bytes of user data). Row overflow is not supported.
+- Rows with values exceeding ~4,073 bytes automatically use overflow pages. Keys must fit inline (max ~4,071 bytes).
 - See [Limits Reference](https://tokuhirom.github.io/murodb/user-guide/limits.html) for full details on data type ranges, column counts, and other limits.
 
 ## Repository Layout

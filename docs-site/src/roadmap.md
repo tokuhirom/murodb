@@ -108,6 +108,7 @@ MySQL-compatible scalar functions.
     - Covered by unit/integration tests (`cargo test` green as of 2026-02-22).
     - Added WAL recovery integration tests for overflow chains (torn WAL tail and post-sync partial-write replay paths).
     - Benchmarked on 2026-02-22 (`murodb_bench`, commit `829ad18145c2`) with no severe small-record regression signal.
+    - Implemented B-tree value overflow pages (2026-02-23): large row values (>~4073 bytes) now spill to overflow page chains transparently. Format version bumped to 5 (backward-compatible with v4).
   - Done when:
     - Overflow chain format is versioned and crash-safe.
     - WAL/recovery covers partial-write and torn-tail scenarios for overflow chains.

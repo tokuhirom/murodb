@@ -15,7 +15,7 @@ use crate::wal::record::crc32;
 /// Plaintext file header size (written before any encrypted pages).
 /// Layout:
 ///   0..8    Magic "MURODB01"
-///   8..12   Format version (u32 LE) — currently 4
+///   8..12   Format version (u32 LE) — currently 5
 ///   12..28  Salt (16 bytes, for Argon2 KDF)
 ///   28..36  Catalog root page ID (u64 LE)
 ///   36..44  Page count (u64 LE)
@@ -26,7 +26,9 @@ use crate::wal::record::crc32;
 ///   72..76  Header CRC32 (u32 LE, over bytes 0..72)
 const PLAINTEXT_HEADER_SIZE: u64 = 76;
 const MAGIC: &[u8; 8] = b"MURODB01";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
+/// Previous format version that is read-compatible (no overflow cells in v4 databases).
+const FORMAT_VERSION_COMPAT: u32 = 4;
 
 /// Default LRU cache capacity.
 const DEFAULT_CACHE_CAPACITY: usize = 256;
@@ -283,7 +285,7 @@ impl Pager {
         }
 
         let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        if version != FORMAT_VERSION {
+        if version != FORMAT_VERSION && version != FORMAT_VERSION_COMPAT {
             return Err(MuroError::Wal(format!(
                 "unsupported database format version {}",
                 version

@@ -68,6 +68,22 @@ CREATE TABLE t (
   b INT,
   UNIQUE (a, b)
 );
+
+-- FOREIGN KEY (default: RESTRICT)
+CREATE TABLE children (
+  id BIGINT PRIMARY KEY,
+  parent_id BIGINT,
+  FOREIGN KEY (parent_id) REFERENCES parents(id)
+);
+
+-- FOREIGN KEY with actions
+CREATE TABLE child_actions (
+  id BIGINT PRIMARY KEY,
+  parent_id BIGINT,
+  FOREIGN KEY (parent_id) REFERENCES parents(id)
+    ON DELETE CASCADE
+    ON UPDATE SET NULL
+);
 ```
 
 ### CREATE INDEX
@@ -120,6 +136,10 @@ ALTER TABLE t MODIFY name TEXT;
 
 -- Rename and optionally change a column (CHANGE COLUMN)
 ALTER TABLE t CHANGE COLUMN name username VARCHAR;
+
+-- Add / drop FOREIGN KEY
+ALTER TABLE child ADD FOREIGN KEY (parent_id) REFERENCES parent(id);
+ALTER TABLE child DROP FOREIGN KEY (parent_id);
 ```
 
 **Performance notes:**
@@ -135,11 +155,15 @@ ALTER TABLE t CHANGE COLUMN name username VARCHAR;
 - `MODIFY COLUMN` / `CHANGE COLUMN` with a type change rewrites all rows and coerces values; conversion failures abort the statement.
 - `CHANGE COLUMN` updates index metadata to the new column name when indexes reference the old name.
 - `MODIFY COLUMN` / `CHANGE COLUMN` reconcile single-column `UNIQUE`: adding `UNIQUE` may create an index; removing `UNIQUE` drops the corresponding auto unique index.
+- `ADD FOREIGN KEY` validates existing rows; if orphan rows exist, it fails.
+- FK actions support `RESTRICT`, `CASCADE`, and `SET NULL` for both `ON DELETE` and `ON UPDATE`.
 
 **Limitations:**
 - Cannot add a PRIMARY KEY column via ALTER TABLE.
 - Cannot drop a PRIMARY KEY column.
 - Cannot drop a column that has an index on it (drop the index first).
+- Cannot drop a table that is referenced by a foreign key.
+- `DROP FOREIGN KEY` is specified by child column list: `DROP FOREIGN KEY (col1, col2)`.
 
 ### RENAME TABLE
 

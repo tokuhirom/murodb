@@ -10,7 +10,7 @@ use crate::error::{MuroError, Result};
 use crate::fts::index::{FtsIndex, FtsPendingOp};
 use crate::fts::query::{query_boolean, query_natural_with_config, FtsQueryConfig, FtsResult};
 use crate::fts::snippet::fts_snippet;
-use crate::schema::catalog::{SystemCatalog, TableDef};
+use crate::schema::catalog::{ForeignKeyDef, SystemCatalog, TableDef};
 use crate::schema::column::{ColumnDef, DefaultValue};
 use crate::schema::index::{IndexDef, IndexType};
 use crate::sql::ast::*;
@@ -31,6 +31,7 @@ mod aggregation;
 mod alter;
 mod codec;
 mod ddl;
+mod foreign_key;
 mod fts;
 mod indexing;
 mod insert;
@@ -48,6 +49,10 @@ use aggregation::{cmp_values, execute_aggregation, execute_aggregation_join, has
 use alter::*;
 use codec::default_value_for_column;
 use ddl::*;
+use foreign_key::{
+    enforce_child_foreign_keys, enforce_parent_restrict_on_delete,
+    enforce_parent_restrict_on_update,
+};
 use fts::{
     build_fts_eval_context, execute_fts_scan_rows, free_btree_pages, fts_allocate_doc_id,
     fts_delete_doc_mapping, fts_get_doc_id, fts_put_doc_mapping, fts_set_next_doc_id,
@@ -58,7 +63,7 @@ use indexing::{
     check_unique_index_constraints, check_unique_index_constraints_excluding,
     delete_from_secondary_indexes, encode_index_key_from_row, encode_pk_key, eval_index_seek_key,
     eval_pk_seek_key, find_unique_index_conflict, index_seek_pk_keys, index_seek_pk_keys_range,
-    insert_into_secondary_indexes, persist_indexes, replace_delete_unique_conflicts,
+    insert_into_secondary_indexes, persist_indexes,
 };
 use insert::*;
 use mutation::*;
@@ -833,5 +838,1076 @@ mod tests {
             &mut catalog,
         );
         assert!(invalid_timestamp.is_err());
+    }
+
+    #[test]
+    fn test_foreign_key_insert_and_delete_restrict() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE parents (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE children (id BIGINT PRIMARY KEY, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES parents(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO parents VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "INSERT INTO children VALUES (10, 1)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let missing_parent = execute(
+            "INSERT INTO children VALUES (11, 999)",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(missing_parent.is_err());
+
+        let delete_parent = execute("DELETE FROM parents WHERE id = 1", &mut pager, &mut catalog);
+        assert!(delete_parent.is_err());
+    }
+
+    #[test]
+    fn test_foreign_key_composite_and_nullable() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE parents (a BIGINT, b BIGINT, PRIMARY KEY (a, b))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE children (id BIGINT PRIMARY KEY, a BIGINT, b BIGINT, FOREIGN KEY (a, b) REFERENCES parents(a, b))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute(
+            "INSERT INTO parents VALUES (1, 2)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO children VALUES (1, 1, 2)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO children VALUES (2, NULL, 2)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let bad = execute(
+            "INSERT INTO children VALUES (3, 1, 9)",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn test_show_create_and_describe_include_foreign_key() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let show = execute("SHOW CREATE TABLE c", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = show {
+            let ddl = match rows[0].get("Create Table") {
+                Some(Value::Varchar(s)) => s,
+                _ => panic!("expected Create Table string"),
+            };
+            assert!(ddl.contains("FOREIGN KEY (p_id) REFERENCES p(id)"));
+        } else {
+            panic!("expected rows");
+        }
+
+        let desc = execute("DESCRIBE c", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = desc {
+            assert!(rows
+                .iter()
+                .any(|r| { matches!(r.get("Key"), Some(Value::Varchar(k)) if k == "FK") }));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_describe_reports_foreign_key_actions() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE CASCADE ON UPDATE SET NULL)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let desc = execute("DESCRIBE c", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = desc {
+            let fk_row = rows
+                .iter()
+                .find(|r| matches!(r.get("Key"), Some(Value::Varchar(k)) if k == "FK"))
+                .expect("expected FK row");
+            assert_eq!(
+                fk_row.get("Extra"),
+                Some(&Value::Varchar(
+                    "ON DELETE CASCADE ON UPDATE SET NULL".to_string()
+                ))
+            );
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_drop_table_referenced_by_foreign_key_is_rejected() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let res = execute("DROP TABLE p", &mut pager, &mut catalog);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_rename_table_updates_foreign_key_references() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("RENAME TABLE p TO p2", &mut pager, &mut catalog).unwrap();
+
+        let show = execute("SHOW CREATE TABLE c", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = show {
+            let ddl = match rows[0].get("Create Table") {
+                Some(Value::Varchar(s)) => s,
+                _ => panic!("expected Create Table string"),
+            };
+            assert!(ddl.contains("REFERENCES p2(id)"));
+        } else {
+            panic!("expected rows");
+        }
+
+        execute("INSERT INTO p2 VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (1, 1)", &mut pager, &mut catalog).unwrap();
+        let err = execute("INSERT INTO c VALUES (2, 999)", &mut pager, &mut catalog);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_foreign_key_on_delete_cascade() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (10, 1)", &mut pager, &mut catalog).unwrap();
+
+        execute("DELETE FROM p WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        let result = execute("SELECT * FROM c", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert!(rows.is_empty());
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_foreign_key_on_delete_set_null() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE SET NULL)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (10, 1)", &mut pager, &mut catalog).unwrap();
+
+        execute("DELETE FROM p WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        let result = execute("SELECT p_id FROM c WHERE id = 10", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = result {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("p_id"), Some(&Value::Null));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_foreign_key_on_update_cascade_and_set_null() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, uk BIGINT UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c1 (id BIGINT PRIMARY KEY, p_uk BIGINT, FOREIGN KEY (p_uk) REFERENCES p(uk) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c2 (id BIGINT PRIMARY KEY, p_uk BIGINT, FOREIGN KEY (p_uk) REFERENCES p(uk) ON UPDATE SET NULL)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO p VALUES (1, 100)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c1 VALUES (10, 100)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c2 VALUES (20, 100)", &mut pager, &mut catalog).unwrap();
+
+        execute(
+            "UPDATE p SET uk = 200 WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let c1 = execute(
+            "SELECT p_uk FROM c1 WHERE id = 10",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = c1 {
+            assert_eq!(rows[0].get("p_uk"), Some(&Value::Integer(200)));
+        } else {
+            panic!("expected rows");
+        }
+
+        let c2 = execute(
+            "SELECT p_uk FROM c2 WHERE id = 20",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = c2 {
+            assert_eq!(rows[0].get("p_uk"), Some(&Value::Null));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_alter_table_add_foreign_key_validates_existing_rows() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO c VALUES (1, 999)", &mut pager, &mut catalog).unwrap();
+        let err = execute(
+            "ALTER TABLE c ADD FOREIGN KEY (p_id) REFERENCES p(id)",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        execute("DELETE FROM c WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO p VALUES (10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (2, 10)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "ALTER TABLE c ADD FOREIGN KEY (p_id) REFERENCES p(id)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_alter_table_drop_foreign_key_removes_constraint() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute(
+            "ALTER TABLE c DROP FOREIGN KEY (p_id)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO c VALUES (1, 999)", &mut pager, &mut catalog).unwrap();
+    }
+
+    #[test]
+    fn test_cascade_delete_honors_grandchild_restrict() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE g (id BIGINT PRIMARY KEY, c_id BIGINT, FOREIGN KEY (c_id) REFERENCES c(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (10, 1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO g VALUES (100, 10)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute("DELETE FROM p WHERE id = 1", &mut pager, &mut catalog);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_cascade_update_validates_other_outgoing_foreign_keys() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p1 (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE p2 (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, a_id BIGINT, FOREIGN KEY (a_id) REFERENCES p1(id) ON UPDATE CASCADE, FOREIGN KEY (a_id) REFERENCES p2(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p1 VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO p2 VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (10, 1)", &mut pager, &mut catalog).unwrap();
+
+        // Updating p1.id to 2 would cascade c.a_id=2, which violates c.a_id -> p2(id).
+        let err = execute(
+            "UPDATE p1 SET id = 2 WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_drop_column_not_used_by_fk_child_side_is_allowed() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (cid BIGINT PRIMARY KEY, id BIGINT, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("ALTER TABLE c DROP COLUMN id", &mut pager, &mut catalog).unwrap();
+    }
+
+    #[test]
+    fn test_self_referencing_delete_ignores_rows_pending_deletion() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES t(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO t VALUES (2, 1)", &mut pager, &mut catalog).unwrap();
+
+        execute("DELETE FROM t", &mut pager, &mut catalog).unwrap();
+        let rows = execute("SELECT * FROM t", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert!(rows.is_empty());
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_cascade_update_rekeys_child_when_fk_is_part_of_pk() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, u BIGINT UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (u BIGINT, seq BIGINT, PRIMARY KEY (u, seq), FOREIGN KEY (u) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1, 100)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (100, 1)", &mut pager, &mut catalog).unwrap();
+
+        execute(
+            "UPDATE p SET u = 200 WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        // If child PK re-keying is correct, old PK can be reused.
+        execute("INSERT INTO p VALUES (2, 100)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (100, 1)", &mut pager, &mut catalog).unwrap();
+        let rows = execute(
+            "SELECT * FROM c WHERE u = 200 AND seq = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_parent_unique_failure_does_not_mutate_child_before_cascade() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, u BIGINT UNIQUE, u2 BIGINT UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, pu BIGINT, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO p VALUES (1, 10, 100)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO p VALUES (2, 20, 200)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO c VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute("UPDATE p SET u = 20 WHERE id = 1", &mut pager, &mut catalog);
+        assert!(err.is_err());
+
+        let rows = execute("SELECT pu FROM c WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows[0].get("pu"), Some(&Value::Integer(10)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_delete_cascade_cycle_does_not_recurse_forever() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE a (id BIGINT PRIMARY KEY, b_id BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE b (id BIGINT PRIMARY KEY, a_id BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "ALTER TABLE a ADD FOREIGN KEY (b_id) REFERENCES b(id) ON DELETE CASCADE",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "ALTER TABLE b ADD FOREIGN KEY (a_id) REFERENCES a(id) ON DELETE CASCADE",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO a VALUES (1, NULL)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO b VALUES (1, 1)", &mut pager, &mut catalog).unwrap();
+        execute(
+            "UPDATE a SET b_id = 1 WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("DELETE FROM a WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        let a_rows = execute("SELECT * FROM a", &mut pager, &mut catalog).unwrap();
+        let b_rows = execute("SELECT * FROM b", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = a_rows {
+            assert!(rows.is_empty());
+        } else {
+            panic!("expected rows");
+        }
+        if let ExecResult::Rows(rows) = b_rows {
+            assert!(rows.is_empty());
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_cascade_update_propagates_parent_side_fk_checks() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, u BIGINT UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, pu BIGINT UNIQUE, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE g (id BIGINT PRIMARY KEY, cu BIGINT, FOREIGN KEY (cu) REFERENCES c(pu))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        execute("INSERT INTO p VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO g VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+
+        // Updating p.u cascades c.pu. Since g.cu references c(pu) with RESTRICT,
+        // this must fail unless g is also handled.
+        let err = execute("UPDATE p SET u = 20 WHERE id = 1", &mut pager, &mut catalog);
+        assert!(err.is_err());
+
+        let c_rows = execute("SELECT pu FROM c WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = c_rows {
+            assert_eq!(rows[0].get("pu"), Some(&Value::Integer(10)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_parent_update_failing_outgoing_fk_does_not_apply_incoming_cascade() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE gp (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, g_id BIGINT, u BIGINT UNIQUE, FOREIGN KEY (g_id) REFERENCES gp(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, pu BIGINT, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO gp VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO p VALUES (1, 1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute(
+            "UPDATE p SET u = 20, g_id = 999 WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        let rows = execute("SELECT pu FROM c WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows[0].get("pu"), Some(&Value::Integer(10)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_on_duplicate_update_failing_outgoing_fk_does_not_apply_incoming_cascade() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE gp (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, g_id BIGINT, u BIGINT UNIQUE, FOREIGN KEY (g_id) REFERENCES gp(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, pu BIGINT, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO gp VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO p VALUES (1, 1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute(
+            "INSERT INTO p VALUES (1, 999, 10) ON DUPLICATE KEY UPDATE g_id = 999, u = 20",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        let rows = execute("SELECT pu FROM c WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows[0].get("pu"), Some(&Value::Integer(10)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_replace_checks_foreign_keys_for_all_conflicting_rows() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, email VARCHAR UNIQUE, uname VARCHAR UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, uname VARCHAR, FOREIGN KEY (uname) REFERENCES p(uname))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO p VALUES (1, 'a@example.com', 'u1')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO p VALUES (2, 'b@example.com', 'u2')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO c VALUES (1, 'u2')", &mut pager, &mut catalog).unwrap();
+
+        // Conflicts with id=1 by email and id=2 by uname. id=2 is referenced.
+        let err = execute(
+            "REPLACE INTO p VALUES (3, 'a@example.com', 'u2')",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        let p2 = execute("SELECT * FROM p WHERE id = 2", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = p2 {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_drop_foreign_key_ambiguous_columns_is_rejected() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p1 (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE p2 (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, x BIGINT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "ALTER TABLE c ADD FOREIGN KEY (x) REFERENCES p1(id)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "ALTER TABLE c ADD FOREIGN KEY (x) REFERENCES p2(id)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let err = execute(
+            "ALTER TABLE c DROP FOREIGN KEY (x)",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_drop_column_referenced_by_self_fk_parent_side_is_rejected() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, u BIGINT UNIQUE, pu BIGINT, FOREIGN KEY (pu) REFERENCES t(u))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let err = execute("ALTER TABLE t DROP COLUMN u", &mut pager, &mut catalog);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_delete_mixed_actions_has_no_partial_side_effect_on_restrict_failure() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_cas (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_res (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE RESTRICT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_cas VALUES (1, 1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_res VALUES (1, 1)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute("DELETE FROM p WHERE id = 1", &mut pager, &mut catalog);
+        assert!(err.is_err());
+
+        // CASCADE side table must remain unchanged on failure.
+        let rows = execute("SELECT * FROM c_cas", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_delete_multi_parent_rows_has_no_partial_side_effect_on_restrict_failure() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_cas (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_res (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE RESTRICT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO p VALUES (2)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_cas VALUES (1, 1)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_res VALUES (1, 2)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute(
+            "DELETE FROM p WHERE id = 1 OR id = 2",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        let cas_rows = execute("SELECT * FROM c_cas", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = cas_rows {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected rows");
+        }
+
+        let p_rows = execute("SELECT * FROM p", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = p_rows {
+            assert_eq!(rows.len(), 2);
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_update_mixed_actions_has_no_partial_side_effect_on_restrict_failure() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY, u BIGINT UNIQUE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_cas (id BIGINT PRIMARY KEY, pu BIGINT, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE CASCADE)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c_res (id BIGINT PRIMARY KEY, pu BIGINT, FOREIGN KEY (pu) REFERENCES p(u) ON UPDATE RESTRICT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO p VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_cas VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+        execute("INSERT INTO c_res VALUES (1, 10)", &mut pager, &mut catalog).unwrap();
+
+        let err = execute("UPDATE p SET u = 20 WHERE id = 1", &mut pager, &mut catalog);
+        assert!(err.is_err());
+
+        let rows = execute(
+            "SELECT pu FROM c_cas WHERE id = 1",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = rows {
+            assert_eq!(rows[0].get("pu"), Some(&Value::Integer(10)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_modify_column_rejected_when_fk_depends_on_it() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (id BIGINT PRIMARY KEY, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let err = execute(
+            "ALTER TABLE c MODIFY COLUMN p_id INT",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_change_column_rejected_when_self_fk_parent_depends_on_it() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, u BIGINT UNIQUE, pu BIGINT, FOREIGN KEY (pu) REFERENCES t(u))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let err = execute(
+            "ALTER TABLE t CHANGE COLUMN u u2 BIGINT",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_replace_rechecks_fk_after_conflict_deletes() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, code VARCHAR UNIQUE, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES t(id) ON DELETE SET NULL)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO t VALUES (1, 'p', NULL)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute("INSERT INTO t VALUES (2, 'c', 1)", &mut pager, &mut catalog).unwrap();
+
+        // Conflicts with code='p' and deletes parent row id=1 first.
+        // Without post-delete recheck this could insert an orphan parent_id=1.
+        let err = execute(
+            "REPLACE INTO t VALUES (3, 'p', 1)",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(err.is_err());
+
+        let p = execute("SELECT * FROM t WHERE id = 1", &mut pager, &mut catalog).unwrap();
+        if let ExecResult::Rows(rows) = p {
+            assert_eq!(rows.len(), 1);
+        } else {
+            panic!("expected rows");
+        }
+
+        let c = execute(
+            "SELECT parent_id FROM t WHERE id = 2",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        if let ExecResult::Rows(rows) = c {
+            assert_eq!(rows[0].get("parent_id"), Some(&Value::Integer(1)));
+        } else {
+            panic!("expected rows");
+        }
+    }
+
+    #[test]
+    fn test_modify_unrelated_child_column_allowed_even_if_name_matches_parent_ref_col() {
+        let (mut pager, mut catalog, _dir) = setup();
+        execute(
+            "CREATE TABLE p (id BIGINT PRIMARY KEY)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE TABLE c (cid BIGINT PRIMARY KEY, id INT, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES p(id))",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+
+        let ok = execute(
+            "ALTER TABLE c MODIFY COLUMN id BIGINT",
+            &mut pager,
+            &mut catalog,
+        );
+        assert!(ok.is_ok());
     }
 }

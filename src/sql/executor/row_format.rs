@@ -6,6 +6,24 @@ pub(super) fn exec_rename_table(
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
     catalog.rename_table(pager, &rt.old_name, &rt.new_name)?;
+
+    // Rewrite all FOREIGN KEY references that point to the old table name.
+    for table_name in catalog.list_tables(pager)? {
+        let Some(mut table_def) = catalog.get_table(pager, &table_name)? else {
+            continue;
+        };
+        let mut changed = false;
+        for fk in &mut table_def.foreign_keys {
+            if fk.ref_table == rt.old_name {
+                fk.ref_table = rt.new_name.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            catalog.update_table(pager, &table_def)?;
+        }
+    }
+
     Ok(ExecResult::Ok)
 }
 

@@ -186,6 +186,15 @@ pub(super) fn exec_update(
 
         // Check unique constraints on new values
         check_unique_index_constraints(&table_def, &indexes, &new_values, pager)?;
+        enforce_child_foreign_keys(&table_def, &new_values, pager, catalog)?;
+        enforce_parent_restrict_on_update(
+            &table_def,
+            &pk_key,
+            &old_values,
+            &new_values,
+            pager,
+            catalog,
+        )?;
 
         // Update secondary indexes: remove old entries, insert new entries
         delete_from_secondary_indexes(&table_def, &mut indexes, &old_values, &pk_key, pager)?;
@@ -350,6 +359,17 @@ pub(super) fn exec_delete(
 
     let mut data_btree = BTree::open(table_def.data_btree_root);
     let mut count = 0u64;
+
+    let deleting_rows: Vec<Vec<Value>> =
+        to_delete.iter().map(|(_, values)| values.clone()).collect();
+    let deleting_pk_keys: Vec<Vec<u8>> = to_delete.iter().map(|(pk, _)| pk.clone()).collect();
+    enforce_parent_restrict_on_delete(
+        &table_def,
+        &deleting_rows,
+        &deleting_pk_keys,
+        pager,
+        catalog,
+    )?;
 
     for (pk_key, values) in &to_delete {
         delete_from_secondary_indexes(&table_def, &mut indexes, values, pk_key, pager)?;

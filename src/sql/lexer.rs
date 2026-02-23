@@ -92,6 +92,8 @@ pub enum Token {
     All,
     Duplicate,
     Key,
+    Foreign,
+    References,
     Replace,
     Explain,
     Analyze,
@@ -101,6 +103,8 @@ pub enum Token {
     Force,
     Use,
     Ignore,
+    Cascade,
+    Restrict,
     PrimaryKey,    // "PRIMARY KEY" as a combined token
     TinyIntType,   // "TINYINT"
     SmallIntType,  // "SMALLINT"
@@ -440,6 +444,8 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "ALL" => Token::All,
         "DUPLICATE" => Token::Duplicate,
         "KEY" => Token::Key,
+        "FOREIGN" => Token::Foreign,
+        "REFERENCES" => Token::References,
         "REPLACE" => Token::Replace,
         "EXPLAIN" => Token::Explain,
         "ANALYZE" => Token::Analyze,
@@ -449,6 +455,8 @@ fn lex_keyword_or_ident(input: &str) -> IResult<&str, Token> {
         "FORCE" => Token::Force,
         "USE" => Token::Use,
         "IGNORE" => Token::Ignore,
+        "CASCADE" => Token::Cascade,
+        "RESTRICT" => Token::Restrict,
         "PRIMARY" => {
             // Check if next tokens form "PRIMARY KEY"
             let rest = remaining.trim_start();
@@ -592,5 +600,16 @@ mod tests {
     fn test_tokenize_bind_parameter() {
         let tokens = tokenize("SELECT * FROM t WHERE id = ?").unwrap();
         assert!(tokens.contains(&Token::Question));
+    }
+
+    #[test]
+    fn test_tokenize_foreign_key() {
+        let tokens = tokenize(
+            "CREATE TABLE child (parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES parent(id))",
+        )
+        .unwrap();
+        assert!(tokens.contains(&Token::Foreign));
+        assert!(tokens.contains(&Token::Key));
+        assert!(tokens.contains(&Token::References));
     }
 }

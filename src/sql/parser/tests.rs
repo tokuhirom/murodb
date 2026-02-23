@@ -29,6 +29,58 @@ fn test_parse_create_table_if_not_exists() {
 }
 
 #[test]
+fn test_parse_create_table_with_foreign_key() {
+    let stmt = parse_sql(
+        "CREATE TABLE child (id BIGINT PRIMARY KEY, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES parent(id))",
+    )
+    .unwrap();
+    if let Statement::CreateTable(ct) = stmt {
+        assert_eq!(ct.constraints.len(), 1);
+        match &ct.constraints[0] {
+            TableConstraint::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+                on_delete,
+                on_update,
+            } => {
+                assert_eq!(columns, &vec!["parent_id".to_string()]);
+                assert_eq!(ref_table, "parent");
+                assert_eq!(ref_columns, &vec!["id".to_string()]);
+                assert_eq!(*on_delete, ForeignKeyAction::Restrict);
+                assert_eq!(*on_update, ForeignKeyAction::Restrict);
+            }
+            _ => panic!("Expected ForeignKey constraint"),
+        }
+    } else {
+        panic!("Expected CreateTable");
+    }
+}
+
+#[test]
+fn test_parse_create_table_with_foreign_key_actions() {
+    let stmt = parse_sql(
+        "CREATE TABLE child (id BIGINT PRIMARY KEY, parent_id BIGINT, FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE ON UPDATE SET NULL)",
+    )
+    .unwrap();
+    if let Statement::CreateTable(ct) = stmt {
+        match &ct.constraints[0] {
+            TableConstraint::ForeignKey {
+                on_delete,
+                on_update,
+                ..
+            } => {
+                assert_eq!(*on_delete, ForeignKeyAction::Cascade);
+                assert_eq!(*on_update, ForeignKeyAction::SetNull);
+            }
+            _ => panic!("Expected ForeignKey constraint"),
+        }
+    } else {
+        panic!("Expected CreateTable");
+    }
+}
+
+#[test]
 fn test_parse_insert() {
     let stmt = parse_sql("INSERT INTO t (id, name) VALUES (1, 'hello')").unwrap();
     if let Statement::Insert(ins) = stmt {
@@ -254,6 +306,41 @@ fn test_parse_bind_parameter() {
         assert!(matches!(right.as_ref(), Expr::BindParam));
     } else {
         panic!("Expected Select");
+    }
+}
+
+#[test]
+fn test_parse_alter_table_add_foreign_key() {
+    let stmt = parse_sql(
+        "ALTER TABLE child ADD FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE ON UPDATE SET NULL",
+    )
+    .unwrap();
+    let Statement::AlterTable(at) = stmt else {
+        panic!("Expected AlterTable");
+    };
+    match at.operation {
+        AlterTableOp::AddForeignKey(fk) => {
+            assert_eq!(fk.columns, vec!["parent_id".to_string()]);
+            assert_eq!(fk.ref_table, "parent");
+            assert_eq!(fk.ref_columns, vec!["id".to_string()]);
+            assert_eq!(fk.on_delete, ForeignKeyAction::Cascade);
+            assert_eq!(fk.on_update, ForeignKeyAction::SetNull);
+        }
+        _ => panic!("Expected AddForeignKey"),
+    }
+}
+
+#[test]
+fn test_parse_alter_table_drop_foreign_key() {
+    let stmt = parse_sql("ALTER TABLE child DROP FOREIGN KEY (parent_id)").unwrap();
+    let Statement::AlterTable(at) = stmt else {
+        panic!("Expected AlterTable");
+    };
+    match at.operation {
+        AlterTableOp::DropForeignKey(cols) => {
+            assert_eq!(cols, vec!["parent_id".to_string()]);
+        }
+        _ => panic!("Expected DropForeignKey"),
     }
 }
 

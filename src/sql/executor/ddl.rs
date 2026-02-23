@@ -18,6 +18,7 @@ pub(super) fn exec_create_table(
     let has_col_pk = ct.columns.iter().any(|c| c.is_primary_key);
     let mut table_level_pk: Option<Vec<String>> = None;
     let mut table_level_uniques: Vec<(String, Vec<String>)> = Vec::new();
+    let mut table_level_fks: Vec<ForeignKeyDef> = Vec::new();
 
     for constraint in &ct.constraints {
         match constraint {
@@ -57,8 +58,50 @@ pub(super) fn exec_create_table(
                 }
                 table_level_uniques.push((idx_name, cols.clone()));
             }
+            TableConstraint::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+                on_delete,
+                on_update,
+            } => {
+                if columns.is_empty() || ref_columns.is_empty() {
+                    return Err(MuroError::Schema(
+                        "FOREIGN KEY columns cannot be empty".into(),
+                    ));
+                }
+                if columns.len() != ref_columns.len() {
+                    return Err(MuroError::Schema(
+                        "FOREIGN KEY column count must match referenced column count".into(),
+                    ));
+                }
+                for col_name in columns {
+                    if !col_names.contains(&col_name.as_str()) {
+                        return Err(MuroError::Schema(format!(
+                            "Column '{}' not found for FOREIGN KEY constraint",
+                            col_name
+                        )));
+                    }
+                }
+                table_level_fks.push(ForeignKeyDef {
+                    columns: columns.clone(),
+                    ref_table: ref_table.clone(),
+                    ref_columns: ref_columns.clone(),
+                    on_delete: map_fk_action(*on_delete),
+                    on_update: map_fk_action(*on_update),
+                });
+            }
         }
     }
+
+    validate_foreign_keys(
+        ct,
+        catalog,
+        pager,
+        &table_level_pk,
+        &table_level_uniques,
+        &table_level_fks,
+    )?;
 
     // Collect column-level UNIQUE index names and detect duplicates with table-level
     let mut all_index_names: Vec<String> = table_level_uniques
@@ -130,6 +173,11 @@ pub(super) fn exec_create_table(
             }
         }
         table_def.pk_columns = pk_cols;
+        table_def.foreign_keys = table_level_fks.clone();
+        catalog.update_table(pager, &table_def)?;
+    } else if !table_level_fks.is_empty() {
+        let mut table_def = catalog.get_table(pager, &ct.table_name)?.unwrap();
+        table_def.foreign_keys = table_level_fks.clone();
         catalog.update_table(pager, &table_def)?;
     }
 
@@ -178,6 +226,124 @@ pub(super) fn exec_create_table(
     }
 
     Ok(ExecResult::Ok)
+}
+
+fn map_fk_action(
+    action: crate::sql::ast::ForeignKeyAction,
+) -> crate::schema::catalog::ForeignKeyAction {
+    match action {
+        crate::sql::ast::ForeignKeyAction::Restrict => {
+            crate::schema::catalog::ForeignKeyAction::Restrict
+        }
+        crate::sql::ast::ForeignKeyAction::Cascade => {
+            crate::schema::catalog::ForeignKeyAction::Cascade
+        }
+        crate::sql::ast::ForeignKeyAction::SetNull => {
+            crate::schema::catalog::ForeignKeyAction::SetNull
+        }
+    }
+}
+
+fn validate_foreign_keys(
+    ct: &CreateTable,
+    catalog: &mut SystemCatalog,
+    pager: &mut impl PageStore,
+    table_level_pk: &Option<Vec<String>>,
+    table_level_uniques: &[(String, Vec<String>)],
+    fks: &[ForeignKeyDef],
+) -> Result<()> {
+    for fk in fks {
+        let mut child_types = Vec::with_capacity(fk.columns.len());
+        for col in &fk.columns {
+            let Some(cs) = ct.columns.iter().find(|c| c.name == *col) else {
+                return Err(MuroError::Schema(format!(
+                    "Column '{}' not found for FOREIGN KEY constraint",
+                    col
+                )));
+            };
+            child_types.push(cs.data_type);
+        }
+
+        let (parent_types, unique_sets) = if fk.ref_table == ct.table_name {
+            let mut unique_sets = Vec::new();
+            if let Some(cols) = table_level_pk {
+                unique_sets.push(cols.clone());
+            } else {
+                let pk_cols: Vec<String> = ct
+                    .columns
+                    .iter()
+                    .filter(|c| c.is_primary_key)
+                    .map(|c| c.name.clone())
+                    .collect();
+                if !pk_cols.is_empty() {
+                    unique_sets.push(pk_cols);
+                }
+            }
+            for (_name, cols) in table_level_uniques {
+                unique_sets.push(cols.clone());
+            }
+            for cs in &ct.columns {
+                if cs.is_unique {
+                    unique_sets.push(vec![cs.name.clone()]);
+                }
+            }
+
+            let mut parent_types = Vec::with_capacity(fk.ref_columns.len());
+            for col in &fk.ref_columns {
+                let Some(cs) = ct.columns.iter().find(|c| c.name == *col) else {
+                    return Err(MuroError::Schema(format!(
+                        "Referenced column '{}.{}' not found",
+                        fk.ref_table, col
+                    )));
+                };
+                parent_types.push(cs.data_type);
+            }
+            (parent_types, unique_sets)
+        } else {
+            let parent_def = catalog.get_table(pager, &fk.ref_table)?.ok_or_else(|| {
+                MuroError::Schema(format!(
+                    "Referenced table '{}' not found for FOREIGN KEY",
+                    fk.ref_table
+                ))
+            })?;
+            let mut parent_types = Vec::with_capacity(fk.ref_columns.len());
+            for col in &fk.ref_columns {
+                let Some(idx) = parent_def.column_index(col) else {
+                    return Err(MuroError::Schema(format!(
+                        "Referenced column '{}.{}' not found",
+                        fk.ref_table, col
+                    )));
+                };
+                parent_types.push(parent_def.columns[idx].data_type);
+            }
+            let mut unique_sets = Vec::new();
+            unique_sets.push(parent_def.pk_columns.clone());
+            for idx in catalog.get_indexes_for_table(pager, &fk.ref_table)? {
+                if idx.is_unique {
+                    unique_sets.push(idx.column_names.clone());
+                }
+            }
+            (parent_types, unique_sets)
+        };
+
+        if !unique_sets.iter().any(|cols| cols == &fk.ref_columns) {
+            return Err(MuroError::Schema(format!(
+                "Referenced columns '{}.({})' must be PRIMARY KEY or UNIQUE",
+                fk.ref_table,
+                fk.ref_columns.join(", ")
+            )));
+        }
+
+        for (child_ty, parent_ty) in child_types.iter().zip(parent_types.iter()) {
+            if child_ty != parent_ty {
+                return Err(MuroError::Schema(format!(
+                    "FOREIGN KEY type mismatch: child '{}' and parent '{}' must have same type",
+                    child_ty, parent_ty
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convert an AST expression (from DEFAULT clause) to a DefaultValue for storage.
@@ -634,6 +800,27 @@ pub(super) fn exec_drop_table(
             )));
         }
     };
+
+    for table_name in catalog.list_tables(pager)? {
+        if table_name == dt.table_name {
+            continue;
+        }
+        let Some(child) = catalog.get_table(pager, &table_name)? else {
+            continue;
+        };
+        if let Some(fk) = child
+            .foreign_keys
+            .iter()
+            .find(|fk| fk.ref_table == dt.table_name)
+        {
+            return Err(MuroError::Schema(format!(
+                "Cannot drop table '{}': referenced by '{}' FOREIGN KEY ({})",
+                dt.table_name,
+                child.name,
+                fk.columns.join(", ")
+            )));
+        }
+    }
 
     // Free the data B-tree pages
     let data_btree = BTree::open(table_def.data_btree_root);

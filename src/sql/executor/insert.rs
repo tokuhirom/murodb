@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 pub(super) fn exec_insert(
     ins: &Insert,
@@ -97,6 +98,8 @@ pub(super) fn exec_insert(
             }
         }
 
+        enforce_child_foreign_keys(&table_def, &values, pager, catalog)?;
+
         let pk_key = encode_pk_key(&table_def, &values);
 
         // Detect conflicts: PK first, then unique indexes
@@ -119,21 +122,44 @@ pub(super) fn exec_insert(
         if has_conflict {
             let conflict_pk = conflict_pk_key.unwrap();
             if ins.is_replace {
-                // REPLACE INTO: delete the conflicting row, then insert new one
-                let existing_data = data_btree.search(pager, &conflict_pk)?.unwrap();
-                let existing_values = deserialize_row_versioned(
-                    &existing_data,
-                    &table_def.columns,
-                    table_def.row_format_version,
-                )?;
-                delete_from_secondary_indexes(
+                // REPLACE INTO: pre-collect all conflicting rows (PK + all UNIQUE conflicts),
+                // validate FK effects for all of them, then delete.
+                let conflicts = collect_replace_conflicts(
                     &table_def,
-                    &mut indexes,
-                    &existing_values,
+                    &indexes,
+                    &values,
                     &conflict_pk,
                     pager,
+                    &data_btree,
                 )?;
-                data_btree.delete(pager, &conflict_pk)?;
+                let deleting_rows: Vec<Vec<Value>> =
+                    conflicts.iter().map(|(_, row)| row.clone()).collect();
+                let deleting_keys: Vec<Vec<u8>> =
+                    conflicts.iter().map(|(pk, _)| pk.clone()).collect();
+                validate_replace_child_foreign_keys_after_conflict_deletes(
+                    &table_def,
+                    &values,
+                    &deleting_keys,
+                    pager,
+                    catalog,
+                )?;
+                enforce_parent_restrict_on_delete(
+                    &table_def,
+                    &deleting_rows,
+                    &deleting_keys,
+                    pager,
+                    catalog,
+                )?;
+                for (pk, existing_values) in conflicts {
+                    delete_from_secondary_indexes(
+                        &table_def,
+                        &mut indexes,
+                        &existing_values,
+                        &pk,
+                        pager,
+                    )?;
+                    data_btree.delete(pager, &pk)?;
+                }
                 data_btree = BTree::open(data_btree.root_page_id());
             } else if let Some(ref assignments) = ins.on_duplicate_key_update {
                 // ON DUPLICATE KEY UPDATE: read original, apply updates, write back
@@ -166,6 +192,15 @@ pub(super) fn exec_insert(
                     &updated_values,
                     &conflict_pk,
                     pager,
+                )?;
+                enforce_child_foreign_keys(&table_def, &updated_values, pager, catalog)?;
+                enforce_parent_restrict_on_update(
+                    &table_def,
+                    &conflict_pk,
+                    &original_values,
+                    &updated_values,
+                    pager,
+                    catalog,
                 )?;
 
                 // Delete old secondary index entries using original values
@@ -211,17 +246,7 @@ pub(super) fn exec_insert(
             }
         }
 
-        // For REPLACE: also delete rows conflicting on other unique indexes
-        // (handles case where PK is new but unique index conflicts with a different row)
-        if ins.is_replace {
-            replace_delete_unique_conflicts(
-                &table_def,
-                &mut indexes,
-                &values,
-                pager,
-                &mut data_btree,
-            )?;
-        } else {
+        if !ins.is_replace {
             check_unique_index_constraints(&table_def, &indexes, &values, pager)?;
         }
 
@@ -241,6 +266,114 @@ pub(super) fn exec_insert(
     }
 
     Ok(ExecResult::RowsAffected(rows_inserted))
+}
+
+fn collect_replace_conflicts(
+    table_def: &TableDef,
+    indexes: &[IndexDef],
+    new_values: &[Value],
+    conflict_pk: &[u8],
+    pager: &mut impl PageStore,
+    data_btree: &BTree,
+) -> Result<Vec<(Vec<u8>, Vec<Value>)>> {
+    let mut conflict_keys: HashSet<Vec<u8>> = HashSet::new();
+    conflict_keys.insert(conflict_pk.to_vec());
+    for idx in indexes {
+        if !idx.is_unique {
+            continue;
+        }
+        let col_indices: Vec<usize> = idx
+            .column_names
+            .iter()
+            .filter_map(|cn| table_def.column_index(cn))
+            .collect();
+        if col_indices.len() != idx.column_names.len() {
+            continue;
+        }
+        let is_composite = idx.column_names.len() > 1;
+        let encoded =
+            encode_index_key_from_row(new_values, &col_indices, &table_def.columns, is_composite);
+        if let Some(idx_key) = encoded {
+            let idx_btree = BTree::open(idx.btree_root);
+            if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
+                conflict_keys.insert(existing_pk_key);
+            }
+        }
+    }
+    let mut conflicts = Vec::new();
+    for pk in conflict_keys {
+        if let Some(existing_data) = data_btree.search(pager, &pk)? {
+            let existing_values = deserialize_row_versioned(
+                &existing_data,
+                &table_def.columns,
+                table_def.row_format_version,
+            )?;
+            conflicts.push((pk, existing_values));
+        }
+    }
+    Ok(conflicts)
+}
+
+fn validate_replace_child_foreign_keys_after_conflict_deletes(
+    table_def: &TableDef,
+    row_values: &[Value],
+    deleting_pk_keys: &[Vec<u8>],
+    pager: &mut impl PageStore,
+    _catalog: &mut SystemCatalog,
+) -> Result<()> {
+    if deleting_pk_keys.is_empty() {
+        return Ok(());
+    }
+
+    let deleting_pk_set: HashSet<Vec<u8>> = deleting_pk_keys.iter().cloned().collect();
+    for fk in &table_def.foreign_keys {
+        if fk.ref_table != table_def.name {
+            continue;
+        }
+
+        let mut child_values = Vec::with_capacity(fk.columns.len());
+        for col in &fk.columns {
+            let idx = table_def.column_index(col).ok_or_else(|| {
+                MuroError::Schema(format!("Column '{}.{}' not found", table_def.name, col))
+            })?;
+            child_values.push(row_values[idx].clone());
+        }
+        if child_values.iter().any(Value::is_null) {
+            continue;
+        }
+
+        let data_btree = BTree::open(table_def.data_btree_root);
+        let mut exists = false;
+        data_btree.scan(pager, |_pk, row| {
+            let parent_row =
+                deserialize_row_versioned(row, &table_def.columns, table_def.row_format_version)?;
+            let parent_pk = encode_pk_key(table_def, &parent_row);
+            if deleting_pk_set.contains(&parent_pk) {
+                return Ok(true);
+            }
+
+            for (i, ref_col) in fk.ref_columns.iter().enumerate() {
+                let idx = table_def.column_index(ref_col).ok_or_else(|| {
+                    MuroError::Schema(format!("Column '{}.{}' not found", table_def.name, ref_col))
+                })?;
+                if parent_row[idx] != child_values[i] {
+                    return Ok(true);
+                }
+            }
+            exists = true;
+            Ok(false)
+        })?;
+
+        if !exists {
+            return Err(MuroError::Execution(format!(
+                "FOREIGN KEY constraint fails: ({}) REFERENCES {}({})",
+                fk.columns.join(", "),
+                fk.ref_table,
+                fk.ref_columns.join(", "),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Convert a Value to a literal Expr.

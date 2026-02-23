@@ -60,6 +60,8 @@ pub enum AlterTableOp {
     DropColumn(String),
     ModifyColumn(ColumnSpec),
     ChangeColumn(String, ColumnSpec), // (old_name, new_spec)
+    AddForeignKey(ForeignKeySpec),
+    DropForeignKey(Vec<String>), // child column list
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,29 @@ pub struct RenameTable {
 pub enum TableConstraint {
     PrimaryKey(Vec<String>),
     Unique(Option<String>, Vec<String>), // (optional name, columns)
+    ForeignKey {
+        columns: Vec<String>,
+        ref_table: String,
+        ref_columns: Vec<String>,
+        on_delete: ForeignKeyAction,
+        on_update: ForeignKeyAction,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ForeignKeySpec {
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    Restrict,
+    Cascade,
+    SetNull,
 }
 
 #[derive(Debug, Clone)]

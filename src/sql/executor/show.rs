@@ -44,6 +44,16 @@ pub(super) fn exec_show_create_table(
             table_constraints.push(format!("  UNIQUE ({})", idx.column_names.join(", ")));
         }
     }
+    for fk in &table_def.foreign_keys {
+        table_constraints.push(format!(
+            "  FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {} ON UPDATE {}",
+            fk.columns.join(", "),
+            fk.ref_table,
+            fk.ref_columns.join(", "),
+            fk_action_to_sql(&fk.on_delete),
+            fk_action_to_sql(&fk.on_update),
+        ));
+    }
 
     let total_items = visible_columns.len() + table_constraints.len();
     for (i, col) in visible_columns.iter().enumerate() {
@@ -143,7 +153,47 @@ pub(super) fn exec_describe(
             ],
         });
     }
+    for fk in &table_def.foreign_keys {
+        rows.push(Row {
+            values: vec![
+                (
+                    "Field".to_string(),
+                    Value::Varchar("CONSTRAINT".to_string()),
+                ),
+                (
+                    "Type".to_string(),
+                    Value::Varchar(format!(
+                        "FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {} ON UPDATE {}",
+                        fk.columns.join(", "),
+                        fk.ref_table,
+                        fk.ref_columns.join(", "),
+                        fk_action_to_sql(&fk.on_delete),
+                        fk_action_to_sql(&fk.on_update),
+                    )),
+                ),
+                ("Null".to_string(), Value::Varchar(String::new())),
+                ("Key".to_string(), Value::Varchar("FK".to_string())),
+                ("Default".to_string(), Value::Varchar(String::new())),
+                (
+                    "Extra".to_string(),
+                    Value::Varchar(format!(
+                        "ON DELETE {} ON UPDATE {}",
+                        fk_action_to_sql(&fk.on_delete),
+                        fk_action_to_sql(&fk.on_update),
+                    )),
+                ),
+            ],
+        });
+    }
     Ok(ExecResult::Rows(rows))
+}
+
+fn fk_action_to_sql(action: &crate::schema::catalog::ForeignKeyAction) -> &'static str {
+    match action {
+        crate::schema::catalog::ForeignKeyAction::Restrict => "RESTRICT",
+        crate::schema::catalog::ForeignKeyAction::Cascade => "CASCADE",
+        crate::schema::catalog::ForeignKeyAction::SetNull => "SET NULL",
+    }
 }
 
 // --- Row serialization ---

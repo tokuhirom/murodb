@@ -298,60 +298,6 @@ pub(super) fn check_unique_index_constraints_excluding(
     Ok(())
 }
 
-/// For REPLACE INTO: delete rows that conflict on any unique index.
-/// MySQL's REPLACE deletes ALL conflicting rows (PK + all unique indexes).
-pub(super) fn replace_delete_unique_conflicts(
-    table_def: &TableDef,
-    indexes: &mut [IndexDef],
-    new_values: &[Value],
-    pager: &mut impl PageStore,
-    data_btree: &mut BTree,
-) -> Result<()> {
-    for idx_pos in 0..indexes.len() {
-        let idx = indexes[idx_pos].clone();
-        if idx.is_unique {
-            let col_indices: Vec<usize> = idx
-                .column_names
-                .iter()
-                .filter_map(|cn| table_def.column_index(cn))
-                .collect();
-            if col_indices.len() != idx.column_names.len() {
-                continue;
-            }
-            let is_composite = idx.column_names.len() > 1;
-            let encoded = encode_index_key_from_row(
-                new_values,
-                &col_indices,
-                &table_def.columns,
-                is_composite,
-            );
-            if let Some(idx_key) = encoded {
-                let idx_btree = BTree::open(idx.btree_root);
-                if let Some(existing_pk_key) = idx_btree.search(pager, &idx_key)? {
-                    // Found a conflicting row via this unique index — delete it
-                    if let Some(existing_data) = data_btree.search(pager, &existing_pk_key)? {
-                        let existing_values = deserialize_row_versioned(
-                            &existing_data,
-                            &table_def.columns,
-                            table_def.row_format_version,
-                        )?;
-                        delete_from_secondary_indexes(
-                            table_def,
-                            indexes,
-                            &existing_values,
-                            &existing_pk_key,
-                            pager,
-                        )?;
-                        data_btree.delete(pager, &existing_pk_key)?;
-                        *data_btree = BTree::open(data_btree.root_page_id());
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Insert values into secondary indexes.
 /// For non-unique indexes, the B-tree key is `index_key + pk_key` so that
 /// duplicate indexed values each get their own B-tree entry.

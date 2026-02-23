@@ -14,7 +14,7 @@ pub(super) fn exec_explain(
     pager: &mut impl PageStore,
     catalog: &mut SystemCatalog,
 ) -> Result<ExecResult> {
-    let (table_name, where_clause, select_type, join_note) = match stmt {
+    let (table_name, where_clause, index_hints, select_type, join_note) = match stmt {
         Statement::Select(sel) => {
             let table_name = sel.table_name.as_ref().ok_or_else(|| {
                 MuroError::Execution("EXPLAIN requires SELECT to have a FROM clause".into())
@@ -22,12 +22,25 @@ pub(super) fn exec_explain(
             (
                 table_name.clone(),
                 &sel.where_clause,
+                sel.index_hints.as_slice(),
                 "SIMPLE",
                 build_join_loop_note(sel, pager, catalog)?,
             )
         }
-        Statement::Update(upd) => (upd.table_name.clone(), &upd.where_clause, "UPDATE", None),
-        Statement::Delete(del) => (del.table_name.clone(), &del.where_clause, "DELETE", None),
+        Statement::Update(upd) => (
+            upd.table_name.clone(),
+            &upd.where_clause,
+            upd.index_hints.as_slice(),
+            "UPDATE",
+            None,
+        ),
+        Statement::Delete(del) => (
+            del.table_name.clone(),
+            &del.where_clause,
+            del.index_hints.as_slice(),
+            "DELETE",
+            None,
+        ),
         _ => {
             return Err(MuroError::Execution(
                 "EXPLAIN supports SELECT, UPDATE, and DELETE statements".into(),
@@ -57,12 +70,13 @@ pub(super) fn exec_explain(
         table_rows: table_def.stats_row_count,
     };
 
-    let plan = plan_select(
+    let plan = plan_select_with_hints(
         &table_name,
         &table_def.pk_columns,
         &index_stats,
         where_clause,
         planner_stats,
+        index_hints,
     );
     // Keep EXPLAIN row cardinality informative even before ANALYZE TABLE
     // by falling back to observed table rows for display only.

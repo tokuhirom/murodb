@@ -165,6 +165,53 @@ pub fn plan_select(
     where_clause: &Option<Expr>,
     planner_stats: PlannerStats,
 ) -> Plan {
+    plan_select_with_hints(
+        table_name,
+        pk_columns,
+        index_stats,
+        where_clause,
+        planner_stats,
+        &[],
+    )
+}
+
+/// Analyze a WHERE clause and determine the access plan, considering index hints.
+pub fn plan_select_with_hints(
+    table_name: &str,
+    pk_columns: &[String],
+    index_stats: &[IndexPlanStat],
+    where_clause: &Option<Expr>,
+    planner_stats: PlannerStats,
+    index_hints: &[IndexHint],
+) -> Plan {
+    // Determine hint behavior
+    let has_force = index_hints
+        .iter()
+        .any(|h| h.hint_type == IndexHintType::Force);
+    let has_use = index_hints
+        .iter()
+        .any(|h| h.hint_type == IndexHintType::Use);
+    let force_or_use_names: Vec<&str> = index_hints
+        .iter()
+        .filter(|h| h.hint_type == IndexHintType::Force || h.hint_type == IndexHintType::Use)
+        .flat_map(|h| h.index_names.iter().map(|s| s.as_str()))
+        .collect();
+    let ignore_names: Vec<&str> = index_hints
+        .iter()
+        .filter(|h| h.hint_type == IndexHintType::Ignore)
+        .flat_map(|h| h.index_names.iter().map(|s| s.as_str()))
+        .collect();
+    let skip_pk = has_force; // FORCE INDEX skips PK seek
+    let filter_index = |idx_name: &str| -> bool {
+        if ignore_names.contains(&idx_name) {
+            return false;
+        }
+        if has_force || has_use {
+            return force_or_use_names.contains(&idx_name);
+        }
+        true
+    };
+
     let mut best_candidate: Option<(u64, String, Plan)> = None;
     let consider = |best: &mut Option<(u64, String, Plan)>, plan: Plan, tie_key: String| {
         let cost = plan_cost_hint_with_stats(&plan, &planner_stats, index_stats);
@@ -187,7 +234,8 @@ pub fn plan_select(
         }
 
         // Check for PK equality (single or composite)
-        if !pk_columns.is_empty() {
+        // FORCE INDEX skips PK seek to force use of the specified index
+        if !skip_pk && !pk_columns.is_empty() {
             let equalities = extract_equalities(expr);
             if pk_columns.len() == 1 {
                 // Single PK: simple equality
@@ -228,6 +276,9 @@ pub fn plan_select(
         let equalities = extract_equalities(expr);
         let ranges = extract_ranges(expr);
         for idx in index_stats {
+            if !filter_index(&idx.name) {
+                continue;
+            }
             let idx_name = &idx.name;
             let col_names = &idx.column_names;
             if col_names.len() == 1 {

@@ -26,7 +26,7 @@ pub(super) fn exec_update(
             stats_num_hist_bins: idx.stats_num_hist_bins.clone(),
         })
         .collect();
-    let plan = plan_select(
+    let plan = plan_select_with_hints(
         &upd.table_name,
         &table_def.pk_columns,
         &index_stats,
@@ -34,6 +34,7 @@ pub(super) fn exec_update(
         PlannerStats {
             table_rows: table_def.stats_row_count,
         },
+        &upd.index_hints,
     );
 
     let data_btree = BTree::open(table_def.data_btree_root);
@@ -222,7 +223,7 @@ pub(super) fn exec_delete(
             stats_num_hist_bins: idx.stats_num_hist_bins.clone(),
         })
         .collect();
-    let plan = plan_select(
+    let plan = plan_select_with_hints(
         &del.table_name,
         &table_def.pk_columns,
         &index_stats,
@@ -230,6 +231,7 @@ pub(super) fn exec_delete(
         PlannerStats {
             table_rows: table_def.stats_row_count,
         },
+        &del.index_hints,
     );
 
     let data_btree = BTree::open(table_def.data_btree_root);

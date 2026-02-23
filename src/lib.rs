@@ -37,6 +37,8 @@ use crate::sql::prepared::PreparedStatement;
 use crate::sql::session::Session;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::types::Value;
+use crate::wal::reader::WalReader;
+use crate::wal::record::Lsn;
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
@@ -159,6 +161,19 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     sync_dir(wal_path);
 
     Ok(dest)
+}
+
+fn wal_next_lsn(
+    path: &Path,
+    suite: EncryptionSuite,
+    master_key: Option<&MasterKey>,
+) -> Result<Lsn> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut reader = WalReader::open_with_suite(path, suite, master_key)?;
+    let records = reader.read_all()?;
+    Ok(records.len() as Lsn)
 }
 
 fn fts_value_to_text(value: &Value) -> Option<&str> {
@@ -713,13 +728,65 @@ impl Database {
     /// This is useful when you want concurrent readers without manually
     /// re-opening the same path and re-supplying key material.
     pub fn open_reader(&self) -> Result<Self> {
+        let path = self.db_path.as_path();
+        let wp = wal_path(path);
         match self.encryption_suite {
-            EncryptionSuite::Plaintext => Self::open_plaintext(&self.db_path),
+            EncryptionSuite::Plaintext => {
+                let mut pager = Pager::open_plaintext(path)?;
+                let catalog_root = pager.catalog_root();
+                let mut catalog = SystemCatalog::open(catalog_root);
+                let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+                initialize_fts_term_key(
+                    &mut pager,
+                    if has_uninitialized_catalog {
+                        None
+                    } else {
+                        Some(&mut catalog)
+                    },
+                    LEGACY_SQL_FTS_TERM_KEY,
+                    false,
+                )?;
+                let next_lsn = wal_next_lsn(&wp, EncryptionSuite::Plaintext, None)?;
+                let wal = WalWriter::open_plaintext(&wp, next_lsn)?;
+                let lock_manager = LockManager::new(path)?;
+                let session = Session::new(pager, catalog, wal);
+                Ok(Database {
+                    session,
+                    lock_manager,
+                    master_key: None,
+                    db_path: path.to_path_buf(),
+                    encryption_suite: EncryptionSuite::Plaintext,
+                })
+            }
             EncryptionSuite::Aes256GcmSiv => {
                 let master_key = self.master_key.as_ref().ok_or_else(|| {
                     MuroError::Encryption("missing master key for encrypted reader open".into())
                 })?;
-                Self::open(&self.db_path, master_key)
+                let mut pager = Pager::open(path, master_key)?;
+                let catalog_root = pager.catalog_root();
+                let mut catalog = SystemCatalog::open(catalog_root);
+                let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+                initialize_fts_term_key(
+                    &mut pager,
+                    if has_uninitialized_catalog {
+                        None
+                    } else {
+                        Some(&mut catalog)
+                    },
+                    LEGACY_SQL_FTS_TERM_KEY,
+                    false,
+                )?;
+                let next_lsn = wal_next_lsn(&wp, EncryptionSuite::Aes256GcmSiv, Some(master_key))?;
+                let wal = WalWriter::open(&wp, master_key, next_lsn)?;
+                let lock_manager = LockManager::new(path)?;
+                let session = Session::new(pager, catalog, wal);
+                Ok(Database {
+                    session,
+                    lock_manager,
+                    master_key: Some(master_key.clone()),
+                    db_path: path.to_path_buf(),
+                    encryption_suite: EncryptionSuite::Aes256GcmSiv,
+                })
             }
         }
     }
@@ -778,7 +845,11 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use super::wal_path;
     use super::Database;
+    use crate::wal::reader::WalReader;
+    use crate::wal::record::WalRecord;
+    use crate::wal::writer::WalWriter;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -854,5 +925,30 @@ mod tests {
             .expect("reader query after rekey should succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get("id"), Some(&crate::types::Value::Integer(1)));
+    }
+
+    #[test]
+    fn open_reader_does_not_truncate_existing_wal() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_wal_preserve.db");
+
+        let db = Database::create_plaintext(&db_path).unwrap();
+        let wp = wal_path(&db_path);
+
+        {
+            let mut wal = WalWriter::open_plaintext(&wp, 0).unwrap();
+            wal.append(&WalRecord::Begin { txid: 42 }).unwrap();
+            wal.sync().unwrap();
+        }
+        let size_before = std::fs::metadata(&wp).unwrap().len();
+
+        let _reader = db.open_reader().unwrap();
+
+        let size_after = std::fs::metadata(&wp).unwrap().len();
+        assert_eq!(size_after, size_before, "open_reader must not truncate WAL");
+
+        let mut wal_reader = WalReader::open_plaintext(&wp).unwrap();
+        let records = wal_reader.read_all().unwrap();
+        assert_eq!(records.len(), 1);
     }
 }

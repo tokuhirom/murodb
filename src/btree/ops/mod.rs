@@ -69,16 +69,22 @@ impl BTree {
                         match compare_keys(key, k) {
                             std::cmp::Ordering::Equal => {
                                 // Check for overflow
-                                let cell = page.cell(i + 1).unwrap();
+                                let cell = page.cell(i + 1).ok_or(MuroError::InvalidPage)?;
                                 if is_overflow_cell(cell) {
-                                    let (total_len, first_page) =
-                                        decode_overflow_metadata(cell).unwrap();
+                                    let (total_len, first_page) = decode_overflow_metadata(cell)
+                                        .ok_or_else(|| {
+                                            MuroError::Corruption(
+                                                "invalid overflow metadata in leaf cell".into(),
+                                            )
+                                        })?;
                                     let value = overflow::read_overflow_chain(
                                         pager, first_page, total_len,
                                     )?;
                                     return Ok(Some(value));
                                 }
-                                let (_, v) = decode_leaf_cell(cell);
+                                let (_, v) = decode_leaf_cell(cell).ok_or_else(|| {
+                                    MuroError::Corruption("invalid leaf cell encoding".into())
+                                })?;
                                 return Ok(Some(v.to_vec()));
                             }
                             std::cmp::Ordering::Less => return Ok(None),
@@ -155,7 +161,7 @@ impl BTree {
             if let Some(k) = leaf_key(&page, i) {
                 if compare_keys(key, k) == std::cmp::Ordering::Equal {
                     // Free old overflow chain if the existing cell is overflow
-                    let old_cell = page.cell(i + 1).unwrap();
+                    let old_cell = page.cell(i + 1).ok_or(MuroError::InvalidPage)?;
                     if is_overflow_cell(old_cell) {
                         if let Some((_, first_page)) = decode_overflow_metadata(old_cell) {
                             overflow::free_overflow_chain(pager, first_page)?;
@@ -276,7 +282,8 @@ impl BTree {
         }
 
         let mid = cells.len() / 2;
-        let (median_key, _) = decode_leaf_cell(&cells[mid]);
+        let (median_key, _) = decode_leaf_cell(&cells[mid])
+            .ok_or_else(|| MuroError::Corruption("invalid leaf cell encoding".into()))?;
         let median_key = median_key.to_vec();
 
         // Left page (reuse old page id)
@@ -358,7 +365,9 @@ impl BTree {
 
             if (pos as usize + 1) < entries.len() {
                 let old_entry = &entries[pos as usize + 1];
-                let (_, old_key) = decode_internal_cell(old_entry);
+                let (_, old_key) = decode_internal_cell(old_entry).ok_or_else(|| {
+                    MuroError::Corruption("invalid internal cell encoding".into())
+                })?;
                 let new_entry = encode_internal_cell(split.right_page_id, old_key);
                 entries[pos as usize + 1] = new_entry;
             }
@@ -402,7 +411,8 @@ impl BTree {
         let mid = entries.len() / 2;
 
         // The median entry's key goes up to the parent
-        let (median_left_child, median_key_bytes) = decode_internal_cell(&entries[mid]);
+        let (median_left_child, median_key_bytes) = decode_internal_cell(&entries[mid])
+            .ok_or_else(|| MuroError::Corruption("invalid internal cell encoding".into()))?;
         let median_key = median_key_bytes.to_vec();
 
         // Left page: entries[0..mid], right child = median_left_child
@@ -483,7 +493,7 @@ impl BTree {
 
                 if let Some(idx) = found_idx {
                     // Free overflow chain if this is an overflow cell
-                    let cell = page.cell(idx + 1).unwrap();
+                    let cell = page.cell(idx + 1).ok_or(MuroError::InvalidPage)?;
                     if is_overflow_cell(cell) {
                         if let Some((_, first_page)) = decode_overflow_metadata(cell) {
                             if first_page != overflow::NO_OVERFLOW_PAGE {
@@ -574,10 +584,17 @@ impl BTree {
             Some(NodeType::Leaf) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    let cell = page.cell(i + 1).unwrap();
-                    let (k, v) = decode_leaf_cell(cell);
+                    let cell = page.cell(i + 1).ok_or(MuroError::InvalidPage)?;
+                    let (k, v) = decode_leaf_cell(cell).ok_or_else(|| {
+                        MuroError::Corruption("invalid leaf cell encoding".into())
+                    })?;
                     if is_overflow_cell(cell) {
-                        let (total_len, first_page) = decode_overflow_metadata(cell).unwrap();
+                        let (total_len, first_page) =
+                            decode_overflow_metadata(cell).ok_or_else(|| {
+                                MuroError::Corruption(
+                                    "invalid overflow metadata in leaf cell".into(),
+                                )
+                            })?;
                         let full_value =
                             overflow::read_overflow_chain(pager, first_page, total_len)?;
                         if !callback(k, &full_value)? {
@@ -638,11 +655,18 @@ impl BTree {
             Some(NodeType::Leaf) => {
                 let n = num_entries(&page);
                 for i in 0..n {
-                    let cell = page.cell(i + 1).unwrap();
-                    let (k, v) = decode_leaf_cell(cell);
+                    let cell = page.cell(i + 1).ok_or(MuroError::InvalidPage)?;
+                    let (k, v) = decode_leaf_cell(cell).ok_or_else(|| {
+                        MuroError::Corruption("invalid leaf cell encoding".into())
+                    })?;
                     if compare_keys(k, start_key) != std::cmp::Ordering::Less {
                         if is_overflow_cell(cell) {
-                            let (total_len, first_page) = decode_overflow_metadata(cell).unwrap();
+                            let (total_len, first_page) = decode_overflow_metadata(cell)
+                                .ok_or_else(|| {
+                                    MuroError::Corruption(
+                                        "invalid overflow metadata in leaf cell".into(),
+                                    )
+                                })?;
                             let full_value =
                                 overflow::read_overflow_chain(pager, first_page, total_len)?;
                             if !callback(k, &full_value)? {
@@ -788,7 +812,9 @@ impl BTree {
                 }
                 if let Some(cell_data) = parent.cell(i + 1) {
                     if i == separator_idx + 1 {
-                        let (_, entry_key) = decode_internal_cell(cell_data);
+                        let (_, entry_key) = decode_internal_cell(cell_data).ok_or_else(|| {
+                            MuroError::Corruption("invalid internal cell encoding".into())
+                        })?;
                         let new_cell = encode_internal_cell(left_child_id, entry_key);
                         new_parent
                             .insert_cell(&new_cell)

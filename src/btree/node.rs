@@ -142,9 +142,15 @@ pub fn encode_overflow_leaf_cell(key: &[u8], total_value_len: u32) -> Vec<u8> {
 /// Set the first overflow page ID in an overflow cell.
 /// The page ID is at offset: 2 + key_len + 4 (after total_value_len).
 pub fn set_overflow_page_id(cell: &mut [u8], page_id: PageId) {
-    let raw_key_len = u16::from_le_bytes(cell[0..2].try_into().unwrap());
+    if cell.len() < 2 {
+        return;
+    }
+    let raw_key_len = u16::from_le_bytes([cell[0], cell[1]]);
     let key_len = (raw_key_len & !OVERFLOW_FLAG) as usize;
     let page_id_offset = 2 + key_len + 4; // skip key_len field + key + total_value_len
+    if page_id_offset + 8 > cell.len() {
+        return;
+    }
     cell[page_id_offset..page_id_offset + 8].copy_from_slice(&page_id.to_le_bytes());
 }
 
@@ -153,7 +159,7 @@ pub fn is_overflow_cell(cell: &[u8]) -> bool {
     if cell.len() < 2 {
         return false;
     }
-    let raw_key_len = u16::from_le_bytes(cell[0..2].try_into().unwrap());
+    let raw_key_len = u16::from_le_bytes([cell[0], cell[1]]);
     raw_key_len & OVERFLOW_FLAG != 0
 }
 
@@ -163,36 +169,62 @@ pub fn decode_overflow_metadata(cell: &[u8]) -> Option<(u32, PageId)> {
     if !is_overflow_cell(cell) {
         return None;
     }
-    let raw_key_len = u16::from_le_bytes(cell[0..2].try_into().unwrap());
+    let raw_key_len = u16::from_le_bytes([cell[0], cell[1]]);
     let key_len = (raw_key_len & !OVERFLOW_FLAG) as usize;
     let meta_start = 2 + key_len;
-    let total_value_len = u32::from_le_bytes(cell[meta_start..meta_start + 4].try_into().unwrap());
-    let first_page = u64::from_le_bytes(cell[meta_start + 4..meta_start + 12].try_into().unwrap());
+    if meta_start + OVERFLOW_META_SIZE > cell.len() {
+        return None;
+    }
+    let total_value_len = u32::from_le_bytes([
+        cell[meta_start],
+        cell[meta_start + 1],
+        cell[meta_start + 2],
+        cell[meta_start + 3],
+    ]);
+    let first_page = u64::from_le_bytes([
+        cell[meta_start + 4],
+        cell[meta_start + 5],
+        cell[meta_start + 6],
+        cell[meta_start + 7],
+        cell[meta_start + 8],
+        cell[meta_start + 9],
+        cell[meta_start + 10],
+        cell[meta_start + 11],
+    ]);
     Some((total_value_len, first_page))
 }
 
 /// Decode a leaf cell into (key, value).
 /// For overflow cells, the "value" returned is empty.
 /// Callers should check `is_overflow_cell` to determine if full value reconstruction is needed.
-pub fn decode_leaf_cell(cell: &[u8]) -> (&[u8], &[u8]) {
-    let raw_key_len = u16::from_le_bytes(cell[0..2].try_into().unwrap());
+pub fn decode_leaf_cell(cell: &[u8]) -> Option<(&[u8], &[u8])> {
+    if cell.len() < 2 {
+        return None;
+    }
+    let raw_key_len = u16::from_le_bytes([cell[0], cell[1]]);
     if raw_key_len & OVERFLOW_FLAG != 0 {
         // Overflow cell: return key and empty value
         let key_len = (raw_key_len & !OVERFLOW_FLAG) as usize;
+        if 2 + key_len > cell.len() {
+            return None;
+        }
         let key = &cell[2..2 + key_len];
-        (key, &[])
+        Some((key, &[]))
     } else {
         let key_len = raw_key_len as usize;
+        if 2 + key_len > cell.len() {
+            return None;
+        }
         let key = &cell[2..2 + key_len];
         let value = &cell[2 + key_len..];
-        (key, value)
+        Some((key, value))
     }
 }
 
 /// Get the key of the i-th entry in a leaf node (0-based, entries start at cell index 1).
 pub fn leaf_key(page: &Page, entry_idx: u16) -> Option<&[u8]> {
     let cell = page.cell(entry_idx + 1)?;
-    let (key, _) = decode_leaf_cell(cell);
+    let (key, _) = decode_leaf_cell(cell)?;
     Some(key)
 }
 
@@ -200,7 +232,7 @@ pub fn leaf_key(page: &Page, entry_idx: u16) -> Option<&[u8]> {
 /// For overflow cells, returns empty slice.
 pub fn leaf_value(page: &Page, entry_idx: u16) -> Option<&[u8]> {
     let cell = page.cell(entry_idx + 1)?;
-    let (_, value) = decode_leaf_cell(cell);
+    let (_, value) = decode_leaf_cell(cell)?;
     Some(value)
 }
 
@@ -208,7 +240,7 @@ pub fn leaf_value(page: &Page, entry_idx: u16) -> Option<&[u8]> {
 /// For overflow cells, the value is empty.
 pub fn leaf_entry(page: &Page, entry_idx: u16) -> Option<(&[u8], &[u8])> {
     let cell = page.cell(entry_idx + 1)?;
-    Some(decode_leaf_cell(cell))
+    decode_leaf_cell(cell)
 }
 
 /// Check if the i-th entry in a leaf node is an overflow cell.
@@ -229,24 +261,32 @@ pub fn encode_internal_cell(left_child: PageId, key: &[u8]) -> Vec<u8> {
 }
 
 /// Decode an internal cell into (left_child, key).
-pub fn decode_internal_cell(cell: &[u8]) -> (PageId, &[u8]) {
-    let left_child = u64::from_le_bytes(cell[0..8].try_into().unwrap());
-    let key_len = u16::from_le_bytes(cell[8..10].try_into().unwrap()) as usize;
+pub fn decode_internal_cell(cell: &[u8]) -> Option<(PageId, &[u8])> {
+    if cell.len() < 10 {
+        return None;
+    }
+    let left_child = u64::from_le_bytes([
+        cell[0], cell[1], cell[2], cell[3], cell[4], cell[5], cell[6], cell[7],
+    ]);
+    let key_len = u16::from_le_bytes([cell[8], cell[9]]) as usize;
+    if 10 + key_len > cell.len() {
+        return None;
+    }
     let key = &cell[10..10 + key_len];
-    (left_child, key)
+    Some((left_child, key))
 }
 
 /// Get the key of the i-th entry in an internal node.
 pub fn internal_key(page: &Page, entry_idx: u16) -> Option<&[u8]> {
     let cell = page.cell(entry_idx + 1)?;
-    let (_, key) = decode_internal_cell(cell);
+    let (_, key) = decode_internal_cell(cell)?;
     Some(key)
 }
 
 /// Get the left child of the i-th entry in an internal node.
 pub fn internal_left_child(page: &Page, entry_idx: u16) -> Option<PageId> {
     let cell = page.cell(entry_idx + 1)?;
-    let (left_child, _) = decode_internal_cell(cell);
+    let (left_child, _) = decode_internal_cell(cell)?;
     Some(left_child)
 }
 
@@ -337,7 +377,7 @@ mod tests {
         assert_eq!(first_page, 42);
 
         // decode_leaf_cell should return key + empty value
-        let (decoded_key, decoded_value) = decode_leaf_cell(&cell);
+        let (decoded_key, decoded_value) = decode_leaf_cell(&cell).unwrap();
         assert_eq!(decoded_key, key);
         assert!(decoded_value.is_empty());
 

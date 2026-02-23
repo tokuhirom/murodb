@@ -251,6 +251,39 @@ fn test_collect_all_pages_detects_shared_child() {
 }
 
 #[test]
+fn test_search_malformed_overflow_cell_returns_error() {
+    use crate::btree::node::{init_leaf, OVERFLOW_FLAG};
+
+    let (mut pager, path) = setup();
+
+    let root = pager.allocate_page().unwrap();
+    let root_id = root.page_id();
+    let mut root_page = Page::new(root_id);
+    init_leaf(&mut root_page);
+
+    // key_len with overflow flag set, but overflow metadata is intentionally truncated.
+    let key = b"k";
+    let mut malformed = Vec::new();
+    malformed.extend_from_slice(&((key.len() as u16) | OVERFLOW_FLAG).to_le_bytes());
+    malformed.extend_from_slice(key);
+    root_page.insert_cell(&malformed).unwrap();
+    pager.write_page(&root_page).unwrap();
+
+    let btree = BTree::open(root_id);
+    let result = btree.search(&mut pager, key);
+    assert!(
+        matches!(
+            result,
+            Err(MuroError::Corruption(_)) | Err(MuroError::InvalidPage)
+        ),
+        "expected corruption/invalid-page error, got: {:?}",
+        result
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn test_insert_delete_many() {
     let (mut pager, path) = setup();
     let mut btree = BTree::create(&mut pager).unwrap();

@@ -9,9 +9,14 @@
 - `src/sql/session/mod.rs`: runtime SQL session state machine (transaction lifecycle, checkpoint policy, stats SQL handlers).
 - `src/sql/session/tests.rs`: session unit tests extracted from `session/mod.rs`.
 - `src/sql/executor.rs` and `src/sql/executor/*.rs`: statement execution and query operators.
-- `src/storage/pager/mod.rs`: page cache/persistence core.
-- `src/storage/pager/tests.rs`: pager unit tests extracted from `pager/mod.rs`.
-- `src/wal/*.rs`: write-ahead log format, reader/writer, and recovery.
+- `src/sql/executor/tests.rs`: executor integration-style unit tests extracted from `executor.rs`.
+- `src/storage/pager/mod.rs`: pager core (header/cache/freelist IO, metadata accessors).
+- `src/storage/pager/backup_rekey.rs`: pager backup and rekey operations.
+- `src/storage/pager/rekey_marker.rs`: `.rekey` marker encoding/decoding helpers.
+- `src/storage/pager/tests.rs`: pager unit tests.
+- `src/wal/recovery/mod.rs`: WAL recovery core (validation/collection/apply orchestration).
+- `src/wal/recovery/tests.rs`: WAL recovery unit tests.
+- `src/wal/*.rs`: write-ahead log format, reader/writer, and recovery entry modules.
 - `src/btree/ops/mod.rs`: B-tree high-level operations.
 - `src/btree/ops/tests.rs`: B-tree ops tests extracted from `ops/mod.rs`.
 - `src/fts/index/mod.rs`: full-text index maintenance and segment encoding.
@@ -30,9 +35,12 @@
 - `src/sql/session.rs` was split into `src/sql/session/mod.rs` and `src/sql/session/tests.rs`.
 - Duplicated post-commit/post-rollback checkpoint flow was consolidated into `Session::post_checkpoint`.
 - `src/storage/pager.rs` was split into `src/storage/pager/mod.rs` and `src/storage/pager/tests.rs`.
+- Pager rekey/backup and marker handling were split into `src/storage/pager/backup_rekey.rs` and `src/storage/pager/rekey_marker.rs`.
 - `src/fts/index.rs` was split into `src/fts/index/mod.rs` and `src/fts/index/tests.rs`.
 - `src/btree/ops.rs` was split into `src/btree/ops/mod.rs` and `src/btree/ops/tests.rs`.
 - `src/sql/parser.rs` was split into `src/sql/parser/mod.rs`, `src/sql/parser/expr_and_select.rs`, and `src/sql/parser/tests.rs`.
+- `src/wal/recovery.rs` was split into `src/wal/recovery/mod.rs` and `src/wal/recovery/tests.rs`.
+- `src/sql/executor.rs` tests were split into `src/sql/executor/tests.rs`.
 
 ## Shell / Git Command Hygiene
 - Prefer non-interactive commands.

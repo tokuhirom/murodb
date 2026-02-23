@@ -562,6 +562,13 @@ fn test_sql_fulltext_legacy_fixed_key_metadata_backfill() {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
     }
+
+    // Open path should not mutate catalog metadata outside normal write flow.
+    {
+        let mut pager = Pager::open(&db_path, &test_key()).unwrap();
+        let catalog = SystemCatalog::open(pager.catalog_root());
+        assert_eq!(catalog.get_fts_term_key(&mut pager).unwrap(), None);
+    }
 }
 
 #[test]

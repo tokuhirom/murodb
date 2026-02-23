@@ -253,6 +253,7 @@ fn initialize_fts_term_key(
     pager: &mut Pager,
     catalog: Option<&mut SystemCatalog>,
     missing_meta_key: [u8; 32],
+    persist_missing_meta: bool,
 ) -> Result<bool> {
     let Some(catalog) = catalog else {
         pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
@@ -271,9 +272,13 @@ fn initialize_fts_term_key(
             } else {
                 missing_meta_key
             };
-            catalog.set_fts_term_key(pager, generated)?;
             pager.set_fts_term_key(generated);
-            Ok(true)
+            if persist_missing_meta {
+                catalog.set_fts_term_key(pager, generated)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
         // Some tests build DB files through Pager-only flows where catalog_root is unset (0).
         // For those files, keep FTS usable via in-memory bootstrap without catalog writes.
@@ -291,7 +296,7 @@ impl Database {
         let mut pager = Pager::create(path, master_key)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
         let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
-        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -315,7 +320,7 @@ impl Database {
         let mut pager = Pager::create_plaintext(path)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
         let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
-        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -392,7 +397,7 @@ impl Database {
         let catalog_root = pager.catalog_root();
         let mut catalog = SystemCatalog::open(catalog_root);
         let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
-        let migrated = initialize_fts_term_key(
+        initialize_fts_term_key(
             &mut pager,
             if has_uninitialized_catalog {
                 None
@@ -400,11 +405,8 @@ impl Database {
                 Some(&mut catalog)
             },
             LEGACY_SQL_FTS_TERM_KEY,
+            false,
         )?;
-        if migrated {
-            pager.set_catalog_root(catalog.root_page_id());
-            pager.flush_meta()?;
-        }
         let wal = WalWriter::create(&wp, master_key)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -450,7 +452,7 @@ impl Database {
         let catalog_root = pager.catalog_root();
         let mut catalog = SystemCatalog::open(catalog_root);
         let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
-        let migrated = initialize_fts_term_key(
+        initialize_fts_term_key(
             &mut pager,
             if has_uninitialized_catalog {
                 None
@@ -458,11 +460,8 @@ impl Database {
                 Some(&mut catalog)
             },
             LEGACY_SQL_FTS_TERM_KEY,
+            false,
         )?;
-        if migrated {
-            pager.set_catalog_root(catalog.root_page_id());
-            pager.flush_meta()?;
-        }
         let wal = WalWriter::create_plaintext(&wp)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -486,7 +485,7 @@ impl Database {
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
         let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
-        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 

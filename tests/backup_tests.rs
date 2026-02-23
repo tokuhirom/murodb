@@ -155,3 +155,46 @@ fn test_backup_with_indexes() {
         assert_eq!(rows[0].values[0].1, Value::Integer(1));
     }
 }
+
+#[test]
+fn test_backup_to_same_file_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("source.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    db.execute("INSERT INTO t VALUES (1)").unwrap();
+
+    // Backup to the same path must fail, not corrupt the source
+    let err = db.backup(&db_path).unwrap_err();
+    assert!(
+        err.to_string().contains("same file"),
+        "expected same-file error, got: {}",
+        err
+    );
+
+    // Source DB must still be intact
+    let rows = query_rows(&mut db, "SELECT id FROM t");
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_backup_to_symlink_of_source_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("source.db");
+    let link_path = dir.path().join("link.db");
+
+    let mut db = murodb::Database::create(&db_path, &test_key()).unwrap();
+    db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+
+    std::os::unix::fs::symlink(&db_path, &link_path).unwrap();
+
+    let err = db.backup(&link_path).unwrap_err();
+    assert!(
+        err.to_string().contains("same file"),
+        "expected same-file error via symlink, got: {}",
+        err
+    );
+}

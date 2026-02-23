@@ -630,6 +630,20 @@ impl Pager {
     /// The resulting file is a valid MuroDB database that can be opened
     /// with the same key/password.
     pub fn backup_to_file(&mut self, dest: &Path) -> Result<()> {
+        // Guard: reject backup to the same file (including symlinks/hardlinks).
+        {
+            use std::os::unix::fs::MetadataExt;
+            let src_meta = self.file.metadata()?;
+            if let Ok(dest_meta) = std::fs::metadata(dest) {
+                if src_meta.dev() == dest_meta.dev() && src_meta.ino() == dest_meta.ino() {
+                    return Err(MuroError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "backup destination is the same file as the source database",
+                    )));
+                }
+            }
+        }
+
         self.refresh_from_disk_if_changed()?;
 
         let total_bytes = PLAINTEXT_HEADER_SIZE + self.page_count * self.page_size_on_disk() as u64;

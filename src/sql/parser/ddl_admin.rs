@@ -643,4 +643,49 @@ impl Parser {
             ),
         }
     }
+
+    pub(super) fn parse_set_runtime_option(&mut self) -> Result<Statement, String> {
+        self.advance(); // consume SET
+        let option_name = match self.advance() {
+            Some(Token::Ident(name)) => name.to_ascii_lowercase(),
+            Some(tok) => {
+                return Err(format!(
+                    "Expected runtime option name after SET, got {:?}",
+                    tok
+                ))
+            }
+            None => return Err("Expected runtime option name after SET".into()),
+        };
+        self.expect(&Token::Eq)?;
+        let value = match self.advance() {
+            Some(Token::Integer(v)) if v >= 0 => v as u64,
+            Some(Token::Integer(_)) => {
+                return Err("Runtime option value must be >= 0".into());
+            }
+            Some(tok) => {
+                return Err(format!(
+                    "Expected integer runtime option value, got {:?}",
+                    tok
+                ))
+            }
+            None => return Err("Expected integer runtime option value".into()),
+        };
+
+        let option = match option_name.as_str() {
+            "checkpoint_tx_threshold" => RuntimeOption::CheckpointTxThreshold,
+            "checkpoint_wal_bytes_threshold" => RuntimeOption::CheckpointWalBytesThreshold,
+            "checkpoint_interval_ms" => RuntimeOption::CheckpointIntervalMs,
+            _ => {
+                return Err(format!(
+                    "Unknown runtime option '{}'. Supported options: checkpoint_tx_threshold, checkpoint_wal_bytes_threshold, checkpoint_interval_ms",
+                    option_name
+                ))
+            }
+        };
+
+        Ok(Statement::SetRuntimeOption(SetRuntimeOption {
+            option,
+            value,
+        }))
+    }
 }

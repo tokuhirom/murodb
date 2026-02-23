@@ -485,4 +485,62 @@ fn test_show_database_stats_uses_open_wal_handle_when_path_unlinked() {
     }
 }
 
+#[test]
+fn test_set_runtime_option_sql_updates_checkpoint_policy_stats() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session.execute("SET checkpoint_tx_threshold = 9").unwrap();
+    session
+        .execute("SET checkpoint_wal_bytes_threshold = 1024")
+        .unwrap();
+    session.execute("SET checkpoint_interval_ms = 250").unwrap();
+
+    match session.execute("SHOW DATABASE STATS").unwrap() {
+        ExecResult::Rows(rows) => {
+            let get_stat = |name: &str| -> String {
+                let row = rows
+                    .iter()
+                    .find(|row| row.get("stat") == Some(&Value::Varchar(name.to_string())))
+                    .unwrap();
+                match row.get("value") {
+                    Some(Value::Varchar(v)) => v.clone(),
+                    other => panic!("unexpected stat value for {}: {:?}", name, other),
+                }
+            };
+            assert_eq!(get_stat("checkpoint_policy_tx_threshold"), "9");
+            assert_eq!(get_stat("checkpoint_policy_wal_bytes_threshold"), "1024");
+            assert_eq!(get_stat("checkpoint_policy_interval_ms"), "250");
+        }
+        _ => panic!("Expected rows from SHOW DATABASE STATS"),
+    }
+}
+
+#[test]
+fn test_set_runtime_option_rejected_inside_transaction() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session.execute("BEGIN").unwrap();
+    let err = session
+        .execute("SET checkpoint_tx_threshold = 2")
+        .unwrap_err();
+    assert!(matches!(err, MuroError::Execution(_)));
+    assert!(format!("{}", err).contains("inside a transaction"));
+}
+
 mod tail;

@@ -146,6 +146,7 @@ fn count_statement_bind_params(stmt: &Statement) -> usize {
         | Statement::Rollback
         | Statement::ShowCheckpointStats
         | Statement::ShowDatabaseStats
+        | Statement::SetRuntimeOption(_)
         | Statement::AnalyzeTable(_) => 0,
     }
 }
@@ -321,6 +322,7 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
         | Statement::Rollback
         | Statement::ShowCheckpointStats
         | Statement::ShowDatabaseStats
+        | Statement::SetRuntimeOption(_)
         | Statement::AnalyzeTable(_) => {}
     }
 

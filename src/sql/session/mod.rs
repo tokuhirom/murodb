@@ -42,6 +42,13 @@ pub struct DatabaseStats {
 /// Backward-compatible alias.
 pub type CheckpointStats = DatabaseStats;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub checkpoint_tx_threshold: u64,
+    pub checkpoint_wal_bytes_threshold: u64,
+    pub checkpoint_interval_ms: u64,
+}
+
 /// A session that manages explicit transaction state.
 ///
 /// - `BEGIN` starts a transaction (dirty-page buffering).
@@ -151,6 +158,7 @@ impl Session {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
+            Statement::SetRuntimeOption(set_stmt) => self.handle_set_runtime_option(set_stmt),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(stmt)
@@ -246,7 +254,8 @@ impl Session {
             | Statement::AnalyzeTable(_)
             | Statement::Begin
             | Statement::Commit
-            | Statement::Rollback => false,
+            | Statement::Rollback
+            | Statement::SetRuntimeOption(_) => false,
         }
     }
 

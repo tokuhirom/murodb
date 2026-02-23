@@ -262,6 +262,23 @@ fn test_parse_show_create_table() {
 }
 
 #[test]
+fn test_parse_set_runtime_option() {
+    let stmt = parse_sql("SET checkpoint_tx_threshold = 8").unwrap();
+    if let Statement::SetRuntimeOption(set_stmt) = stmt {
+        assert_eq!(set_stmt.option, RuntimeOption::CheckpointTxThreshold);
+        assert_eq!(set_stmt.value, 8);
+    } else {
+        panic!("Expected SetRuntimeOption");
+    }
+}
+
+#[test]
+fn test_parse_set_runtime_option_rejects_unknown_name() {
+    let err = parse_sql("SET unknown_runtime_option = 1").unwrap_err();
+    assert!(err.contains("Unknown runtime option"));
+}
+
+#[test]
 fn test_parse_describe() {
     let stmt = parse_sql("DESCRIBE users").unwrap();
     if let Statement::Describe(name) = stmt {

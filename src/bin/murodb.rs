@@ -320,7 +320,8 @@ fn is_read_only_statement(stmt: &Statement) -> bool {
         | Statement::AnalyzeTable(_)
         | Statement::Begin
         | Statement::Commit
-        | Statement::Rollback => false,
+        | Statement::Rollback
+        | Statement::SetRuntimeOption(_) => false,
     }
 }
 

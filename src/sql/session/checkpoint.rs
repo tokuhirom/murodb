@@ -29,6 +29,26 @@ impl CheckpointPolicy {
     }
 }
 
+impl From<CheckpointPolicy> for RuntimeConfig {
+    fn from(policy: CheckpointPolicy) -> Self {
+        Self {
+            checkpoint_tx_threshold: policy.tx_threshold,
+            checkpoint_wal_bytes_threshold: policy.wal_bytes_threshold,
+            checkpoint_interval_ms: policy.interval_ms,
+        }
+    }
+}
+
+impl RuntimeConfig {
+    pub fn defaults() -> Self {
+        Self {
+            checkpoint_tx_threshold: DEFAULT_CHECKPOINT_TX_THRESHOLD,
+            checkpoint_wal_bytes_threshold: DEFAULT_CHECKPOINT_WAL_BYTES_THRESHOLD,
+            checkpoint_interval_ms: DEFAULT_CHECKPOINT_INTERVAL_MS,
+        }
+    }
+}
+
 fn parse_checkpoint_env_u64(name: &str, default: u64, min: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
         return default;
@@ -53,6 +73,46 @@ fn parse_checkpoint_env_u64(name: &str, default: u64, min: u64) -> u64 {
 }
 
 impl Session {
+    pub fn runtime_config(&self) -> RuntimeConfig {
+        self.checkpoint_policy.into()
+    }
+
+    pub fn set_runtime_config(&mut self, config: RuntimeConfig) -> Result<()> {
+        self.check_poisoned()?;
+        self.refresh_from_disk_if_needed()?;
+        if self.active_tx.is_some() {
+            return Err(MuroError::Execution(
+                "SET runtime option cannot be used inside a transaction".into(),
+            ));
+        }
+        self.checkpoint_policy = CheckpointPolicy {
+            tx_threshold: config.checkpoint_tx_threshold,
+            wal_bytes_threshold: config.checkpoint_wal_bytes_threshold,
+            interval_ms: config.checkpoint_interval_ms,
+        };
+        Ok(())
+    }
+
+    pub(super) fn handle_set_runtime_option(
+        &mut self,
+        stmt: &crate::sql::ast::SetRuntimeOption,
+    ) -> Result<ExecResult> {
+        let mut cfg = self.runtime_config();
+        match stmt.option {
+            crate::sql::ast::RuntimeOption::CheckpointTxThreshold => {
+                cfg.checkpoint_tx_threshold = stmt.value
+            }
+            crate::sql::ast::RuntimeOption::CheckpointWalBytesThreshold => {
+                cfg.checkpoint_wal_bytes_threshold = stmt.value
+            }
+            crate::sql::ast::RuntimeOption::CheckpointIntervalMs => {
+                cfg.checkpoint_interval_ms = stmt.value
+            }
+        }
+        self.set_runtime_config(cfg)?;
+        Ok(ExecResult::Ok)
+    }
+
     pub(super) fn post_commit_checkpoint(&mut self) {
         self.post_checkpoint("post-commit");
     }

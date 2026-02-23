@@ -164,6 +164,12 @@ Default policy is per-transaction (`MURODB_CHECKPOINT_TX_THRESHOLD=1`), and can 
 - `MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD`
 - `MURODB_CHECKPOINT_INTERVAL_MS`
 
+The same knobs are available as session-scoped SQL runtime options:
+
+- `SET checkpoint_tx_threshold = <u64>`
+- `SET checkpoint_wal_bytes_threshold = <u64>`
+- `SET checkpoint_interval_ms = <u64>`
+
 When checkpoint truncate fails, MuroDB emits a warning with `wal_path` and `wal_size_bytes` so operators can detect and triage WAL growth.
 
 ## TLA+ Correspondence

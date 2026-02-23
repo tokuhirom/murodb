@@ -5,11 +5,22 @@ This helps reduce commit-time overhead on write-heavy workloads.
 
 ## Configuration Knobs
 
-Set these environment variables before starting your process:
+Checkpoint policy can be configured in two ways:
+
+- Environment variables (process default, applied at session construction)
+- SQL runtime options (`SET ...`, session scope, non-persistent)
+
+Environment variable names:
 
 - `MURODB_CHECKPOINT_TX_THRESHOLD`
 - `MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD`
 - `MURODB_CHECKPOINT_INTERVAL_MS`
+
+SQL runtime option names:
+
+- `checkpoint_tx_threshold`
+- `checkpoint_wal_bytes_threshold`
+- `checkpoint_interval_ms`
 
 Semantics:
 
@@ -17,6 +28,29 @@ Semantics:
 - `MURODB_CHECKPOINT_TX_THRESHOLD=1` (default): checkpoint every commit/rollback.
 - `MURODB_CHECKPOINT_TX_THRESHOLD=0`: disable tx-count trigger.
 - `*_WAL_BYTES_THRESHOLD=0` / `*_INTERVAL_MS=0`: disabled.
+- Runtime `SET` values follow the same semantics, but are session-only and not persisted.
+
+Runtime example:
+
+```sql
+SET checkpoint_tx_threshold = 8;
+SET checkpoint_wal_bytes_threshold = 1048576;
+SET checkpoint_interval_ms = 1000;
+```
+
+Rust API example:
+
+```rust
+use murodb::{Database, sql::session::RuntimeConfig};
+
+let mut db = Database::open_plaintext("mydb.db".as_ref())?;
+db.set_runtime_config(RuntimeConfig {
+    checkpoint_tx_threshold: 8,
+    checkpoint_wal_bytes_threshold: 1_048_576,
+    checkpoint_interval_ms: 1_000,
+})?;
+let active = db.runtime_config()?;
+```
 
 ## Recommended Starting Profiles
 

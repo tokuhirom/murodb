@@ -206,6 +206,27 @@ It also exposes checkpoint policy/runtime fields:
 WAL observability:
 - `wal_file_size_bytes`
 
+### Runtime Configuration
+
+Checkpoint policy can be changed at runtime (session scope):
+
+```sql
+SET checkpoint_tx_threshold = 8;
+SET checkpoint_wal_bytes_threshold = 1048576;
+SET checkpoint_interval_ms = 1000;
+```
+
+Supported runtime option names:
+- `checkpoint_tx_threshold`
+- `checkpoint_wal_bytes_threshold`
+- `checkpoint_interval_ms`
+
+Notes:
+- Values must be non-negative integers.
+- Scope is session-only (not persisted in the database file).
+- `SET` runtime options are rejected inside explicit transactions (`BEGIN ... COMMIT/ROLLBACK`).
+- Active values are observable via `SHOW DATABASE STATS` (`checkpoint_policy_*` fields).
+
 ## DML (Data Manipulation Language)
 
 ### ANALYZE TABLE

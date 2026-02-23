@@ -98,6 +98,14 @@ pub struct ColumnSpec {
     pub default_value: Option<Expr>,
     pub auto_increment: bool,
     pub check_expr: Option<Expr>,
+    /// Parse order of column constraint expressions (DEFAULT / CHECK).
+    pub constraint_expr_order: Vec<ColumnConstraintExprKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnConstraintExprKind {
+    Default,
+    Check,
 }
 
 #[derive(Debug, Clone)]

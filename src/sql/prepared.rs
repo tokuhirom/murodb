@@ -256,12 +256,7 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
     match stmt {
         Statement::CreateTable(ct) => {
             for col in &mut ct.columns {
-                if let Some(default_value) = &mut col.default_value {
-                    bind_expr_in_place(default_value, params, next)?;
-                }
-                if let Some(check_expr) = &mut col.check_expr {
-                    bind_expr_in_place(check_expr, params, next)?;
-                }
+                bind_column_spec_in_place(col, params, next)?;
             }
         }
         Statement::Insert(ins) => {
@@ -306,12 +301,7 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
             AlterTableOp::AddColumn(spec)
             | AlterTableOp::ModifyColumn(spec)
             | AlterTableOp::ChangeColumn(_, spec) => {
-                if let Some(default_value) = &mut spec.default_value {
-                    bind_expr_in_place(default_value, params, next)?;
-                }
-                if let Some(check_expr) = &mut spec.check_expr {
-                    bind_expr_in_place(check_expr, params, next)?;
-                }
+                bind_column_spec_in_place(spec, params, next)?;
             }
             AlterTableOp::DropColumn(_) => {}
         },
@@ -330,6 +320,40 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
         | Statement::ShowDatabaseStats
         | Statement::AnalyzeTable(_)
         | Statement::AlterDatabaseRekey { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn bind_column_spec_in_place(
+    spec: &mut ColumnSpec,
+    params: &[Value],
+    next: &mut usize,
+) -> Result<()> {
+    if spec.constraint_expr_order.is_empty() {
+        // Fallback for manually-built specs that do not preserve parse order.
+        if let Some(default_value) = &mut spec.default_value {
+            bind_expr_in_place(default_value, params, next)?;
+        }
+        if let Some(check_expr) = &mut spec.check_expr {
+            bind_expr_in_place(check_expr, params, next)?;
+        }
+        return Ok(());
+    }
+
+    for kind in &spec.constraint_expr_order {
+        match kind {
+            ColumnConstraintExprKind::Default => {
+                if let Some(default_value) = &mut spec.default_value {
+                    bind_expr_in_place(default_value, params, next)?;
+                }
+            }
+            ColumnConstraintExprKind::Check => {
+                if let Some(check_expr) = &mut spec.check_expr {
+                    bind_expr_in_place(check_expr, params, next)?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -528,5 +552,39 @@ mod tests {
         };
         assert!(matches!(left.as_ref(), Expr::IntLiteral(2)));
         assert!(matches!(right.as_ref(), Expr::IntLiteral(3)));
+    }
+
+    #[test]
+    fn test_bind_order_follows_column_constraint_parse_order() {
+        let prepared =
+            PreparedStatement::parse("CREATE TABLE t (c INT CHECK (?) DEFAULT ?)").unwrap();
+        let stmt = prepared
+            .bind(&[Value::Integer(11), Value::Integer(22)])
+            .unwrap();
+
+        let Statement::CreateTable(ct) = stmt else {
+            panic!("expected CREATE TABLE");
+        };
+        let col = &ct.columns[0];
+        assert!(matches!(col.check_expr, Some(Expr::IntLiteral(11))));
+        assert!(matches!(col.default_value, Some(Expr::IntLiteral(22))));
+    }
+
+    #[test]
+    fn test_bind_order_follows_alter_column_constraint_parse_order() {
+        let prepared =
+            PreparedStatement::parse("ALTER TABLE t ADD COLUMN c INT CHECK (?) DEFAULT ?").unwrap();
+        let stmt = prepared
+            .bind(&[Value::Integer(7), Value::Integer(8)])
+            .unwrap();
+
+        let Statement::AlterTable(at) = stmt else {
+            panic!("expected ALTER TABLE");
+        };
+        let AlterTableOp::AddColumn(col) = at.operation else {
+            panic!("expected ADD COLUMN");
+        };
+        assert!(matches!(col.check_expr, Some(Expr::IntLiteral(7))));
+        assert!(matches!(col.default_value, Some(Expr::IntLiteral(8))));
     }
 }

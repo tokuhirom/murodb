@@ -99,6 +99,7 @@ impl ColumnDef {
             DataType::Date => 10,
             DataType::DateTime => 11,
             DataType::Timestamp => 12,
+            DataType::Uuid => 13,
         });
         // flags
         let mut flags: u8 = 0;
@@ -211,6 +212,7 @@ impl ColumnDef {
             10 => DataType::Date,
             11 => DataType::DateTime,
             12 => DataType::Timestamp,
+            13 => DataType::Uuid,
             _ => return None,
         };
 
@@ -334,6 +336,7 @@ mod tests {
             DataType::Varbinary(None),
             DataType::Varbinary(Some(512)),
             DataType::Text,
+            DataType::Uuid,
         ] {
             let col = ColumnDef::new("test", dt);
             let bytes = col.serialize();

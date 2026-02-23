@@ -10,6 +10,7 @@ pub enum Value {
     Timestamp(i64), // YYYYMMDDhhmmss
     Varchar(String),
     Varbinary(Vec<u8>),
+    Uuid([u8; 16]),
     Null,
 }
 
@@ -58,6 +59,7 @@ impl fmt::Display for Value {
             Value::Timestamp(v) => write!(f, "{}", format_datetime(*v)),
             Value::Varchar(v) => write!(f, "{}", v),
             Value::Varbinary(v) => write!(f, "<binary {} bytes>", v.len()),
+            Value::Uuid(b) => write!(f, "{}", format_uuid(b)),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -92,6 +94,7 @@ impl PartialEq for ValueKey {
             }
             (Value::Varchar(a), Value::Varchar(b)) => a == b,
             (Value::Varbinary(a), Value::Varbinary(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -132,6 +135,10 @@ impl Hash for ValueKey {
             }
             Value::Varbinary(b) => {
                 7u8.hash(state);
+                b.hash(state);
+            }
+            Value::Uuid(b) => {
+                9u8.hash(state);
                 b.hash(state);
             }
             Value::Null => {
@@ -179,6 +186,33 @@ fn temporal_key(v: &Value) -> i64 {
         Value::DateTime(dt) | Value::Timestamp(dt) => *dt,
         _ => unreachable!("temporal_key called for non-temporal value"),
     }
+}
+
+/// Format a 16-byte UUID as a lowercase hyphenated string.
+pub fn format_uuid(bytes: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// Parse a UUID string (with or without hyphens) into 16 bytes.
+pub fn parse_uuid_string(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim();
+    // Remove hyphens
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -268,6 +302,7 @@ pub enum DataType {
     Varchar(Option<u32>),
     Varbinary(Option<u32>),
     Text,
+    Uuid,
 }
 
 impl fmt::Display for DataType {
@@ -287,6 +322,7 @@ impl fmt::Display for DataType {
             DataType::Varbinary(None) => write!(f, "VARBINARY"),
             DataType::Varbinary(Some(n)) => write!(f, "VARBINARY({})", n),
             DataType::Text => write!(f, "TEXT"),
+            DataType::Uuid => write!(f, "UUID"),
         }
     }
 }

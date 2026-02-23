@@ -520,6 +520,16 @@ pub(super) fn eval_function_call(
             }
         }
 
+        // UUID functions
+        "UUID_V4" => {
+            check_args(name, args, 0)?;
+            Ok(Value::Uuid(*uuid::Uuid::new_v4().as_bytes()))
+        }
+        "UUID_V7" => {
+            check_args(name, args, 0)?;
+            Ok(Value::Uuid(*uuid::Uuid::now_v7().as_bytes()))
+        }
+
         _ => Err(MuroError::Execution(format!("Unknown function: {}", name))),
     }
 }

@@ -59,6 +59,9 @@ If your goal is "reconstruct internals after a long break", read in this order:
   - `Database::query` acquires a shared lock for read-only statements.
   - `Database::execute` acquires an exclusive lock for general SQL execution.
   - CLI routes read-only statements to `query` unless an explicit transaction is active.
+- **Handle model**:
+  - `Database::query` takes `&mut self` because read execution may refresh pager/catalog state from disk before running.
+  - For concurrent reads in one process, open additional read-only handles (`Database::open_reader`) and run `query` on each handle.
 
 For on-disk file contracts (main DB file / `.wal` / `.lock`), see [Files, WAL, and Locking](files-and-locking.md).
 For catalog key/value binary layouts, see [Catalog Format](catalog-format.md).

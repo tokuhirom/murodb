@@ -54,6 +54,12 @@ pub struct Database {
     encryption_suite: EncryptionSuite,
 }
 
+/// Read-only database handle for concurrent query workloads.
+pub struct DatabaseReader {
+    session: Session,
+    lock_manager: LockManager,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseEncryption {
     Encrypted,
@@ -682,6 +688,9 @@ impl Database {
     /// Execute a read-only SQL query and return rows.
     ///
     /// This uses a shared lock so multiple readers can run concurrently.
+    ///
+    /// Note: this method takes `&mut self` because the session may refresh
+    /// pager/catalog state from disk before executing the read.
     /// Non-read-only SQL returns an execution error.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
         let _guard = self.lock_manager.read_lock()?;
@@ -705,10 +714,83 @@ impl Database {
         self.query_prepared(&prepared, params)
     }
 
+    /// Open an additional database handle for read-oriented workloads.
+    ///
+    /// This is useful when you want concurrent readers without manually
+    /// re-opening the same path and re-supplying key material.
+    ///
+    /// The returned handle is read-only and does not expose write APIs.
+    pub fn open_reader(&self) -> Result<DatabaseReader> {
+        let path = self.db_path.as_path();
+        let wp = wal_path(path);
+        match self.encryption_suite {
+            EncryptionSuite::Plaintext => {
+                let mut pager = Pager::open_plaintext(path)?;
+                let catalog_root = pager.catalog_root();
+                let mut catalog = SystemCatalog::open(catalog_root);
+                let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+                initialize_fts_term_key(
+                    &mut pager,
+                    if has_uninitialized_catalog {
+                        None
+                    } else {
+                        Some(&mut catalog)
+                    },
+                    LEGACY_SQL_FTS_TERM_KEY,
+                    false,
+                )?;
+                // Reader handles never write WAL; fixed LSN is acceptable.
+                let wal = WalWriter::open_plaintext(&wp, 0)?;
+                let lock_manager = LockManager::new(path)?;
+                let session = Session::new(pager, catalog, wal);
+                Ok(DatabaseReader {
+                    session,
+                    lock_manager,
+                })
+            }
+            EncryptionSuite::Aes256GcmSiv => {
+                let master_key = self.master_key.as_ref().ok_or_else(|| {
+                    MuroError::Encryption("missing master key for encrypted reader open".into())
+                })?;
+                let mut pager = Pager::open(path, master_key)?;
+                let catalog_root = pager.catalog_root();
+                let mut catalog = SystemCatalog::open(catalog_root);
+                let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+                initialize_fts_term_key(
+                    &mut pager,
+                    if has_uninitialized_catalog {
+                        None
+                    } else {
+                        Some(&mut catalog)
+                    },
+                    LEGACY_SQL_FTS_TERM_KEY,
+                    false,
+                )?;
+                // Reader handles never write WAL; fixed LSN is acceptable.
+                let wal = WalWriter::open(&wp, master_key, 0)?;
+                let lock_manager = LockManager::new(path)?;
+                let session = Session::new(pager, catalog, wal);
+                Ok(DatabaseReader {
+                    session,
+                    lock_manager,
+                })
+            }
+        }
+    }
+
     /// Re-encrypt the database with a new password-derived key.
     pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
         let _guard = self.lock_manager.write_lock()?;
-        self.session.rekey_with_password(new_password)
+        self.session.rekey_with_password(new_password)?;
+        let info = Pager::read_encryption_info_from_file(&self.db_path)?;
+        if info.suite == EncryptionSuite::Aes256GcmSiv {
+            let master_key = kdf::derive_key(new_password.as_bytes(), &info.salt)?;
+            self.master_key = Some(master_key);
+        } else {
+            self.master_key = None;
+        }
+        self.encryption_suite = info.suite;
+        Ok(())
     }
 
     /// Get the catalog root page ID (needed for reopening).
@@ -748,9 +830,43 @@ impl Database {
     }
 }
 
+impl DatabaseReader {
+    /// Parse SQL into a reusable prepared statement template.
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+        self.session.prepare(sql)
+    }
+
+    /// Execute a read-only SQL query and return rows.
+    pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
+        let _guard = self.lock_manager.read_lock()?;
+        self.session.execute_read_only_query(sql)
+    }
+
+    /// Execute a prepared read-only query and return rows.
+    pub fn query_prepared(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<Vec<Row>> {
+        let _guard = self.lock_manager.read_lock()?;
+        self.session
+            .execute_read_only_prepared_query(prepared, params)
+    }
+
+    /// Convenience API: prepare+query in one call using bound values.
+    pub fn query_params(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        let prepared = self.prepare(sql)?;
+        self.query_prepared(&prepared, params)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::wal_path;
     use super::Database;
+    use crate::wal::reader::WalReader;
+    use crate::wal::record::WalRecord;
+    use crate::wal::writer::WalWriter;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -786,5 +902,70 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(2))
             .expect("flush should complete after read lock is released");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn open_reader_plaintext_can_query_same_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_plaintext.db");
+
+        let mut db = Database::create_plaintext(&db_path).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+
+        let mut reader = db.open_reader().unwrap();
+        let rows = reader
+            .query("SELECT name FROM t WHERE id = 1")
+            .expect("reader query should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("name"),
+            Some(&crate::types::Value::Varchar("alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn open_reader_works_after_rekey_with_password() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_rekey.db");
+
+        let mut db = Database::create_with_password(&db_path, "old-pass").unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1)").unwrap();
+        db.rekey_with_password("new-pass").unwrap();
+
+        let mut reader = db.open_reader().unwrap();
+        let rows = reader
+            .query("SELECT id FROM t")
+            .expect("reader query after rekey should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&crate::types::Value::Integer(1)));
+    }
+
+    #[test]
+    fn open_reader_does_not_truncate_existing_wal() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_wal_preserve.db");
+
+        let db = Database::create_plaintext(&db_path).unwrap();
+        let wp = wal_path(&db_path);
+
+        {
+            let mut wal = WalWriter::open_plaintext(&wp, 0).unwrap();
+            wal.append(&WalRecord::Begin { txid: 42 }).unwrap();
+            wal.sync().unwrap();
+        }
+        let size_before = std::fs::metadata(&wp).unwrap().len();
+
+        let _reader = db.open_reader().unwrap();
+
+        let size_after = std::fs::metadata(&wp).unwrap().len();
+        assert_eq!(size_after, size_before, "open_reader must not truncate WAL");
+
+        let mut wal_reader = WalReader::open_plaintext(&wp).unwrap();
+        let records = wal_reader.read_all().unwrap();
+        assert_eq!(records.len(), 1);
     }
 }

@@ -73,6 +73,7 @@ Policy can also be changed at runtime per session:
 - `SET checkpoint_interval_ms = <u64>`
 
 See [Checkpoint Policy Tuning](checkpoint-policy.md) for recommended starting values and rollout procedure.
+Option details are documented in [Runtime Configuration](runtime-config.md).
 
 ### freelist_sanitize_count
 

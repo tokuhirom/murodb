@@ -13,6 +13,7 @@
 - [CLI Options](user-guide/cli.md)
 - [WAL Inspection](user-guide/wal-inspect.md)
 - [SQL Reference](user-guide/sql-reference.md)
+- [Runtime Configuration](user-guide/runtime-config.md)
 - [Benchmarks](user-guide/benchmarks.md)
 - [Full-Text Search](user-guide/full-text-search.md)
 - [Recovery](user-guide/recovery.md)

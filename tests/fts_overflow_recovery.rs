@@ -38,7 +38,7 @@ fn assert_overflow_doc_searchable(db_path: &std::path::Path, fts_root: u64) {
 fn setup_committed_overflow_wal() -> (TempDir, std::path::PathBuf, std::path::PathBuf, u64) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
 
@@ -101,7 +101,7 @@ fn test_fts_overflow_recovery_with_torn_wal_tail() {
 fn test_fts_overflow_recovery_after_post_wal_sync_partial_write() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let mut wal = WalWriter::create(&wal_path, &test_key()).unwrap();
 

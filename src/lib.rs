@@ -53,7 +53,30 @@ pub enum DatabaseEncryption {
 }
 
 fn wal_path(db_path: &Path) -> PathBuf {
-    db_path.with_extension("wal")
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".wal");
+    PathBuf::from(s)
+}
+
+/// Migrate legacy sidecar files that used `with_extension()` (which replaces
+/// the extension) to the new append-suffix naming.
+/// e.g. `mydb.wal` → `mydb.db.wal` when db_path is `mydb.db`.
+fn migrate_legacy_sidecar_paths(db_path: &Path) {
+    for suffix in &["wal", "lock"] {
+        let legacy = db_path.with_extension(suffix);
+        let new = {
+            let mut s = db_path.as_os_str().to_os_string();
+            s.push(".");
+            s.push(suffix);
+            PathBuf::from(s)
+        };
+        // Only migrate when the paths actually differ (i.e. db_path had an extension)
+        // and the legacy file exists but the new one does not.
+        if legacy != new && legacy.exists() && !new.exists() {
+            let _ = std::fs::rename(&legacy, &new);
+            sync_dir(&new);
+        }
+    }
 }
 
 /// Best-effort directory fsync to persist metadata (new file, rename, truncate).
@@ -206,6 +229,7 @@ impl Database {
         master_key: &MasterKey,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
+        migrate_legacy_sidecar_paths(path);
         let wp = wal_path(path);
         let mut recovery_report = None;
 
@@ -251,6 +275,7 @@ impl Database {
         path: &Path,
         recovery_mode: RecoveryMode,
     ) -> Result<(Self, Option<RecoveryResult>)> {
+        migrate_legacy_sidecar_paths(path);
         let wp = wal_path(path);
         let mut recovery_report = None;
 

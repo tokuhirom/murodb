@@ -44,7 +44,7 @@ fn read_logical_state(db_path: &std::path::Path) -> (Vec<Vec<u8>>, u64, u64, u64
 fn test_idempotent_recovery_single_tx() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let wal_backup = dir.path().join("test.wal.bak");
 
     // Create DB and commit one transaction to WAL (no checkpoint)
@@ -87,7 +87,7 @@ fn test_idempotent_recovery_single_tx() {
 fn test_idempotent_recovery_multiple_tx() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let wal_backup = dir.path().join("test.wal.bak");
 
     {
@@ -147,7 +147,7 @@ fn test_idempotent_recovery_multiple_tx() {
 fn test_idempotent_recovery_with_torn_tail() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let wal_backup = dir.path().join("test.wal.bak");
 
     {

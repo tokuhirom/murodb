@@ -11,6 +11,7 @@ use crate::schema::column::ColumnDef;
 use crate::schema::index::IndexDef;
 use crate::storage::page::PageId;
 use crate::storage::page_store::PageStore;
+const META_FTS_TERM_KEY: &[u8] = b"meta:fts_term_key";
 
 /// Table definition.
 #[derive(Debug, Clone)]
@@ -239,6 +240,27 @@ impl SystemCatalog {
 
     pub fn root_page_id(&self) -> PageId {
         self.catalog_btree.root_page_id()
+    }
+
+    pub fn get_fts_term_key(&self, pager: &mut impl PageStore) -> Result<Option<[u8; 32]>> {
+        match self.catalog_btree.search(pager, META_FTS_TERM_KEY)? {
+            Some(v) => {
+                if v.len() != 32 {
+                    return Err(MuroError::Corruption(
+                        "catalog meta:fts_term_key has invalid length".to_string(),
+                    ));
+                }
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&v);
+                Ok(Some(key))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_fts_term_key(&mut self, pager: &mut impl PageStore, key: [u8; 32]) -> Result<()> {
+        self.catalog_btree.insert(pager, META_FTS_TERM_KEY, &key)?;
+        Ok(())
     }
 
     /// Get a mutable reference to the catalog B-tree (for direct index updates).
@@ -615,5 +637,18 @@ mod tests {
             assert_eq!(table.name, "users");
             assert_eq!(table.columns.len(), 2);
         }
+    }
+
+    #[test]
+    fn test_catalog_fts_term_key_meta_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        let mut catalog = SystemCatalog::create(&mut pager).unwrap();
+        let key = [0xA5u8; 32];
+
+        assert_eq!(catalog.get_fts_term_key(&mut pager).unwrap(), None);
+        catalog.set_fts_term_key(&mut pager, key).unwrap();
+        assert_eq!(catalog.get_fts_term_key(&mut pager).unwrap(), Some(key));
     }
 }

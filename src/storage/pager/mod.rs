@@ -6,6 +6,7 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 
 use crate::crypto::aead::MasterKey;
+use crate::crypto::hmac_util::{derive_fts_term_key, derive_fts_term_key_plaintext};
 use crate::crypto::suite::{EncryptionSuite, PageCipher};
 use crate::error::{MuroError, Result};
 use crate::storage::freelist::{FreeList, SanitizeReport};
@@ -57,6 +58,7 @@ pub struct Pager {
     path: PathBuf,
     crypto: PageCipher,
     master_key: Option<MasterKey>,
+    fts_term_key: Option<[u8; 32]>,
     encryption_suite: EncryptionSuite,
     page_count: u64,
     epoch: u64,
@@ -107,11 +109,18 @@ impl Pager {
         let crypto = PageCipher::new(suite, master_key)?;
         let cache = LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap());
 
+        let bootstrap_fts_term_key = if let Some(k) = master_key {
+            derive_fts_term_key(k, &salt)
+        } else {
+            derive_fts_term_key_plaintext(&salt)
+        };
+
         let mut pager = Pager {
             file,
             path: path.to_path_buf(),
             crypto,
             master_key: master_key.cloned(),
+            fts_term_key: Some(bootstrap_fts_term_key),
             encryption_suite: suite,
             page_count: 0,
             epoch: 0,
@@ -179,6 +188,7 @@ impl Pager {
             path: path.to_path_buf(),
             crypto,
             master_key: master_key.cloned(),
+            fts_term_key: None,
             encryption_suite: snapshot.encryption_suite,
             page_count: 0,
             epoch: 0,
@@ -198,6 +208,7 @@ impl Pager {
         };
 
         pager.read_plaintext_header()?;
+        pager.fts_term_key = Some(pager.derive_bootstrap_fts_term_key());
 
         // Verify that decryption works by reading page 0 if there are pages
         if pager.page_count > 0 {
@@ -631,6 +642,29 @@ impl Pager {
         &self.path
     }
 
+    /// Derive the FULLTEXT term key from the current master key and database salt.
+    pub fn fts_term_key(&self) -> Result<[u8; 32]> {
+        self.fts_term_key.ok_or_else(|| {
+            MuroError::Execution(
+                "FULLTEXT term key is not initialized; open database via Database API".to_string(),
+            )
+        })
+    }
+
+    /// Compute the legacy/default FTS term key from current key material.
+    pub fn derive_bootstrap_fts_term_key(&self) -> [u8; 32] {
+        if let Some(master_key) = self.master_key.as_ref() {
+            derive_fts_term_key(master_key, &self.salt)
+        } else {
+            derive_fts_term_key_plaintext(&self.salt)
+        }
+    }
+
+    /// Set the in-memory FULLTEXT term key.
+    pub fn set_fts_term_key(&mut self, key: [u8; 32]) {
+        self.fts_term_key = Some(key);
+    }
+
     /// Re-encrypt all pages with a new master key and salt.
     ///
     /// This performs a full re-encryption of every page in the database file:
@@ -901,6 +935,10 @@ impl crate::storage::page_store::PageStore for Pager {
 
     fn free_page(&mut self, page_id: PageId) {
         Pager::free_page(self, page_id)
+    }
+
+    fn fts_term_key(&self) -> Result<[u8; 32]> {
+        Pager::fts_term_key(self)
     }
 }
 

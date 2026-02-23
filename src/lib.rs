@@ -22,17 +22,24 @@ pub mod wal;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::btree::ops::BTree;
 use crate::concurrency::LockManager;
 use crate::crypto::aead::MasterKey;
 use crate::crypto::kdf;
 use crate::crypto::suite::EncryptionSuite;
-use crate::error::Result;
+use crate::error::{MuroError, Result};
+use crate::fts::index::FtsIndex;
+use crate::fts::tokenizer::tokenize_bigram;
 use crate::schema::catalog::SystemCatalog;
-use crate::sql::executor::{ExecResult, Row};
+use crate::schema::index::IndexType;
+use crate::sql::executor::{deserialize_row_versioned, ExecResult, Row};
 use crate::sql::session::Session;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
+use crate::types::Value;
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
+
+const LEGACY_SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
 
 /// Main database handle.
 pub struct Database {
@@ -153,11 +160,143 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
+fn fts_value_to_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::Varchar(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn resolve_missing_fts_term_key(
+    pager: &mut Pager,
+    catalog: &mut SystemCatalog,
+    bootstrap_key: [u8; 32],
+) -> Result<[u8; 32]> {
+    if bootstrap_key == LEGACY_SQL_FTS_TERM_KEY {
+        return Ok(bootstrap_key);
+    }
+
+    let mut legacy_hits = 0u64;
+    let mut bootstrap_hits = 0u64;
+
+    let table_names = catalog.list_tables(pager)?;
+    for table_name in table_names {
+        let Some(table_def) = catalog.get_table(pager, &table_name)? else {
+            continue;
+        };
+        let indexes = catalog.get_indexes_for_table(pager, &table_name)?;
+        for idx in indexes {
+            if idx.index_type != IndexType::Fulltext {
+                continue;
+            }
+            let Some(col_name) = idx.column_names.first() else {
+                continue;
+            };
+            let Some(col_idx) = table_def.column_index(col_name) else {
+                continue;
+            };
+
+            let data_btree = BTree::open(table_def.data_btree_root);
+            let mut tokens_to_probe: Vec<String> = Vec::new();
+            data_btree.scan(pager, |_pk, row| {
+                if tokens_to_probe.len() >= 64 {
+                    return Ok(false);
+                }
+                let values = deserialize_row_versioned(
+                    row,
+                    &table_def.columns,
+                    table_def.row_format_version,
+                )?;
+                let Some(text) = values.get(col_idx).and_then(fts_value_to_text) else {
+                    return Ok(true);
+                };
+                let tokens = tokenize_bigram(text);
+                for token in tokens {
+                    if token.text.is_empty() {
+                        continue;
+                    }
+                    tokens_to_probe.push(token.text);
+                    if tokens_to_probe.len() >= 64 {
+                        break;
+                    }
+                }
+                Ok(tokens_to_probe.len() < 64)
+            })?;
+
+            let fts_legacy = FtsIndex::open(idx.btree_root, LEGACY_SQL_FTS_TERM_KEY);
+            let fts_bootstrap = FtsIndex::open(idx.btree_root, bootstrap_key);
+            for token in tokens_to_probe {
+                if fts_legacy.get_postings(pager, &token)?.df() > 0 {
+                    legacy_hits = legacy_hits.saturating_add(1);
+                    break;
+                }
+                if fts_bootstrap.get_postings(pager, &token)?.df() > 0 {
+                    bootstrap_hits = bootstrap_hits.saturating_add(1);
+                    break;
+                }
+            }
+        }
+    }
+
+    if legacy_hits > 0 && bootstrap_hits == 0 {
+        Ok(LEGACY_SQL_FTS_TERM_KEY)
+    } else if bootstrap_hits > 0 && legacy_hits == 0 {
+        Ok(bootstrap_key)
+    } else if legacy_hits > bootstrap_hits {
+        Ok(LEGACY_SQL_FTS_TERM_KEY)
+    } else {
+        Ok(bootstrap_key)
+    }
+}
+
+fn initialize_fts_term_key(
+    pager: &mut Pager,
+    catalog: Option<&mut SystemCatalog>,
+    missing_meta_key: [u8; 32],
+    persist_missing_meta: bool,
+) -> Result<bool> {
+    let Some(catalog) = catalog else {
+        pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
+        return Ok(false);
+    };
+
+    match catalog.get_fts_term_key(pager) {
+        Ok(Some(existing)) => {
+            pager.set_fts_term_key(existing);
+            Ok(false)
+        }
+        Ok(None) => {
+            // Missing metadata means legacy DB; call site decides which key to backfill.
+            let generated = if missing_meta_key == LEGACY_SQL_FTS_TERM_KEY {
+                resolve_missing_fts_term_key(pager, catalog, pager.derive_bootstrap_fts_term_key())?
+            } else {
+                missing_meta_key
+            };
+            pager.set_fts_term_key(generated);
+            if persist_missing_meta {
+                catalog.set_fts_term_key(pager, generated)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        // Some tests build DB files through Pager-only flows where catalog_root is unset (0).
+        // For those files, keep FTS usable via in-memory bootstrap without catalog writes.
+        Err(MuroError::InvalidPage) if pager.catalog_root() == 0 => {
+            pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 impl Database {
     /// Create a new database at the given path.
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -179,7 +318,9 @@ impl Database {
 
     pub fn create_plaintext(path: &Path) -> Result<Self> {
         let mut pager = Pager::create_plaintext(path)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -252,9 +393,20 @@ impl Database {
             recovery_report = Some(report);
         }
 
-        let pager = Pager::open(path, master_key)?;
+        let mut pager = Pager::open(path, master_key)?;
         let catalog_root = pager.catalog_root();
-        let catalog = SystemCatalog::open(catalog_root);
+        let mut catalog = SystemCatalog::open(catalog_root);
+        let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+        initialize_fts_term_key(
+            &mut pager,
+            if has_uninitialized_catalog {
+                None
+            } else {
+                Some(&mut catalog)
+            },
+            LEGACY_SQL_FTS_TERM_KEY,
+            false,
+        )?;
         let wal = WalWriter::create(&wp, master_key)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -296,9 +448,20 @@ impl Database {
             recovery_report = Some(report);
         }
 
-        let pager = Pager::open_plaintext(path)?;
+        let mut pager = Pager::open_plaintext(path)?;
         let catalog_root = pager.catalog_root();
-        let catalog = SystemCatalog::open(catalog_root);
+        let mut catalog = SystemCatalog::open(catalog_root);
+        let has_uninitialized_catalog = catalog_root == 0 && pager.page_count() == 0;
+        initialize_fts_term_key(
+            &mut pager,
+            if has_uninitialized_catalog {
+                None
+            } else {
+                Some(&mut catalog)
+            },
+            LEGACY_SQL_FTS_TERM_KEY,
+            false,
+        )?;
         let wal = WalWriter::create_plaintext(&wp)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -320,7 +483,9 @@ impl Database {
         let salt = kdf::generate_salt();
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key, true)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 

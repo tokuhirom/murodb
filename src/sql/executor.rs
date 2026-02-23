@@ -52,7 +52,7 @@ use fts::{
     build_fts_eval_context, execute_fts_scan_rows, free_btree_pages, fts_allocate_doc_id,
     fts_delete_doc_mapping, fts_get_doc_id, fts_put_doc_mapping, fts_set_next_doc_id,
     materialize_fts_expr, populate_fts_row_doc_ids, validate_fulltext_parser, validate_value,
-    value_to_fts_text, FtsEvalContext, SQL_FTS_TERM_KEY,
+    value_to_fts_text, FtsEvalContext,
 };
 use indexing::{
     check_unique_index_constraints, check_unique_index_constraints_excluding,

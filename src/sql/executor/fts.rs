@@ -1,6 +1,5 @@
 use super::*;
 
-pub(super) const SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
 pub(super) const SQL_FTS_SCORE_SCALE: f64 = 1_000_000.0;
 pub(super) const SQL_FTS_NEXT_DOC_ID_KEY: &[u8] = b"__next_doc_id__";
 pub(super) const SQL_FTS_PK2DOC_PREFIX: &[u8] = b"__pk2doc__";
@@ -27,7 +26,7 @@ pub(super) fn execute_fts_scan_rows(
     mode: MatchMode,
     pager: &mut impl PageStore,
 ) -> Result<Vec<(u64, Vec<Value>)>> {
-    let fts = open_fulltext_index(indexes, &table_def.name, column);
+    let fts = open_fulltext_index(indexes, &table_def.name, column, pager);
     let fts = fts?;
     let idx = indexes
         .iter()
@@ -80,9 +79,10 @@ pub(super) fn open_fulltext_index(
     indexes: &[IndexDef],
     table_name: &str,
     column: &str,
+    pager: &impl PageStore,
 ) -> Result<FtsIndex> {
     let idx = find_fulltext_index(indexes, table_name, column)?;
-    Ok(FtsIndex::open(idx.btree_root, SQL_FTS_TERM_KEY))
+    Ok(FtsIndex::open(idx.btree_root, pager.fts_term_key()?))
 }
 
 pub(super) fn find_fulltext_index<'a>(
@@ -143,7 +143,7 @@ pub(super) fn build_fts_eval_context(
     let mut score_maps: HashMap<MatchExprKey, HashMap<u64, i64>> = HashMap::new();
     for key in keys {
         let idx = find_fulltext_index(indexes, table_name, &key.column)?;
-        let fts = open_fulltext_index(indexes, table_name, &key.column)?;
+        let fts = open_fulltext_index(indexes, table_name, &key.column, pager)?;
         let results = match key.mode {
             MatchMode::NaturalLanguage => query_natural_with_config(
                 &fts,

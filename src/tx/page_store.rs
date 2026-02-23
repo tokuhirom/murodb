@@ -41,4 +41,8 @@ impl PageStore for TxPageStore<'_> {
     fn free_page(&mut self, page_id: PageId) {
         self.tx.free_page(page_id);
     }
+
+    fn fts_term_key(&self) -> Result<[u8; 32]> {
+        self.pager.fts_term_key()
+    }
 }

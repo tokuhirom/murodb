@@ -1,6 +1,7 @@
 use crate::error::{MuroError, Result};
 use crate::sql::ast::Expr;
 use crate::types::{parse_date_string, parse_timestamp_string, Value};
+use serde_json::Value as JsonValue;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::compare::{is_truthy, value_cmp};
@@ -538,6 +539,94 @@ pub(super) fn eval_function_call(
                 )),
             }
         }
+        "JSON_EXTRACT" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let doc = parse_json_doc(&vals[0])?;
+            let path = vals[1].to_string();
+            let hits = jsonpath_lib::select(&doc, &path).map_err(|e| {
+                MuroError::Execution(format!("JSON_EXTRACT invalid path '{}': {}", path, e))
+            })?;
+            if hits.is_empty() {
+                return Ok(Value::Null);
+            }
+            if hits.len() == 1 {
+                return Ok(Value::Varchar(canonical_json(hits[0])?));
+            }
+            let arr = JsonValue::Array(hits.into_iter().cloned().collect());
+            Ok(Value::Varchar(canonical_json(&arr)?))
+        }
+        "JSON_SET" => {
+            check_args(name, args, 3)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let mut doc = parse_json_doc(&vals[0])?;
+            let path = vals[1].to_string();
+            let parsed_path = parse_json_path(&path)?;
+            let json_value = sql_value_to_json_value(&vals[2]);
+            set_json_path(&mut doc, &parsed_path, json_value);
+            Ok(Value::Varchar(canonical_json(&doc)?))
+        }
+        "JSON_REMOVE" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let mut doc = parse_json_doc(&vals[0])?;
+            let path = vals[1].to_string();
+            let parsed_path = parse_json_path(&path)?;
+            remove_json_path(&mut doc, &parsed_path);
+            Ok(Value::Varchar(canonical_json(&doc)?))
+        }
+        "JSON_TYPE" => {
+            check_args(name, args, 1)?;
+            let val = eval_expr(&args[0], columns)?;
+            if val.is_null() {
+                return Ok(Value::Null);
+            }
+            let doc = parse_json_doc(&val)?;
+            let type_name = match doc {
+                JsonValue::Null => "NULL",
+                JsonValue::Bool(_) => "BOOLEAN",
+                JsonValue::Number(ref n) if n.is_i64() || n.is_u64() => "INTEGER",
+                JsonValue::Number(_) => "DOUBLE",
+                JsonValue::String(_) => "STRING",
+                JsonValue::Array(_) => "ARRAY",
+                JsonValue::Object(_) => "OBJECT",
+            };
+            Ok(Value::Varchar(type_name.to_string()))
+        }
+        "JSON_CONTAINS" => {
+            check_args(name, args, 2)?;
+            let vals = eval_args_null_check(args, columns)?;
+            let vals = match vals {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let doc = parse_json_doc(&vals[0])?;
+            let contains = if let Value::Varchar(s) = &vals[1] {
+                if s.starts_with('$') {
+                    let hits = jsonpath_lib::select(&doc, s).map_err(|e| {
+                        MuroError::Execution(format!("JSON_CONTAINS invalid path '{}': {}", s, e))
+                    })?;
+                    !hits.is_empty()
+                } else {
+                    deep_json_contains(&doc, &sql_value_to_json_value(&vals[1]))
+                }
+            } else {
+                deep_json_contains(&doc, &sql_value_to_json_value(&vals[1]))
+            };
+            Ok(Value::Integer(if contains { 1 } else { 0 }))
+        }
 
         // UUID functions
         "UUID_V4" => {
@@ -739,6 +828,212 @@ fn civil_from_days(z: i64) -> (i32, i32, i32) {
     let m = mp + if mp < 10 { 3 } else { -9 };
     let y = y + if m <= 2 { 1 } else { 0 };
     (y as i32, m as i32, d as i32)
+}
+
+#[derive(Debug)]
+enum JsonPathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn canonical_json(v: &JsonValue) -> Result<String> {
+    serde_json::to_string(v)
+        .map_err(|e| MuroError::Execution(format!("JSON serialization error: {}", e)))
+}
+
+fn parse_json_doc(val: &Value) -> Result<JsonValue> {
+    match val {
+        Value::Varchar(s) => serde_json::from_str(s)
+            .map_err(|e| MuroError::Execution(format!("Invalid JSON document: {}", e))),
+        Value::Varbinary(b) => {
+            let s = std::str::from_utf8(b)
+                .map_err(|_| MuroError::Execution("JSON document must be valid UTF-8".into()))?;
+            serde_json::from_str(s)
+                .map_err(|e| MuroError::Execution(format!("Invalid JSON document: {}", e)))
+        }
+        _ => serde_json::from_str(&val.to_string())
+            .map_err(|e| MuroError::Execution(format!("Invalid JSON document: {}", e))),
+    }
+}
+
+fn sql_value_to_json_value(val: &Value) -> JsonValue {
+    match val {
+        Value::Null => JsonValue::Null,
+        Value::Integer(n) => JsonValue::from(*n),
+        Value::Float(n) => serde_json::Number::from_f64(*n)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        Value::Decimal(d) => {
+            let s = d.to_string();
+            serde_json::from_str(&s).unwrap_or_else(|_| JsonValue::String(s))
+        }
+        Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) => {
+            JsonValue::String(val.to_string())
+        }
+        Value::Varchar(s) => {
+            serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.clone()))
+        }
+        Value::Varbinary(b) => JsonValue::String(String::from_utf8_lossy(b).to_string()),
+        Value::Uuid(b) => JsonValue::String(crate::types::format_uuid(b)),
+    }
+}
+
+fn parse_json_path(path: &str) -> Result<Vec<JsonPathSegment>> {
+    if !path.starts_with('$') {
+        return Err(MuroError::Execution(format!(
+            "JSON path must start with '$': {}",
+            path
+        )));
+    }
+    let chars: Vec<char> = path.chars().collect();
+    let mut i = 1usize;
+    let mut segs = Vec::new();
+    while i < chars.len() {
+        match chars[i] {
+            '.' => {
+                i += 1;
+                let start = i;
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i == start {
+                    return Err(MuroError::Execution(format!(
+                        "Invalid JSON path near '{}'",
+                        path
+                    )));
+                }
+                segs.push(JsonPathSegment::Key(path[start..i].to_string()));
+            }
+            '[' => {
+                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i == start || i >= chars.len() || chars[i] != ']' {
+                    return Err(MuroError::Execution(format!(
+                        "Invalid JSON path near '{}'",
+                        path
+                    )));
+                }
+                let idx = path[start..i].parse::<usize>().map_err(|_| {
+                    MuroError::Execution(format!("Invalid JSON path index in '{}'", path))
+                })?;
+                i += 1;
+                segs.push(JsonPathSegment::Index(idx));
+            }
+            _ => {
+                return Err(MuroError::Execution(format!(
+                    "Unsupported JSON path syntax in '{}'",
+                    path
+                )))
+            }
+        }
+    }
+    Ok(segs)
+}
+
+fn set_json_path(root: &mut JsonValue, path: &[JsonPathSegment], value: JsonValue) {
+    if path.is_empty() {
+        *root = value;
+        return;
+    }
+    let mut cur = root;
+    for (idx, seg) in path.iter().enumerate() {
+        let is_last = idx + 1 == path.len();
+        match seg {
+            JsonPathSegment::Key(key) => {
+                if !cur.is_object() {
+                    *cur = JsonValue::Object(serde_json::Map::new());
+                }
+                let obj = cur.as_object_mut().expect("object just created");
+                if is_last {
+                    obj.insert(key.clone(), value);
+                    return;
+                }
+                let next = match path[idx + 1] {
+                    JsonPathSegment::Index(_) => JsonValue::Array(Vec::new()),
+                    JsonPathSegment::Key(_) => JsonValue::Object(serde_json::Map::new()),
+                };
+                cur = obj.entry(key.clone()).or_insert(next);
+            }
+            JsonPathSegment::Index(i) => {
+                if !cur.is_array() {
+                    *cur = JsonValue::Array(Vec::new());
+                }
+                let arr = cur.as_array_mut().expect("array just created");
+                while arr.len() <= *i {
+                    arr.push(JsonValue::Null);
+                }
+                if is_last {
+                    arr[*i] = value;
+                    return;
+                }
+                cur = &mut arr[*i];
+            }
+        }
+    }
+}
+
+fn remove_json_path(root: &mut JsonValue, path: &[JsonPathSegment]) {
+    if path.is_empty() {
+        *root = JsonValue::Null;
+        return;
+    }
+    let mut cur = root;
+    for seg in &path[..path.len().saturating_sub(1)] {
+        match seg {
+            JsonPathSegment::Key(key) => {
+                let Some(next) = cur.as_object_mut().and_then(|o| o.get_mut(key)) else {
+                    return;
+                };
+                cur = next;
+            }
+            JsonPathSegment::Index(i) => {
+                let Some(next) = cur.as_array_mut().and_then(|a| a.get_mut(*i)) else {
+                    return;
+                };
+                cur = next;
+            }
+        }
+    }
+    match path.last().expect("non-empty path") {
+        JsonPathSegment::Key(key) => {
+            if let Some(obj) = cur.as_object_mut() {
+                obj.remove(key);
+            }
+        }
+        JsonPathSegment::Index(i) => {
+            if let Some(arr) = cur.as_array_mut() {
+                if *i < arr.len() {
+                    arr.remove(*i);
+                }
+            }
+        }
+    }
+}
+
+fn deep_json_contains(haystack: &JsonValue, needle: &JsonValue) -> bool {
+    if json_contains_at_node(haystack, needle) {
+        return true;
+    }
+    match haystack {
+        JsonValue::Array(items) => items.iter().any(|v| deep_json_contains(v, needle)),
+        JsonValue::Object(map) => map.values().any(|v| deep_json_contains(v, needle)),
+        _ => false,
+    }
+}
+
+fn json_contains_at_node(haystack: &JsonValue, needle: &JsonValue) -> bool {
+    match (haystack, needle) {
+        (JsonValue::Object(h), JsonValue::Object(n)) => n
+            .iter()
+            .all(|(k, nv)| h.get(k).is_some_and(|hv| json_contains_at_node(hv, nv))),
+        (JsonValue::Array(h), JsonValue::Array(n)) => n
+            .iter()
+            .all(|nv| h.iter().any(|hv| json_contains_at_node(hv, nv))),
+        _ => haystack == needle,
+    }
 }
 
 fn check_args(name: &str, args: &[Expr], expected: usize) -> Result<()> {

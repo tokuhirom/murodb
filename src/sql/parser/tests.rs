@@ -394,6 +394,16 @@ fn test_parse_boolean_type() {
 }
 
 #[test]
+fn test_parse_jsonb_type() {
+    let stmt = parse_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, doc JSONB)").unwrap();
+    if let Statement::CreateTable(ct) = stmt {
+        assert_eq!(ct.columns[1].data_type, DataType::Jsonb);
+    } else {
+        panic!("Expected CreateTable");
+    }
+}
+
+#[test]
 fn test_parse_not_operator() {
     let stmt = parse_sql("SELECT * FROM t WHERE NOT id = 1").unwrap();
     if let Statement::Select(sel) = stmt {

@@ -4,6 +4,7 @@ use crate::types::{
     parse_timestamp_string, parse_uuid_string, DataType, Value,
 };
 use rust_decimal::prelude::ToPrimitive;
+use serde_json::Value as JsonValue;
 
 pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
     const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
@@ -174,6 +175,19 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
             };
             Ok(Value::Varchar(s))
         }
+        DataType::Jsonb => match val {
+            Value::Varchar(s) => Ok(Value::Varchar(canonicalize_json_text(s)?)),
+            Value::Varbinary(b) => {
+                let s = std::str::from_utf8(b).map_err(|_| {
+                    MuroError::Execution("Cannot cast non-UTF8 VARBINARY to JSONB".into())
+                })?;
+                Ok(Value::Varchar(canonicalize_json_text(s)?))
+            }
+            Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) | Value::Uuid(_) => {
+                Ok(Value::Varchar(json_string_literal(&val.to_string())?))
+            }
+            _ => Ok(Value::Varchar(canonicalize_json_text(&val.to_string())?)),
+        },
         DataType::Varbinary(_) => match val {
             Value::Varbinary(b) => Ok(Value::Varbinary(b.clone())),
             Value::Varchar(s) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
@@ -207,4 +221,16 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
             ))),
         },
     }
+}
+
+fn canonicalize_json_text(s: &str) -> Result<String> {
+    let parsed: JsonValue = serde_json::from_str(s)
+        .map_err(|e| MuroError::Execution(format!("Invalid JSON: {}", e)))?;
+    serde_json::to_string(&parsed)
+        .map_err(|e| MuroError::Execution(format!("Failed to canonicalize JSON: {}", e)))
+}
+
+fn json_string_literal(s: &str) -> Result<String> {
+    serde_json::to_string(s)
+        .map_err(|e| MuroError::Execution(format!("Failed to encode JSON string: {}", e)))
 }

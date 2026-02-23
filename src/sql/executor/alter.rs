@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value as JsonValue;
 
 pub(super) fn exec_alter_table(
     at: &AlterTable,
@@ -538,6 +539,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 "Cannot coerce integer to date/time type".into(),
             )),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
+            DataType::Jsonb => Ok(Value::Varchar(canonicalize_json_text(&n.to_string())?)),
             DataType::Varbinary(_) => Err(MuroError::Execution(
                 "Cannot coerce integer to VARBINARY".into(),
             )),
@@ -563,6 +565,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 "Cannot coerce float to date/time type".into(),
             )),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(n.to_string())),
+            DataType::Jsonb => Ok(Value::Varchar(canonicalize_json_text(&n.to_string())?)),
             DataType::Varbinary(_) => Err(MuroError::Execution(
                 "Cannot coerce floating-point value to VARBINARY".into(),
             )),
@@ -588,6 +591,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 Ok(Value::Float(n))
             }
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(d.to_string())),
+            DataType::Jsonb => Ok(Value::Varchar(canonicalize_json_text(&d.to_string())?)),
             _ => Err(MuroError::Execution(
                 "Cannot coerce DECIMAL to target type".into(),
             )),
@@ -631,6 +635,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 Ok(Value::Timestamp(ts))
             }
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(s.clone())),
+            DataType::Jsonb => Ok(Value::Varchar(canonicalize_json_text(s)?)),
             DataType::Varbinary(_) => Ok(Value::Varbinary(s.as_bytes().to_vec())),
             DataType::Uuid => {
                 let bytes = crate::types::parse_uuid_string(s).ok_or_else(|| {
@@ -644,6 +649,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
             DataType::DateTime => Ok(Value::DateTime((*d as i64) * 1_000_000)),
             DataType::Timestamp => Ok(Value::Timestamp((*d as i64) * 1_000_000)),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_date(*d))),
+            DataType::Jsonb => Ok(Value::Varchar(json_string_literal(&format_date(*d))?)),
             _ => Err(MuroError::Execution(
                 "Cannot coerce DATE to target type".into(),
             )),
@@ -653,6 +659,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
             DataType::Timestamp => Ok(Value::Timestamp(*dt)),
             DataType::Date => Ok(Value::Date((*dt / 1_000_000) as i32)),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_datetime(*dt))),
+            DataType::Jsonb => Ok(Value::Varchar(json_string_literal(&format_datetime(*dt))?)),
             _ => Err(MuroError::Execution(
                 "Cannot coerce DATETIME to target type".into(),
             )),
@@ -662,6 +669,7 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
             DataType::DateTime => Ok(Value::DateTime(*ts)),
             DataType::Date => Ok(Value::Date((*ts / 1_000_000) as i32)),
             DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(format_datetime(*ts))),
+            DataType::Jsonb => Ok(Value::Varchar(json_string_literal(&format_datetime(*ts))?)),
             _ => Err(MuroError::Execution(
                 "Cannot coerce TIMESTAMP to target type".into(),
             )),
@@ -674,6 +682,12 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 Ok(Value::Varchar(s))
             }
             DataType::Varbinary(_) => Ok(Value::Varbinary(b.clone())),
+            DataType::Jsonb => {
+                let s = std::str::from_utf8(b).map_err(|_| {
+                    MuroError::Execution("Cannot convert non-UTF8 VARBINARY to JSONB".into())
+                })?;
+                Ok(Value::Varchar(canonicalize_json_text(s)?))
+            }
             DataType::Uuid => {
                 if b.len() != 16 {
                     return Err(MuroError::Execution(format!(
@@ -694,10 +708,25 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
             DataType::Varchar(_) | DataType::Text => {
                 Ok(Value::Varchar(crate::types::format_uuid(b)))
             }
+            DataType::Jsonb => Ok(Value::Varchar(json_string_literal(
+                &crate::types::format_uuid(b),
+            )?)),
             DataType::Varbinary(_) => Ok(Value::Varbinary(b.to_vec())),
             _ => Err(MuroError::Execution(
                 "Cannot coerce UUID to target type".into(),
             )),
         },
     }
+}
+
+fn canonicalize_json_text(s: &str) -> Result<String> {
+    let parsed: JsonValue = serde_json::from_str(s)
+        .map_err(|e| MuroError::Execution(format!("Invalid JSON: {}", e)))?;
+    serde_json::to_string(&parsed)
+        .map_err(|e| MuroError::Execution(format!("Failed to canonicalize JSON: {}", e)))
+}
+
+fn json_string_literal(s: &str) -> Result<String> {
+    serde_json::to_string(s)
+        .map_err(|e| MuroError::Execution(format!("Failed to encode JSON string: {}", e)))
 }

@@ -66,7 +66,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 }
                 DataType::Date => buf.extend_from_slice(&(*n as i32).to_le_bytes()),
                 DataType::DateTime | DataType::Timestamp => buf.extend_from_slice(&n.to_le_bytes()),
-                DataType::Varchar(_) | DataType::Text => {
+                DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                     let bytes = n.to_string().as_bytes().to_vec();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&bytes);
@@ -94,7 +94,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::Date | DataType::DateTime | DataType::Timestamp => {
                     panic!("float value reached date/time serializer")
                 }
-                DataType::Varchar(_) | DataType::Text => {
+                DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                     let bytes = n.to_string().as_bytes().to_vec();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&bytes);
@@ -112,7 +112,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                     let v = (*d as i64) * 1_000_000;
                     buf.extend_from_slice(&v.to_le_bytes());
                 }
-                DataType::Varchar(_) | DataType::Text => {
+                DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                     let s = format_date(*d);
                     let bytes = s.as_bytes();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -128,7 +128,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::DateTime | DataType::Timestamp => {
                     buf.extend_from_slice(&dt.to_le_bytes());
                 }
-                DataType::Varchar(_) | DataType::Text => {
+                DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                     let s = format_datetime(*dt);
                     let bytes = s.as_bytes();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -144,7 +144,7 @@ pub fn serialize_row(values: &[Value], columns: &[ColumnDef]) -> Vec<u8> {
                 DataType::DateTime | DataType::Timestamp => {
                     buf.extend_from_slice(&ts.to_le_bytes());
                 }
-                DataType::Varchar(_) | DataType::Text => {
+                DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                     let s = format_datetime(*ts);
                     let bytes = s.as_bytes();
                     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -293,7 +293,7 @@ pub fn deserialize_row_versioned(
                 values.push(Value::Timestamp(n));
                 offset += 8;
             }
-            DataType::Varchar(_) | DataType::Text => {
+            DataType::Varchar(_) | DataType::Text | DataType::Jsonb => {
                 if offset + 4 > data.len() {
                     return Err(MuroError::InvalidPage);
                 }
@@ -463,6 +463,7 @@ pub fn encode_value(value: &Value, data_type: &DataType) -> Vec<u8> {
             // Parse UUID string for UUID column key encoding
             parse_uuid_string(s).map_or_else(|| s.as_bytes().to_vec(), |b| b.to_vec())
         }
+        (Value::Varchar(s), DataType::Jsonb) => s.as_bytes().to_vec(),
         (Value::Varchar(s), _) => s.as_bytes().to_vec(),
         (Value::Varbinary(b), _) => b.clone(),
         (Value::Uuid(b), _) => b.to_vec(),

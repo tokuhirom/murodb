@@ -335,6 +335,7 @@ pub enum DataType {
     Varchar(Option<u32>),
     Varbinary(Option<u32>),
     Text,
+    Jsonb,
     Uuid,
 }
 
@@ -356,6 +357,7 @@ impl fmt::Display for DataType {
             DataType::Varbinary(None) => write!(f, "VARBINARY"),
             DataType::Varbinary(Some(n)) => write!(f, "VARBINARY({})", n),
             DataType::Text => write!(f, "TEXT"),
+            DataType::Jsonb => write!(f, "JSONB"),
             DataType::Uuid => write!(f, "UUID"),
         }
     }

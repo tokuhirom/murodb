@@ -408,6 +408,82 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_json_functions() {
+        let lookup = |_: &str| -> Option<Value> { None };
+
+        let extract_expr = Expr::FunctionCall {
+            name: "JSON_EXTRACT".into(),
+            args: vec![
+                Expr::StringLiteral("{\"a\":{\"b\":1}}".into()),
+                Expr::StringLiteral("$.a.b".into()),
+            ],
+        };
+        assert_eq!(
+            eval_expr(&extract_expr, &lookup).unwrap(),
+            Value::Varchar("1".into())
+        );
+
+        let set_expr = Expr::FunctionCall {
+            name: "JSON_SET".into(),
+            args: vec![
+                Expr::StringLiteral("{\"a\":1}".into()),
+                Expr::StringLiteral("$.b".into()),
+                Expr::IntLiteral(2),
+            ],
+        };
+        assert_eq!(
+            eval_expr(&set_expr, &lookup).unwrap(),
+            Value::Varchar("{\"a\":1,\"b\":2}".into())
+        );
+
+        let remove_expr = Expr::FunctionCall {
+            name: "JSON_REMOVE".into(),
+            args: vec![
+                Expr::StringLiteral("{\"a\":1,\"b\":2}".into()),
+                Expr::StringLiteral("$.a".into()),
+            ],
+        };
+        assert_eq!(
+            eval_expr(&remove_expr, &lookup).unwrap(),
+            Value::Varchar("{\"b\":2}".into())
+        );
+
+        let type_expr = Expr::FunctionCall {
+            name: "JSON_TYPE".into(),
+            args: vec![Expr::StringLiteral("[1,2,3]".into())],
+        };
+        assert_eq!(
+            eval_expr(&type_expr, &lookup).unwrap(),
+            Value::Varchar("ARRAY".into())
+        );
+
+        let contains_expr = Expr::FunctionCall {
+            name: "JSON_CONTAINS".into(),
+            args: vec![
+                Expr::StringLiteral("{\"a\":1,\"b\":2}".into()),
+                Expr::StringLiteral("{\"b\":2}".into()),
+            ],
+        };
+        assert_eq!(
+            eval_expr(&contains_expr, &lookup).unwrap(),
+            Value::Integer(1)
+        );
+    }
+
+    #[test]
+    fn test_json_extract_invalid_path_is_error() {
+        let lookup = |_: &str| -> Option<Value> { None };
+        let expr = Expr::FunctionCall {
+            name: "JSON_EXTRACT".into(),
+            args: vec![
+                Expr::StringLiteral("{\"a\":1}".into()),
+                Expr::StringLiteral("a".into()),
+            ],
+        };
+        assert!(eval_expr(&expr, &lookup).is_err());
+    }
+
+    #[test]
     fn test_like_patterns() {
         assert!(like_match("hello", "hello"));
         assert!(like_match("hello", "%"));

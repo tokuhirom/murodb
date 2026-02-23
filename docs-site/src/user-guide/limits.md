@@ -41,12 +41,11 @@ MuroDB does not currently support row overflow pages; a single row must fit with
 | VARCHAR(n) max n | 4,294,967,295 (u32) | Practical max is ~4,048 bytes due to page capacity |
 | VARBINARY(n) max n | 4,294,967,295 (u32) | Practical max is ~4,048 bytes due to page capacity |
 | TEXT max size | ~4,048 bytes | Same as VARCHAR; limited by page capacity |
-| VARCHAR(n) length check | Byte-based | `VARCHAR(100)` allows up to 100 *bytes*, not characters |
+| VARCHAR(n) length check | Character-based | `VARCHAR(100)` allows up to 100 *characters* (MySQL-compatible) |
 
-> **Note:** MuroDB checks `VARCHAR(n)` against *byte length*, not character count.
-> This differs from MySQL, where `VARCHAR(n)` limits the number of *characters*.
+> **Note:** MuroDB checks `VARCHAR(n)` against *character count*, consistent with MySQL.
 > Multi-byte UTF-8 characters (e.g., Japanese characters at 3 bytes each, emoji at 4 bytes)
-> consume multiple bytes of the VARCHAR(n) budget.
+> each count as one character. `VARBINARY(n)` still uses byte-based length checking.
 
 ## Internal Limits
 

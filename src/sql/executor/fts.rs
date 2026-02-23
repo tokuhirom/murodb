@@ -543,10 +543,10 @@ pub(super) fn validate_value(value: &Value, data_type: &DataType) -> Result<()> 
         (Value::Float(n), DataType::Float) if *n < f32::MIN as f64 || *n > f32::MAX as f64 => Err(
             MuroError::Execution(format!("Value {} out of range for FLOAT", n)),
         ),
-        (Value::Varchar(s), DataType::Varchar(Some(max))) if s.len() as u32 > *max => {
+        (Value::Varchar(s), DataType::Varchar(Some(max))) if s.chars().count() as u32 > *max => {
             Err(MuroError::Execution(format!(
                 "String length {} exceeds VARCHAR({})",
-                s.len(),
+                s.chars().count(),
                 max
             )))
         }

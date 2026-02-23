@@ -804,6 +804,7 @@ fn eval_to_true(expr: &Expr) -> Option<bool> {
 
 fn is_row_independent_expr(expr: &Expr) -> bool {
     match expr {
+        Expr::BindParam => false,
         Expr::ColumnRef(_) => false,
         Expr::BinaryOp { left, right, .. } => {
             is_row_independent_expr(left) && is_row_independent_expr(right)

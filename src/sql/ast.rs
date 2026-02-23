@@ -205,6 +205,8 @@ pub struct Delete {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// Positional bind parameter (`?`) for prepared statements.
+    BindParam,
     IntLiteral(i64),
     FloatLiteral(f64),
     StringLiteral(String),

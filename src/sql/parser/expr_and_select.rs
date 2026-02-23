@@ -703,6 +703,10 @@ impl Parser {
 
     pub(super) fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.peek().cloned() {
+            Some(Token::Question) => {
+                self.advance();
+                Ok(Expr::BindParam)
+            }
             Some(Token::Integer(n)) => {
                 self.advance();
                 Ok(Expr::IntLiteral(n))

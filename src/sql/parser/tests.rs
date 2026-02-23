@@ -245,6 +245,19 @@ fn test_parse_not_like() {
 }
 
 #[test]
+fn test_parse_bind_parameter() {
+    let stmt = parse_sql("SELECT * FROM t WHERE id = ?").unwrap();
+    if let Statement::Select(sel) = stmt {
+        let Some(Expr::BinaryOp { right, .. }) = sel.where_clause else {
+            panic!("Expected binary WHERE expression");
+        };
+        assert!(matches!(right.as_ref(), Expr::BindParam));
+    } else {
+        panic!("Expected Select");
+    }
+}
+
+#[test]
 fn test_parse_in() {
     let stmt = parse_sql("SELECT * FROM t WHERE id IN (1, 2, 3)").unwrap();
     if let Statement::Select(sel) = stmt {

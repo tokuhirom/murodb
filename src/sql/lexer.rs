@@ -148,6 +148,7 @@ pub enum Token {
     Minus,
     Slash,
     Percent,
+    Question,
 }
 
 /// Tokenize a SQL string.
@@ -266,6 +267,7 @@ fn lex_symbol(input: &str) -> IResult<&str, Token> {
         value(Token::Minus, char('-')),
         value(Token::Slash, char('/')),
         value(Token::Percent, char('%')),
+        value(Token::Question, char('?')),
     ))(input)
 }
 
@@ -584,5 +586,11 @@ mod tests {
         assert_eq!(tokens[0], Token::Analyze);
         assert_eq!(tokens[1], Token::Table);
         assert_eq!(tokens[2], Token::Ident("users".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_bind_parameter() {
+        let tokens = tokenize("SELECT * FROM t WHERE id = ?").unwrap();
+        assert!(tokens.contains(&Token::Question));
     }
 }

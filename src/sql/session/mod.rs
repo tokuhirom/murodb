@@ -5,6 +5,7 @@ use crate::schema::catalog::SystemCatalog;
 use crate::sql::ast::Statement;
 use crate::sql::executor::{execute_statement, ExecResult, Row};
 use crate::sql::parser::parse_sql;
+use crate::sql::prepared::{contains_bind_params, PreparedStatement};
 use crate::storage::pager::Pager;
 use crate::tx::page_store::TxPageStore;
 use crate::tx::transaction::Transaction;
@@ -158,13 +159,36 @@ impl Session {
         Ok(())
     }
 
+    /// Parse SQL into a reusable prepared statement template.
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+        PreparedStatement::parse(sql)
+    }
+
     /// Execute a SQL string, handling BEGIN/COMMIT/ROLLBACK at the session level.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
         let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
+        if contains_bind_params(&stmt) {
+            return Err(MuroError::Execution(
+                "SQL contains bind parameters ('?'); use prepare()/execute_prepared()".into(),
+            ));
+        }
+        self.execute_statement_with_session(&stmt)
+    }
 
+    /// Execute a prepared statement with bound values.
+    pub fn execute_prepared(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<ExecResult> {
+        let stmt = prepared.bind(params)?;
+        self.execute_statement_with_session(&stmt)
+    }
+
+    fn execute_statement_with_session(&mut self, stmt: &Statement) -> Result<ExecResult> {
         // Stats queries are always allowed, even on poisoned sessions,
         // so operators can inspect counters after CommitInDoubt.
-        match &stmt {
+        match stmt {
             Statement::ShowCheckpointStats => return self.handle_show_checkpoint_stats(),
             Statement::ShowDatabaseStats => return self.handle_show_database_stats(),
             _ => {}
@@ -173,16 +197,16 @@ impl Session {
         self.check_poisoned()?;
         self.refresh_from_disk_if_needed()?;
 
-        match &stmt {
+        match stmt {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
             _ => {
                 if self.active_tx.is_some() {
-                    self.execute_in_tx(&stmt)
+                    self.execute_in_tx(stmt)
                 } else {
                     // Auto-commit: wrap in an implicit transaction with WAL
-                    self.execute_auto_commit(&stmt)
+                    self.execute_auto_commit(stmt)
                 }
             }
         }
@@ -193,9 +217,27 @@ impl Session {
     /// This path avoids auto-commit WAL writes for non-transactional reads.
     pub fn execute_read_only_query(&mut self, sql: &str) -> Result<Vec<Row>> {
         let stmt = parse_sql(sql).map_err(MuroError::Parse)?;
+        if contains_bind_params(&stmt) {
+            return Err(MuroError::Execution(
+                "SQL contains bind parameters ('?'); use prepare()/query_prepared()".into(),
+            ));
+        }
+        self.execute_read_only_query_statement(&stmt)
+    }
 
+    /// Execute a prepared statement and return rows (read-only statements only).
+    pub fn execute_read_only_prepared_query(
+        &mut self,
+        prepared: &PreparedStatement,
+        params: &[Value],
+    ) -> Result<Vec<Row>> {
+        let stmt = prepared.bind(params)?;
+        self.execute_read_only_query_statement(&stmt)
+    }
+
+    fn execute_read_only_query_statement(&mut self, stmt: &Statement) -> Result<Vec<Row>> {
         // Stats queries are always allowed, even on poisoned sessions.
-        match &stmt {
+        match stmt {
             Statement::ShowCheckpointStats => {
                 return Self::rows_from_exec_result(self.handle_show_checkpoint_stats())
             }
@@ -208,21 +250,17 @@ impl Session {
         self.check_poisoned()?;
         self.refresh_from_disk_if_needed()?;
 
-        if !Self::is_read_only_statement(&stmt) {
+        if !Self::is_read_only_statement(stmt) {
             return Err(MuroError::Execution(
                 "Database::query accepts read-only SQL only; use execute() for writes".into(),
             ));
         }
 
         if self.active_tx.is_some() {
-            Self::rows_from_exec_result(self.execute_in_tx(&stmt))
+            Self::rows_from_exec_result(self.execute_in_tx(stmt))
         } else {
             // Read directly from pager/catalog without opening an implicit WAL transaction.
-            Self::rows_from_exec_result(execute_statement(
-                &stmt,
-                &mut self.pager,
-                &mut self.catalog,
-            ))
+            Self::rows_from_exec_result(execute_statement(stmt, &mut self.pager, &mut self.catalog))
         }
     }
 

@@ -20,6 +20,9 @@ use pattern::like_match;
 /// `columns` maps column name -> Value.
 pub fn eval_expr(expr: &Expr, columns: &dyn Fn(&str) -> Option<Value>) -> Result<Value> {
     match expr {
+        Expr::BindParam => Err(MuroError::Execution(
+            "Unbound parameter in expression; use prepared statement binding".into(),
+        )),
         Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
         Expr::FloatLiteral(n) => Ok(Value::Float(*n)),
         Expr::StringLiteral(s) => Ok(Value::Varchar(s.clone())),

@@ -452,27 +452,33 @@ fn recover_with_mode_internal(
         p.flush_meta()?;
     }
 
+    let mut committed_txids = terminal
+        .iter()
+        .filter_map(|(txid, state)| {
+            if *state == TxTerminalState::Committed {
+                Some(*txid)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    committed_txids.sort_unstable();
+
+    let mut aborted_txids = terminal
+        .iter()
+        .filter_map(|(txid, state)| {
+            if *state == TxTerminalState::Aborted {
+                Some(*txid)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    aborted_txids.sort_unstable();
+
     Ok(RecoveryResult {
-        committed_txids: terminal
-            .iter()
-            .filter_map(|(txid, state)| {
-                if *state == TxTerminalState::Committed {
-                    Some(*txid)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        aborted_txids: terminal
-            .iter()
-            .filter_map(|(txid, state)| {
-                if *state == TxTerminalState::Aborted {
-                    Some(*txid)
-                } else {
-                    None
-                }
-            })
-            .collect(),
+        committed_txids,
+        aborted_txids,
         pages_replayed,
         skipped: {
             let mut skipped = invalid_txs.into_values().collect::<Vec<_>>();
@@ -494,7 +500,9 @@ pub fn recover_permissive(
 
 #[derive(Debug)]
 pub struct RecoveryResult {
+    /// Txids that reached `Commit`, sorted in ascending order.
     pub committed_txids: Vec<TxId>,
+    /// Txids that reached `Abort`, sorted in ascending order.
     pub aborted_txids: Vec<TxId>,
     pub pages_replayed: usize,
     pub skipped: Vec<RecoverySkippedTx>,
@@ -952,5 +960,59 @@ mod tests {
             .contains("Commit without MetaUpdate"));
         assert!(result.committed_txids.is_empty());
         assert_eq!(result.pages_replayed, 0);
+    }
+
+    #[test]
+    fn test_recovery_terminal_txids_are_sorted() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.wal");
+
+        {
+            let _pager = Pager::create(&db_path, &test_key()).unwrap();
+        }
+
+        {
+            let mut writer = WalWriter::create(&wal_path, &test_key()).unwrap();
+
+            writer.append(&WalRecord::Begin { txid: 10 }).unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 10,
+                    catalog_root: 0,
+                    page_count: 1,
+                    freelist_page_id: 0,
+                    epoch: 0,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 10, lsn: 2 })
+                .unwrap();
+
+            writer.append(&WalRecord::Begin { txid: 2 }).unwrap();
+            writer
+                .append(&WalRecord::MetaUpdate {
+                    txid: 2,
+                    catalog_root: 0,
+                    page_count: 1,
+                    freelist_page_id: 0,
+                    epoch: 0,
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::Commit { txid: 2, lsn: 5 })
+                .unwrap();
+
+            writer.append(&WalRecord::Begin { txid: 7 }).unwrap();
+            writer.append(&WalRecord::Abort { txid: 7 }).unwrap();
+            writer.append(&WalRecord::Begin { txid: 1 }).unwrap();
+            writer.append(&WalRecord::Abort { txid: 1 }).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        let result = recover(&db_path, &wal_path, &test_key()).unwrap();
+        assert_eq!(result.committed_txids, vec![2, 10]);
+        assert_eq!(result.aborted_txids, vec![1, 7]);
     }
 }

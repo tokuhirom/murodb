@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 pub enum Value {
     Integer(i64),
     Float(f64),
+    Decimal(rust_decimal::Decimal),
     Date(i32),      // YYYYMMDD
     DateTime(i64),  // YYYYMMDDhhmmss
     Timestamp(i64), // YYYYMMDDhhmmss
@@ -30,6 +31,19 @@ impl Value {
         match self {
             Value::Integer(v) => Some(*v as f64),
             Value::Float(v) => Some(*v),
+            Value::Decimal(d) => {
+                use rust_decimal::prelude::ToPrimitive;
+                d.to_f64()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_decimal(&self) -> Option<rust_decimal::Decimal> {
+        match self {
+            Value::Decimal(d) => Some(*d),
+            Value::Integer(n) => Some(rust_decimal::Decimal::from(*n)),
+            Value::Float(n) => rust_decimal::Decimal::try_from(*n).ok(),
             _ => None,
         }
     }
@@ -54,6 +68,7 @@ impl fmt::Display for Value {
         match self {
             Value::Integer(v) => write!(f, "{}", v),
             Value::Float(v) => write!(f, "{}", v),
+            Value::Decimal(v) => write!(f, "{}", v),
             Value::Date(v) => write!(f, "{}", format_date(*v)),
             Value::DateTime(v) => write!(f, "{}", format_datetime(*v)),
             Value::Timestamp(v) => write!(f, "{}", format_datetime(*v)),
@@ -79,6 +94,9 @@ impl PartialEq for ValueKey {
                     _ => canonical_f64_bits(*a) == canonical_f64_bits(*b),
                 }
             }
+            (Value::Decimal(a), Value::Decimal(b)) => a == b,
+            (Value::Decimal(a), Value::Integer(b)) => *a == rust_decimal::Decimal::from(*b),
+            (Value::Integer(a), Value::Decimal(b)) => rust_decimal::Decimal::from(*a) == *b,
             (Value::Integer(a), Value::Float(b)) => int_float_equal(*a, *b),
             (Value::Float(a), Value::Integer(b)) => int_float_equal(*b, *a),
             (a @ Value::Date(_), b @ Value::Date(_))
@@ -124,6 +142,20 @@ impl Hash for ValueKey {
                     2u8.hash(state);
                     canonical_f64_bits(*n).hash(state);
                 }
+            }
+            Value::Decimal(d) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let normalized = d.normalize();
+                // If the Decimal is an exact integer, hash as Integer for cross-type consistency
+                if normalized.scale() == 0 {
+                    if let Some(i) = normalized.to_i64() {
+                        0u8.hash(state);
+                        i.hash(state);
+                        return;
+                    }
+                }
+                10u8.hash(state);
+                normalized.serialize().hash(state);
             }
             Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) => {
                 3u8.hash(state);
@@ -296,6 +328,7 @@ pub enum DataType {
     BigInt,
     Float,
     Double,
+    Decimal(u32, u32), // (precision, scale)
     Date,
     DateTime,
     Timestamp,
@@ -314,6 +347,7 @@ impl fmt::Display for DataType {
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::Float => write!(f, "FLOAT"),
             DataType::Double => write!(f, "DOUBLE"),
+            DataType::Decimal(p, s) => write!(f, "DECIMAL({},{})", p, s),
             DataType::Date => write!(f, "DATE"),
             DataType::DateTime => write!(f, "DATETIME"),
             DataType::Timestamp => write!(f, "TIMESTAMP"),

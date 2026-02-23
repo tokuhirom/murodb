@@ -453,6 +453,43 @@ impl Parser {
                 }
                 Some(Token::TextType) => Ok(DataType::Text),
                 Some(Token::UuidType) => Ok(DataType::Uuid),
+                Some(Token::DecimalType) => {
+                    // Parse optional (precision, scale) with defaults (10, 0)
+                    if self.peek() == Some(&Token::LParen) {
+                        self.advance(); // (
+                        let precision = match self.advance() {
+                            Some(Token::Integer(n)) if (1..=28).contains(&n) => n as u32,
+                            Some(Token::Integer(n)) => {
+                                return Err(format!(
+                                    "DECIMAL precision must be between 1 and 28, got {}",
+                                    n
+                                ))
+                            }
+                            _ => return Err("Expected integer precision for DECIMAL".into()),
+                        };
+                        let scale = if self.peek() == Some(&Token::Comma) {
+                            self.advance(); // ,
+                            match self.advance() {
+                                Some(Token::Integer(n)) if (0..=precision as i64).contains(&n) => {
+                                    n as u32
+                                }
+                                Some(Token::Integer(n)) => {
+                                    return Err(format!(
+                                        "DECIMAL scale must be between 0 and {}, got {}",
+                                        precision, n
+                                    ))
+                                }
+                                _ => return Err("Expected integer scale for DECIMAL".into()),
+                            }
+                        } else {
+                            0
+                        };
+                        self.expect(&Token::RParen)?;
+                        Ok(DataType::Decimal(precision, scale))
+                    } else {
+                        Ok(DataType::Decimal(10, 0))
+                    }
+                }
                 Some(t) => Err(format!("Expected data type, got {:?}", t)),
                 None => Err("Expected data type".into()),
             },

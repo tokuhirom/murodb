@@ -23,6 +23,7 @@ parking_lot = "0.12"
 rand = "0.8"
 uuid = { version = "1", features = ["v4", "v7"] }
 regex = "1"
+rust_decimal = "1"
 base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"

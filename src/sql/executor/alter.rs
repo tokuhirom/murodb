@@ -530,6 +530,10 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 *n as f64,
                 target_type,
             )?)),
+            DataType::Decimal(p, s) => {
+                let d = rust_decimal::Decimal::from(*n);
+                Ok(Value::Decimal(super::codec::fit_decimal(d, p, s)?))
+            }
             DataType::Date | DataType::DateTime | DataType::Timestamp => Err(MuroError::Execution(
                 "Cannot coerce integer to date/time type".into(),
             )),
@@ -546,6 +550,15 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
             DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
                 Ok(Value::Integer(float_to_i64_checked(*n)?))
             }
+            DataType::Decimal(p, s) => {
+                // Use string representation to avoid floating-point artifacts
+                use std::str::FromStr;
+                let str_val = n.to_string();
+                let d = rust_decimal::Decimal::from_str(&str_val).map_err(|_| {
+                    MuroError::Execution(format!("Cannot coerce float '{}' to DECIMAL", n))
+                })?;
+                Ok(Value::Decimal(super::codec::fit_decimal(d, p, s)?))
+            }
             DataType::Date | DataType::DateTime | DataType::Timestamp => Err(MuroError::Execution(
                 "Cannot coerce float to date/time type".into(),
             )),
@@ -554,6 +567,30 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                 "Cannot coerce floating-point value to VARBINARY".into(),
             )),
             DataType::Uuid => Err(MuroError::Execution("Cannot coerce float to UUID".into())),
+        },
+        Value::Decimal(d) => match target_type {
+            DataType::Decimal(p, s) => Ok(Value::Decimal(super::codec::fit_decimal(*d, p, s)?)),
+            DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
+                use rust_decimal::prelude::ToPrimitive;
+                let truncated = d.trunc();
+                truncated.to_i64().map(Value::Integer).ok_or_else(|| {
+                    MuroError::Execution(format!(
+                        "Decimal '{}' out of range for integer conversion",
+                        d
+                    ))
+                })
+            }
+            DataType::Float | DataType::Double => {
+                use rust_decimal::prelude::ToPrimitive;
+                let n = d.to_f64().ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot convert Decimal '{}' to float", d))
+                })?;
+                Ok(Value::Float(n))
+            }
+            DataType::Varchar(_) | DataType::Text => Ok(Value::Varchar(d.to_string())),
+            _ => Err(MuroError::Execution(
+                "Cannot coerce DECIMAL to target type".into(),
+            )),
         },
         Value::Varchar(s) => match target_type {
             DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => {
@@ -567,6 +604,13 @@ pub(super) fn coerce_value(value: &Value, target_type: DataType) -> Result<Value
                     MuroError::Execution(format!("Cannot convert '{}' to float", s))
                 })?;
                 Ok(Value::Float(validate_float_for_target(n, target_type)?))
+            }
+            DataType::Decimal(p, sc) => {
+                use std::str::FromStr;
+                let d = rust_decimal::Decimal::from_str(s).map_err(|_| {
+                    MuroError::Execution(format!("Cannot convert '{}' to DECIMAL", s))
+                })?;
+                Ok(Value::Decimal(super::codec::fit_decimal(d, p, sc)?))
             }
             DataType::Date => {
                 let d = parse_date_string(s).ok_or_else(|| {

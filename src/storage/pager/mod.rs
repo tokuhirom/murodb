@@ -339,38 +339,44 @@ impl Pager {
         let first_page = self.read_page_from_disk(self.freelist_page_id)?;
         let data_area = &first_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
 
-        if FreeList::is_multi_page_format(data_area) {
-            // Multi-page chain: walk the chain with cycle detection
-            let mut visited = std::collections::HashSet::new();
-            visited.insert(self.freelist_page_id);
-            let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
-            pages_data_owned.push(data_area.to_vec());
-            // Read next pointer from first page (offset 4, after 4-byte magic)
-            let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
-            while next_page_id != 0 {
-                if !visited.insert(next_page_id) {
-                    return Err(MuroError::Corruption(format!(
-                        "freelist chain cycle detected at page {}",
-                        next_page_id
-                    )));
-                }
-                if next_page_id >= self.page_count {
-                    return Err(MuroError::Corruption(format!(
-                        "freelist chain references page {} beyond page_count {}",
-                        next_page_id, self.page_count
-                    )));
-                }
-                let next_page = self.read_page_from_disk(next_page_id)?;
-                let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
-                next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
-                pages_data_owned.push(next_data.to_vec());
-            }
-            let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
-            self.freelist = FreeList::deserialize_pages(&pages_refs);
-        } else {
-            // Legacy single-page format
-            self.freelist = FreeList::deserialize(data_area);
+        // Require multi-page FLMP format; legacy single-page format is no longer supported.
+        if data_area.len() < 4
+            || data_area[0..4] != crate::storage::freelist::FREELIST_MULTI_PAGE_MAGIC
+        {
+            return Err(MuroError::Corruption(
+                "Legacy single-page freelist format detected. \
+                 Please recreate the database or migrate using an older version of MuroDB."
+                    .to_string(),
+            ));
         }
+
+        // Multi-page chain: walk the chain with cycle detection
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(self.freelist_page_id);
+        let mut pages_data_owned: Vec<Vec<u8>> = Vec::new();
+        pages_data_owned.push(data_area.to_vec());
+        // Read next pointer from first page (offset 4, after 4-byte magic)
+        let mut next_page_id = u64::from_le_bytes(data_area[4..12].try_into().unwrap());
+        while next_page_id != 0 {
+            if !visited.insert(next_page_id) {
+                return Err(MuroError::Corruption(format!(
+                    "freelist chain cycle detected at page {}",
+                    next_page_id
+                )));
+            }
+            if next_page_id >= self.page_count {
+                return Err(MuroError::Corruption(format!(
+                    "freelist chain references page {} beyond page_count {}",
+                    next_page_id, self.page_count
+                )));
+            }
+            let next_page = self.read_page_from_disk(next_page_id)?;
+            let next_data = &next_page.as_bytes()[crate::storage::page::PAGE_HEADER_SIZE..];
+            next_page_id = u64::from_le_bytes(next_data[4..12].try_into().unwrap());
+            pages_data_owned.push(next_data.to_vec());
+        }
+        let pages_refs: Vec<&[u8]> = pages_data_owned.iter().map(|v| v.as_slice()).collect();
+        self.freelist = FreeList::deserialize_pages(&pages_refs);
 
         // Remove out-of-range and duplicated freelist entries.
         let report = self.freelist.sanitize(self.page_count);

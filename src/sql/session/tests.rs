@@ -604,7 +604,7 @@ fn test_rekey_wal_recreate_failure_poison_session() {
     session.execute("INSERT INTO t VALUES (1)").unwrap();
 
     session.inject_wal_recreate_failure_once_for_test();
-    let result = session.execute("ALTER DATABASE REKEY WITH PASSWORD 'next_pass'");
+    let result = session.rekey_with_password("next_pass");
     assert!(matches!(&result, Err(MuroError::SessionPoisoned(_))));
 
     // Any regular statement is rejected after the WAL recreation failure.

@@ -171,7 +171,7 @@ MySQL-compatible scalar functions.
 ## Phase 8 — Security (Future)
 
 - [x] Key rotation (epoch-based re-encryption)
-  - Implemented `ALTER DATABASE REKEY WITH PASSWORD 'newpass'` for password change with full page re-encryption.
+  - Implemented API-based rekey (`Database::rekey_with_password`) for full page re-encryption.
   - New random salt generated on each rotation; epoch incremented.
   - Crash-safe via `.rekey` marker file with automatic recovery on next open.
   - Rejects inside transactions and on plaintext databases.
@@ -193,7 +193,7 @@ Real-world deployment features to make MuroDB easier to embed and operate.
     - Supported suites are versioned, discoverable, and recorded in metadata.
     - Wrong-suite open errors are deterministic and actionable.
 - [x] Rekey / algorithm migration
-  - Rekey implemented via `ALTER DATABASE REKEY WITH PASSWORD 'newpass'`.
+  - Rekey implemented via API (`Database::rekey_with_password`) and dedicated CLI (`murodb-rekey`).
   - Crash-recoverable via `.rekey` marker file.
   - Algorithm migration (cipher suite change) deferred to future work.
 - [x] Backup API + consistent snapshot

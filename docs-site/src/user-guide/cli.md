@@ -115,7 +115,17 @@ murodb-wal-inspect mydb.db --wal mydb.wal --recovery-mode permissive
 
 See [WAL Inspection](wal-inspect.md) for exit codes and JSON schema.
 
+## Rekey Command
+
+Use the dedicated command for password rotation:
+
+```bash
+murodb-rekey mydb.db
+```
+
+The command prompts for current password, new password, and confirmation via TTY.
+
 ## Security Notes
 
 - Prefer interactive password prompt over `--password` to reduce secret exposure in process lists/history.
-- For `ALTER DATABASE REKEY`, avoid one-shot `-e` with inline password literals in production environments. This limitation is tracked in [#183](https://github.com/tokuhirom/murodb/issues/183).
+- Password rotation uses `murodb-rekey` (interactive prompt), not SQL text.

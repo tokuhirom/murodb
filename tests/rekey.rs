@@ -16,8 +16,7 @@ fn test_basic_rekey() {
         db.execute("INSERT INTO t VALUES (2, 'Bob')").unwrap();
 
         // Rekey with new password
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new_pass'")
-            .unwrap();
+        db.rekey_with_password("new_pass").unwrap();
     }
 
     // Reopen with new password — should work
@@ -54,8 +53,7 @@ fn test_multi_page_rekey() {
             ))
             .unwrap();
         }
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'")
-            .unwrap();
+        db.rekey_with_password("new").unwrap();
     }
 
     // Verify all data after rekey
@@ -82,8 +80,7 @@ fn test_fts_after_rekey() {
         db.execute("INSERT INTO docs VALUES (2, '大阪城は大阪にあります')")
             .unwrap();
 
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'")
-            .unwrap();
+        db.rekey_with_password("new").unwrap();
     }
 
     // Verify FTS queries work after rekey
@@ -111,10 +108,8 @@ fn test_double_rekey() {
         db.execute("INSERT INTO t VALUES (1, 'hello')").unwrap();
 
         // Rekey twice
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'pass2'")
-            .unwrap();
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'pass3'")
-            .unwrap();
+        db.rekey_with_password("pass2").unwrap();
+        db.rekey_with_password("pass3").unwrap();
     }
 
     // Only pass3 should work
@@ -136,7 +131,7 @@ fn test_rekey_reject_in_transaction() {
         .unwrap();
     db.execute("BEGIN").unwrap();
 
-    let result = db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'");
+    let result = db.rekey_with_password("new");
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(err_msg.contains("cannot be used inside a transaction"));
@@ -154,7 +149,7 @@ fn test_rekey_reject_plaintext() {
     db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
         .unwrap();
 
-    let result = db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'");
+    let result = db.rekey_with_password("new");
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(err_msg.contains("not supported for plaintext"));
@@ -174,8 +169,7 @@ fn test_crash_recovery_completed_rekey() {
         db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, v BIGINT)")
             .unwrap();
         db.execute("INSERT INTO t VALUES (1, 42)").unwrap();
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'")
-            .unwrap();
+        db.rekey_with_password("new").unwrap();
     }
 
     // Simulate a stale marker file left over (rekey completed but marker not deleted)
@@ -298,8 +292,7 @@ fn test_rekey_data_integrity_with_index() {
             .unwrap();
         }
 
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new'")
-            .unwrap();
+        db.rekey_with_password("new").unwrap();
     }
 
     // Verify data and index work after rekey
@@ -315,27 +308,17 @@ fn test_rekey_data_integrity_with_index() {
 }
 
 #[test]
-fn test_parse_alter_database_rekey() {
+fn test_parse_alter_database_rekey_removed() {
     use murodb::sql::parser::parse_sql;
 
-    let stmt = parse_sql("ALTER DATABASE REKEY WITH PASSWORD 'mypass'").unwrap();
-    match stmt {
-        murodb::sql::ast::Statement::AlterDatabaseRekey { password } => {
-            assert_eq!(password, "mypass");
-        }
-        _ => panic!("Expected AlterDatabaseRekey"),
-    }
+    let err = parse_sql("ALTER DATABASE REKEY WITH PASSWORD 'mypass'").unwrap_err();
+    assert!(err.contains("Only ALTER TABLE is supported"));
 }
 
 #[test]
-fn test_parse_alter_database_rekey_case_insensitive() {
+fn test_parse_alter_database_rekey_case_insensitive_removed() {
     use murodb::sql::parser::parse_sql;
 
-    let stmt = parse_sql("alter database rekey with password 'test'").unwrap();
-    match stmt {
-        murodb::sql::ast::Statement::AlterDatabaseRekey { password } => {
-            assert_eq!(password, "test");
-        }
-        _ => panic!("Expected AlterDatabaseRekey"),
-    }
+    let err = parse_sql("alter database rekey with password 'test'").unwrap_err();
+    assert!(err.contains("Only ALTER TABLE is supported"));
 }

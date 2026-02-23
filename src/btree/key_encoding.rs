@@ -210,6 +210,16 @@ pub fn encode_composite_key(
                     _ => buf.extend_from_slice(&encode_i64(*n)),
                 }
             }
+            Value::Decimal(d) => {
+                buf.push(0x01);
+                let mut d = *d;
+                if let DataType::Decimal(_, s) = dt {
+                    d.rescale(*s);
+                }
+                let raw = d.mantissa();
+                let unsigned = (raw as u128) ^ (1u128 << 127);
+                buf.extend_from_slice(&unsigned.to_be_bytes());
+            }
             Value::Varchar(s) => {
                 buf.push(0x01);
                 if **dt == DataType::Uuid {

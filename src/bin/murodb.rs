@@ -200,6 +200,7 @@ fn format_value_json(val: &Value) -> String {
         Value::Timestamp(n) => format!("\"{}\"", json_escape(&format_datetime_iso8601(*n))),
         Value::Varchar(s) => format!("\"{}\"", json_escape(s)),
         Value::Varbinary(b) => format!("\"{}\"", base64_encode(b)),
+        Value::Decimal(d) => d.to_string(),
         Value::Uuid(b) => format!("\"{}\"", murodb::types::format_uuid(b)),
         Value::Null => "null".to_string(),
     }
@@ -273,6 +274,7 @@ fn format_value(val: &Value) -> String {
         Value::Timestamp(n) => murodb::types::format_datetime(*n),
         Value::Varchar(s) => s.clone(),
         Value::Varbinary(b) => format!("0x{}", hex_encode(b)),
+        Value::Decimal(d) => d.to_string(),
         Value::Uuid(b) => murodb::types::format_uuid(b),
         Value::Null => "NULL".to_string(),
     }

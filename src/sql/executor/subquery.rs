@@ -4,6 +4,7 @@ pub(super) fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Integer(n) => Expr::IntLiteral(*n),
         Value::Float(n) => Expr::FloatLiteral(*n),
+        Value::Decimal(d) => Expr::StringLiteral(d.to_string()),
         Value::Date(n) => Expr::Cast {
             expr: Box::new(Expr::StringLiteral(format_date(*n))),
             target_type: DataType::Date,

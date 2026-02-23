@@ -91,6 +91,10 @@ MySQL-compatible scalar functions.
     - Invalid dates/times reject with deterministic errors.
 - [x] Date/time functions: NOW, CURRENT_TIMESTAMP, DATE_FORMAT, etc.
 - [x] UUID type with UUID_V4() and UUID_V7() generation functions
+- [x] DECIMAL(p,s) / NUMERIC(p,s) fixed-point exact numeric type
+  - 96-bit mantissa via `rust_decimal`, precision 1-28, 16-byte storage
+  - Full arithmetic, comparison, CAST, aggregation (SUM/AVG/MIN/MAX), ORDER BY, GROUP BY, INDEX support
+  - MySQL-compatible: NUMERIC alias, default DECIMAL(10,0), DECIMAL+INT→DECIMAL, DECIMAL+FLOAT→FLOAT
 - [ ] BLOB (skipped for now)
   - Decision (2026-02-22): defer and move focus to Phase 7 performance work.
   - Why skipped now:

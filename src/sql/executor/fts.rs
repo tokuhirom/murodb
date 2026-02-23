@@ -507,6 +507,7 @@ pub(super) fn value_to_fts_text(value: &Value) -> Option<String> {
         Value::Date(n) => Some(format_date(*n)),
         Value::DateTime(n) => Some(format_datetime(*n)),
         Value::Timestamp(n) => Some(format_datetime(*n)),
+        Value::Decimal(d) => Some(d.to_string()),
         Value::Varbinary(_) => None,
         Value::Uuid(b) => Some(crate::types::format_uuid(b)),
     }
@@ -558,6 +559,7 @@ pub(super) fn validate_value(value: &Value, data_type: &DataType) -> Result<()> 
                 max
             )))
         }
+        (Value::Decimal(_), DataType::Decimal(_, _)) => Ok(()),
         _ => Ok(()),
     }
 }

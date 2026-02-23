@@ -16,6 +16,7 @@ pub(super) fn eval_unary_op(op: UnaryOp, val: &Value) -> Result<Value> {
         UnaryOp::Neg => match val {
             Value::Integer(n) => Ok(Value::Integer(-n)),
             Value::Float(n) => Ok(Value::Float(-n)),
+            Value::Decimal(d) => Ok(Value::Decimal(-d)),
             Value::Null => Ok(Value::Null),
             _ => Err(MuroError::Execution(
                 "Cannot negate non-numeric value".into(),
@@ -125,6 +126,70 @@ fn eval_arithmetic(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
     }
+
+    // Decimal + Float => Float (MySQL behavior)
+    if matches!(left, Value::Decimal(_)) && matches!(right, Value::Float(_))
+        || matches!(left, Value::Float(_)) && matches!(right, Value::Decimal(_))
+    {
+        let a = left.as_f64().unwrap();
+        let b = right.as_f64().unwrap();
+        let result = match op {
+            BinaryOp::Add => a + b,
+            BinaryOp::Sub => a - b,
+            BinaryOp::Mul => a * b,
+            BinaryOp::Div => {
+                if b == 0.0 {
+                    return Err(MuroError::Execution("Division by zero".into()));
+                }
+                a / b
+            }
+            BinaryOp::Mod => {
+                if b == 0.0 {
+                    return Err(MuroError::Execution("Division by zero".into()));
+                }
+                a % b
+            }
+            _ => unreachable!(),
+        };
+        return Ok(Value::Float(result));
+    }
+
+    // Decimal arithmetic
+    if matches!(left, Value::Decimal(_) | Value::Integer(_))
+        && matches!(right, Value::Decimal(_) | Value::Integer(_))
+        && (matches!(left, Value::Decimal(_)) || matches!(right, Value::Decimal(_)))
+    {
+        let a = left.as_decimal().unwrap();
+        let b = right.as_decimal().unwrap();
+        let result = match op {
+            BinaryOp::Add => a
+                .checked_add(b)
+                .ok_or_else(|| MuroError::Execution("Decimal overflow in addition".into()))?,
+            BinaryOp::Sub => a
+                .checked_sub(b)
+                .ok_or_else(|| MuroError::Execution("Decimal overflow in subtraction".into()))?,
+            BinaryOp::Mul => a
+                .checked_mul(b)
+                .ok_or_else(|| MuroError::Execution("Decimal overflow in multiplication".into()))?,
+            BinaryOp::Div => {
+                if b.is_zero() {
+                    return Err(MuroError::Execution("Division by zero".into()));
+                }
+                a.checked_div(b)
+                    .ok_or_else(|| MuroError::Execution("Decimal overflow in division".into()))?
+            }
+            BinaryOp::Mod => {
+                if b.is_zero() {
+                    return Err(MuroError::Execution("Division by zero".into()));
+                }
+                a.checked_rem(b)
+                    .ok_or_else(|| MuroError::Execution("Decimal overflow in modulo".into()))?
+            }
+            _ => unreachable!(),
+        };
+        return Ok(Value::Decimal(result));
+    }
+
     if let (Some(a), Some(b)) = (left.as_f64(), right.as_f64()) {
         if matches!(left, Value::Float(_)) || matches!(right, Value::Float(_)) {
             let result = match op {
@@ -178,7 +243,7 @@ fn eval_arithmetic(left: &Value, op: BinaryOp, right: &Value) -> Result<Value> {
             Ok(Value::Integer(result))
         }
         _ => Err(MuroError::Execution(
-            "Arithmetic operations require integer operands".into(),
+            "Arithmetic operations require numeric operands".into(),
         )),
     }
 }

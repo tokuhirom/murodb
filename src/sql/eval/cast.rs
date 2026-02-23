@@ -3,6 +3,7 @@ use crate::types::{
     format_date, format_datetime, format_uuid, parse_date_string, parse_datetime_string,
     parse_timestamp_string, parse_uuid_string, DataType, Value,
 };
+use rust_decimal::prelude::ToPrimitive;
 
 pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
     const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0; // -2^63
@@ -47,6 +48,12 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::TinyInt | DataType::SmallInt | DataType::Int | DataType::BigInt => match val {
             Value::Integer(n) => Ok(Value::Integer(*n)),
             Value::Float(n) => Ok(Value::Integer(float_to_i64_checked(*n)?)),
+            Value::Decimal(d) => {
+                let truncated = d.trunc();
+                truncated.to_i64().map(Value::Integer).ok_or_else(|| {
+                    MuroError::Execution(format!("Decimal '{}' out of range for integer cast", d))
+                })
+            }
             Value::Varchar(s) => {
                 let n: i64 = s
                     .trim()
@@ -62,6 +69,12 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
         DataType::Float | DataType::Double => match val {
             Value::Integer(n) => Ok(Value::Float(float_checked(*n as f64, target_type)?)),
             Value::Float(n) => Ok(Value::Float(float_checked(*n, target_type)?)),
+            Value::Decimal(d) => {
+                let n = d.to_f64().ok_or_else(|| {
+                    MuroError::Execution(format!("Cannot cast Decimal '{}' to float", d))
+                })?;
+                Ok(Value::Float(float_checked(n, target_type)?))
+            }
             Value::Varchar(s) => {
                 let n: f64 = s
                     .trim()
@@ -71,6 +84,27 @@ pub(super) fn eval_cast(val: &Value, target_type: &DataType) -> Result<Value> {
             }
             _ => Err(MuroError::Execution(format!(
                 "Cannot cast {:?} to float",
+                val
+            ))),
+        },
+        DataType::Decimal(_, _) => match val {
+            Value::Integer(n) => Ok(Value::Decimal(rust_decimal::Decimal::from(*n))),
+            Value::Float(n) => {
+                use std::str::FromStr;
+                let d = rust_decimal::Decimal::from_str(&n.to_string()).map_err(|_| {
+                    MuroError::Execution(format!("Cannot cast float '{}' to DECIMAL", n))
+                })?;
+                Ok(Value::Decimal(d))
+            }
+            Value::Decimal(d) => Ok(Value::Decimal(*d)),
+            Value::Varchar(s) => {
+                use std::str::FromStr;
+                let d = rust_decimal::Decimal::from_str(s.trim())
+                    .map_err(|_| MuroError::Execution(format!("Cannot cast '{}' to DECIMAL", s)))?;
+                Ok(Value::Decimal(d))
+            }
+            _ => Err(MuroError::Execution(format!(
+                "Cannot cast {:?} to DECIMAL",
                 val
             ))),
         },

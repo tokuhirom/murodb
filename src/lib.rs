@@ -682,6 +682,9 @@ impl Database {
     /// Execute a read-only SQL query and return rows.
     ///
     /// This uses a shared lock so multiple readers can run concurrently.
+    ///
+    /// Note: this method takes `&mut self` because the session may refresh
+    /// pager/catalog state from disk before executing the read.
     /// Non-read-only SQL returns an execution error.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
         let _guard = self.lock_manager.read_lock()?;
@@ -705,10 +708,35 @@ impl Database {
         self.query_prepared(&prepared, params)
     }
 
+    /// Open an additional database handle for read-oriented workloads.
+    ///
+    /// This is useful when you want concurrent readers without manually
+    /// re-opening the same path and re-supplying key material.
+    pub fn open_reader(&self) -> Result<Self> {
+        match self.encryption_suite {
+            EncryptionSuite::Plaintext => Self::open_plaintext(&self.db_path),
+            EncryptionSuite::Aes256GcmSiv => {
+                let master_key = self.master_key.as_ref().ok_or_else(|| {
+                    MuroError::Encryption("missing master key for encrypted reader open".into())
+                })?;
+                Self::open(&self.db_path, master_key)
+            }
+        }
+    }
+
     /// Re-encrypt the database with a new password-derived key.
     pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
         let _guard = self.lock_manager.write_lock()?;
-        self.session.rekey_with_password(new_password)
+        self.session.rekey_with_password(new_password)?;
+        let info = Pager::read_encryption_info_from_file(&self.db_path)?;
+        if info.suite == EncryptionSuite::Aes256GcmSiv {
+            let master_key = kdf::derive_key(new_password.as_bytes(), &info.salt)?;
+            self.master_key = Some(master_key);
+        } else {
+            self.master_key = None;
+        }
+        self.encryption_suite = info.suite;
+        Ok(())
     }
 
     /// Get the catalog root page ID (needed for reopening).
@@ -786,5 +814,45 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(2))
             .expect("flush should complete after read lock is released");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn open_reader_plaintext_can_query_same_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_plaintext.db");
+
+        let mut db = Database::create_plaintext(&db_path).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'alice')").unwrap();
+
+        let mut reader = db.open_reader().unwrap();
+        let rows = reader
+            .query("SELECT name FROM t WHERE id = 1")
+            .expect("reader query should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("name"),
+            Some(&crate::types::Value::Varchar("alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn open_reader_works_after_rekey_with_password() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_rekey.db");
+
+        let mut db = Database::create_with_password(&db_path, "old-pass").unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1)").unwrap();
+        db.rekey_with_password("new-pass").unwrap();
+
+        let mut reader = db.open_reader().unwrap();
+        let rows = reader
+            .query("SELECT id FROM t")
+            .expect("reader query after rekey should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&crate::types::Value::Integer(1)));
     }
 }

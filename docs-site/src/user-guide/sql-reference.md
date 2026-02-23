@@ -978,6 +978,8 @@ ROLLBACK;
 
 Rust API note:
 - `Database::query()` accepts read-only SQL only.
+- `Database::query()` takes `&mut self` because read execution may refresh pager/catalog state from disk before running.
+- For concurrent reads in one process, use multiple handles (for example `Database::open_reader()`).
 - Inside an explicit transaction (`BEGIN` ... `COMMIT`/`ROLLBACK`), run statements through `Database::execute()`, including `SELECT`.
 
 ## Hidden _rowid

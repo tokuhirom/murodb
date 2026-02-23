@@ -153,11 +153,25 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
+fn initialize_fts_term_key(pager: &mut Pager, catalog: &mut SystemCatalog) -> Result<()> {
+    let key = if let Some(existing) = catalog.get_fts_term_key(pager)? {
+        existing
+    } else {
+        // Bootstrap value for databases that predate catalog-persisted FTS term keys.
+        let generated = pager.derive_bootstrap_fts_term_key();
+        catalog.set_fts_term_key(pager, generated)?;
+        generated
+    };
+    pager.set_fts_term_key(key);
+    Ok(())
+}
+
 impl Database {
     /// Create a new database at the given path.
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        initialize_fts_term_key(&mut pager, &mut catalog)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -179,7 +193,8 @@ impl Database {
 
     pub fn create_plaintext(path: &Path) -> Result<Self> {
         let mut pager = Pager::create_plaintext(path)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        initialize_fts_term_key(&mut pager, &mut catalog)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -252,9 +267,10 @@ impl Database {
             recovery_report = Some(report);
         }
 
-        let pager = Pager::open(path, master_key)?;
+        let mut pager = Pager::open(path, master_key)?;
         let catalog_root = pager.catalog_root();
-        let catalog = SystemCatalog::open(catalog_root);
+        let mut catalog = SystemCatalog::open(catalog_root);
+        initialize_fts_term_key(&mut pager, &mut catalog)?;
         let wal = WalWriter::create(&wp, master_key)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -296,9 +312,10 @@ impl Database {
             recovery_report = Some(report);
         }
 
-        let pager = Pager::open_plaintext(path)?;
+        let mut pager = Pager::open_plaintext(path)?;
         let catalog_root = pager.catalog_root();
-        let catalog = SystemCatalog::open(catalog_root);
+        let mut catalog = SystemCatalog::open(catalog_root);
+        initialize_fts_term_key(&mut pager, &mut catalog)?;
         let wal = WalWriter::create_plaintext(&wp)?;
         let lock_manager = LockManager::new(path)?;
         let session = Session::new(pager, catalog, wal);
@@ -320,7 +337,8 @@ impl Database {
         let salt = kdf::generate_salt();
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
-        let catalog = SystemCatalog::create(&mut pager)?;
+        let mut catalog = SystemCatalog::create(&mut pager)?;
+        initialize_fts_term_key(&mut pager, &mut catalog)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 

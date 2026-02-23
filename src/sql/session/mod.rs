@@ -111,6 +111,8 @@ pub struct Session {
     last_checkpoint_at: std::time::Instant,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
+    #[cfg(test)]
+    inject_wal_recreate_fail_once: bool,
 }
 
 impl Session {
@@ -144,6 +146,8 @@ impl Session {
             last_checkpoint_at: std::time::Instant::now(),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
+            #[cfg(test)]
+            inject_wal_recreate_fail_once: false,
         }
     }
 
@@ -352,7 +356,31 @@ impl Session {
 
         // Recreate WAL writer with new key
         let wal_path = self.wal.wal_path().to_path_buf();
-        self.wal = WalWriter::create(&wal_path, &new_key)?;
+        #[cfg(test)]
+        if self.inject_wal_recreate_fail_once {
+            self.inject_wal_recreate_fail_once = false;
+            let err = MuroError::Io(std::io::Error::other(
+                "injected WAL recreate failure after rekey",
+            ));
+            let msg = format!(
+                "session poisoned after rekey because WAL writer recreation failed: {}",
+                err
+            );
+            self.poisoned = Some(msg.clone());
+            return Err(MuroError::SessionPoisoned(msg));
+        }
+
+        self.wal = match WalWriter::create(&wal_path, &new_key) {
+            Ok(wal) => wal,
+            Err(e) => {
+                let msg = format!(
+                    "session poisoned after rekey because WAL writer recreation failed: {}",
+                    e
+                );
+                self.poisoned = Some(msg.clone());
+                return Err(MuroError::SessionPoisoned(msg));
+            }
+        };
 
         Ok(ExecResult::Ok)
     }
@@ -726,6 +754,11 @@ impl Session {
     #[cfg(test)]
     fn inject_checkpoint_failures_for_test(&mut self, count: usize) {
         self.inject_checkpoint_failures_remaining = count;
+    }
+
+    #[cfg(test)]
+    fn inject_wal_recreate_failure_once_for_test(&mut self) {
+        self.inject_wal_recreate_fail_once = true;
     }
 
     #[cfg(test)]

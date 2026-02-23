@@ -56,6 +56,7 @@ pub struct Pager {
     file: File,
     path: PathBuf,
     crypto: PageCipher,
+    master_key: Option<MasterKey>,
     encryption_suite: EncryptionSuite,
     page_count: u64,
     epoch: u64,
@@ -110,6 +111,7 @@ impl Pager {
             file,
             path: path.to_path_buf(),
             crypto,
+            master_key: master_key.cloned(),
             encryption_suite: suite,
             page_count: 0,
             epoch: 0,
@@ -176,6 +178,7 @@ impl Pager {
             file,
             path: path.to_path_buf(),
             crypto,
+            master_key: master_key.cloned(),
             encryption_suite: snapshot.encryption_suite,
             page_count: 0,
             epoch: 0,
@@ -639,13 +642,22 @@ impl Pager {
     ///
     /// If a crash occurs mid-rekey, the marker file enables recovery on next open.
     pub fn rekey(&mut self, new_key: &MasterKey, new_salt: [u8; 16]) -> Result<()> {
+        if self.encryption_suite == EncryptionSuite::Plaintext {
+            return Err(MuroError::Execution(
+                "rekey is not supported for plaintext databases".to_string(),
+            ));
+        }
+        let old_master_key = self.master_key.as_ref().ok_or_else(|| {
+            MuroError::Encryption("missing in-memory master key for rekey operation".to_string())
+        })?;
+
         let new_epoch = self.epoch + 1;
         let new_crypto = PageCipher::new(self.encryption_suite, Some(new_key))?;
         let old_epoch = self.epoch;
 
         // Write .rekey marker file for crash recovery
         let marker_path = rekey_marker_path(&self.path);
-        write_rekey_marker(&marker_path, &new_salt, new_epoch)?;
+        write_rekey_marker(&marker_path, &new_salt, new_epoch, old_master_key, new_key)?;
 
         // Re-encrypt all pages
         let page_count = self.page_count;
@@ -685,6 +697,7 @@ impl Pager {
 
         // Update in-memory state
         self.crypto = new_crypto;
+        self.master_key = Some(new_key.clone());
         self.salt = new_salt;
         self.epoch = new_epoch;
 
@@ -709,23 +722,50 @@ pub fn rekey_marker_path(db_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Marker file layout (48 bytes):
+/// Marker file layout:
 ///   0..4    Magic "REKY"
 ///   4..20   new_salt (16 bytes)
 ///  20..28   new_epoch (u64 LE)
-///  28..32   reserved (zeroed)
+///  28..32   flags (bit0: wrapped old key present)
 ///  32..36   CRC32 of bytes 0..32
+///  36..96   wrapped_old_key (optional; 60 bytes)
 const REKEY_MARKER_MAGIC: &[u8; 4] = b"REKY";
 const REKEY_MARKER_SIZE: usize = 36;
+const REKEY_MARKER_FLAG_WRAPPED_OLD_KEY: u32 = 1;
+const REKEY_MARKER_WRAP_PAGE_ID: u64 = u64::MAX;
+const REKEY_WRAPPED_OLD_KEY_LEN: usize = crate::crypto::aead::PageCrypto::overhead() + 32;
 
-fn write_rekey_marker(path: &Path, new_salt: &[u8; 16], new_epoch: u64) -> Result<()> {
-    let mut buf = [0u8; REKEY_MARKER_SIZE];
+#[derive(Debug, Clone)]
+pub struct RekeyMarker {
+    pub new_salt: [u8; 16],
+    pub new_epoch: u64,
+    pub wrapped_old_key: Option<Vec<u8>>,
+}
+
+fn write_rekey_marker(
+    path: &Path,
+    new_salt: &[u8; 16],
+    new_epoch: u64,
+    old_key: &MasterKey,
+    new_key: &MasterKey,
+) -> Result<()> {
+    let wrap_cipher = PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(new_key))?;
+    let wrapped_old_key =
+        wrap_cipher.encrypt(REKEY_MARKER_WRAP_PAGE_ID, new_epoch, old_key.as_bytes())?;
+    if wrapped_old_key.len() != REKEY_WRAPPED_OLD_KEY_LEN {
+        return Err(MuroError::Encryption(
+            "unexpected wrapped old key size in rekey marker".to_string(),
+        ));
+    }
+
+    let mut buf = vec![0u8; REKEY_MARKER_SIZE + REKEY_WRAPPED_OLD_KEY_LEN];
     buf[0..4].copy_from_slice(REKEY_MARKER_MAGIC);
     buf[4..20].copy_from_slice(new_salt);
     buf[20..28].copy_from_slice(&new_epoch.to_le_bytes());
-    // 28..32 reserved
+    buf[28..32].copy_from_slice(&REKEY_MARKER_FLAG_WRAPPED_OLD_KEY.to_le_bytes());
     let checksum = crc32(&buf[0..32]);
     buf[32..36].copy_from_slice(&checksum.to_le_bytes());
+    buf[36..36 + REKEY_WRAPPED_OLD_KEY_LEN].copy_from_slice(&wrapped_old_key);
 
     let mut file = OpenOptions::new()
         .write(true)
@@ -737,11 +777,16 @@ fn write_rekey_marker(path: &Path, new_salt: &[u8; 16], new_epoch: u64) -> Resul
     Ok(())
 }
 
-/// Read and validate a .rekey marker file. Returns (new_salt, new_epoch).
-pub fn read_rekey_marker(path: &Path) -> Result<([u8; 16], u64)> {
+/// Read and validate a .rekey marker file.
+pub fn read_rekey_marker(path: &Path) -> Result<RekeyMarker> {
     let mut file = File::open(path)?;
-    let mut buf = [0u8; REKEY_MARKER_SIZE];
-    file.read_exact(&mut buf)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    if buf.len() < REKEY_MARKER_SIZE {
+        return Err(MuroError::Corruption(
+            "rekey marker file is too short".to_string(),
+        ));
+    }
 
     if &buf[0..4] != REKEY_MARKER_MAGIC {
         return Err(MuroError::Corruption(
@@ -759,8 +804,35 @@ pub fn read_rekey_marker(path: &Path) -> Result<([u8; 16], u64)> {
     let mut new_salt = [0u8; 16];
     new_salt.copy_from_slice(&buf[4..20]);
     let new_epoch = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+    let flags = u32::from_le_bytes(buf[28..32].try_into().unwrap());
 
-    Ok((new_salt, new_epoch))
+    let wrapped_old_key = if flags & REKEY_MARKER_FLAG_WRAPPED_OLD_KEY != 0 {
+        if buf.len() < REKEY_MARKER_SIZE + REKEY_WRAPPED_OLD_KEY_LEN {
+            return Err(MuroError::Corruption(
+                "rekey marker file missing wrapped old key payload".to_string(),
+            ));
+        }
+        Some(buf[36..36 + REKEY_WRAPPED_OLD_KEY_LEN].to_vec())
+    } else {
+        None
+    };
+
+    Ok(RekeyMarker {
+        new_salt,
+        new_epoch,
+        wrapped_old_key,
+    })
+}
+
+pub fn unwrap_rekey_old_key(
+    new_key: &MasterKey,
+    new_epoch: u64,
+    wrapped_old_key: &[u8],
+) -> Result<MasterKey> {
+    let unwrap_cipher = PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(new_key))?;
+    let old_key_bytes =
+        unwrap_cipher.decrypt(REKEY_MARKER_WRAP_PAGE_ID, new_epoch, wrapped_old_key)?;
+    MasterKey::from_slice(&old_key_bytes)
 }
 
 impl crate::storage::page_store::PageStore for Pager {

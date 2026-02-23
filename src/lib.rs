@@ -30,7 +30,7 @@ use crate::error::Result;
 use crate::schema::catalog::SystemCatalog;
 use crate::sql::executor::{ExecResult, Row};
 use crate::sql::session::Session;
-use crate::storage::pager::{read_rekey_marker, rekey_marker_path, Pager};
+use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
@@ -396,7 +396,9 @@ impl Database {
             return Ok(());
         }
 
-        let (new_salt, new_epoch) = read_rekey_marker(&marker)?;
+        let marker_info = read_rekey_marker(&marker)?;
+        let new_salt = marker_info.new_salt;
+        let new_epoch = marker_info.new_epoch;
 
         // Read current DB header to check if rekey already completed
         let info = Pager::read_encryption_info_from_file(path)?;
@@ -410,8 +412,13 @@ impl Database {
         // Derive new key from password + marker's new salt.
         let new_key = kdf::derive_key(password.as_bytes(), &new_salt)?;
 
-        // Derive old key from password + current DB header salt.
-        let old_key = kdf::derive_key(password.as_bytes(), &info.salt)?;
+        // Derive old key from wrapped marker payload.
+        let wrapped_old_key = marker_info.wrapped_old_key.ok_or_else(|| {
+            crate::error::MuroError::Execution(
+                "rekey recovery marker is missing wrapped old key; automatic recovery is unavailable".to_string(),
+            )
+        })?;
+        let old_key = unwrap_rekey_old_key(&new_key, new_epoch, &wrapped_old_key)?;
         let old_epoch = new_epoch.saturating_sub(1);
 
         // Open the file directly for recovery

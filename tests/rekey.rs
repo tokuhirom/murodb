@@ -206,6 +206,79 @@ fn test_crash_recovery_completed_rekey() {
 }
 
 #[test]
+fn test_crash_recovery_interrupted_rekey_completes_with_new_password() {
+    use murodb::crypto::aead::PageCrypto;
+    use murodb::crypto::kdf;
+    use murodb::crypto::suite::{EncryptionSuite, PageCipher};
+    use murodb::storage::pager::{rekey_marker_path, Pager};
+    use std::io::Write;
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let old_password = "old_pass";
+    let new_password = "new_pass";
+
+    // Create DB with old password and data.
+    {
+        let mut db = Database::create_with_password(&db_path, old_password).unwrap();
+        db.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, v VARCHAR)")
+            .unwrap();
+        db.execute("INSERT INTO t VALUES (1, 'before')").unwrap();
+    }
+
+    // Simulate an interrupted rekey before any page rewrite:
+    // header still has old salt/epoch, but marker exists with new salt/epoch
+    // and wrapped old master key.
+    let info = Pager::read_encryption_info_from_file(&db_path).unwrap();
+    let old_epoch = {
+        let mut f = std::fs::File::open(&db_path).unwrap();
+        let mut hdr = [0u8; 76];
+        use std::io::Read;
+        f.read_exact(&mut hdr).unwrap();
+        u64::from_le_bytes(hdr[44..52].try_into().unwrap())
+    };
+    let new_epoch = old_epoch + 1;
+    let new_salt = [0x55u8; 16];
+    let old_key = kdf::derive_key(old_password.as_bytes(), &info.salt).unwrap();
+    let new_key = kdf::derive_key(new_password.as_bytes(), &new_salt).unwrap();
+
+    let wrap_cipher = PageCipher::new(EncryptionSuite::Aes256GcmSiv, Some(&new_key)).unwrap();
+    let wrapped_old_key = wrap_cipher
+        .encrypt(u64::MAX, new_epoch, old_key.as_bytes())
+        .unwrap();
+    assert_eq!(wrapped_old_key.len(), PageCrypto::overhead() + 32);
+
+    let marker_path = rekey_marker_path(&db_path);
+    {
+        // Marker layout (v2):
+        // 0..4 magic, 4..20 new_salt, 20..28 new_epoch, 28..32 flags=1, 32..36 crc32(0..32), 36.. wrapped_old_key
+        let mut buf = vec![0u8; 36 + wrapped_old_key.len()];
+        buf[0..4].copy_from_slice(b"REKY");
+        buf[4..20].copy_from_slice(&new_salt);
+        buf[20..28].copy_from_slice(&new_epoch.to_le_bytes());
+        buf[28..32].copy_from_slice(&1u32.to_le_bytes());
+        let checksum = murodb::wal::record::crc32(&buf[0..32]);
+        buf[32..36].copy_from_slice(&checksum.to_le_bytes());
+        buf[36..].copy_from_slice(&wrapped_old_key);
+        let mut f = std::fs::File::create(&marker_path).unwrap();
+        f.write_all(&buf).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    // Open with new password should recover interrupted rekey and succeed.
+    {
+        let mut db = Database::open_with_password(&db_path, new_password).unwrap();
+        let rows = db.query("SELECT v FROM t WHERE id = 1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("v"), Some(&Value::Varchar("before".into())));
+    }
+
+    // Old password should no longer work after recovery.
+    assert!(Database::open_with_password(&db_path, old_password).is_err());
+    assert!(!marker_path.exists());
+}
+
+#[test]
 fn test_rekey_data_integrity_with_index() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");

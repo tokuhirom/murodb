@@ -10,6 +10,10 @@ description = "Encrypted embedded SQL database with B+Tree (no leaf links) + FTS
 name = "murodb-wal-inspect"
 path = "src/bin/murodb_wal_inspect.rs"
 
+[[bin]]
+name = "murodb-rekey"
+path = "src/bin/murodb_rekey.rs"
+
 [dependencies]
 nom = "7"
 aes-gcm-siv = "0.11"

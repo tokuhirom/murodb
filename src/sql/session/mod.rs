@@ -177,7 +177,6 @@ impl Session {
             Statement::Begin => self.handle_begin(),
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
-            Statement::AlterDatabaseRekey { ref password } => self.handle_rekey(password),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(&stmt)
@@ -257,7 +256,6 @@ impl Session {
             | Statement::Update(_)
             | Statement::Delete(_)
             | Statement::AnalyzeTable(_)
-            | Statement::AlterDatabaseRekey { .. }
             | Statement::Begin
             | Statement::Commit
             | Statement::Rollback => false,
@@ -319,32 +317,31 @@ impl Session {
         Ok(ExecResult::Ok)
     }
 
-    /// Handle ALTER DATABASE REKEY WITH PASSWORD '<new_password>'.
+    /// Re-encrypt all pages with a new password-derived key.
     ///
-    /// Re-encrypts all pages with a new key derived from the new password.
     /// Must not be called inside an active transaction.
-    fn handle_rekey(&mut self, new_password: &str) -> Result<ExecResult> {
+    pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
+        self.check_poisoned()?;
+        self.refresh_from_disk_if_needed()?;
+
         // Reject if inside an active transaction
         if self.active_tx.is_some() {
             return Err(MuroError::Execution(
-                "ALTER DATABASE REKEY cannot be used inside a transaction".into(),
+                "REKEY cannot be used inside a transaction".into(),
             ));
         }
 
         // Reject if plaintext mode
         if self.pager.encryption_suite() == EncryptionSuite::Plaintext {
             return Err(MuroError::Execution(
-                "ALTER DATABASE REKEY is not supported for plaintext databases".into(),
+                "REKEY is not supported for plaintext databases".into(),
             ));
         }
 
         // Checkpoint WAL to ensure all committed data is flushed to the DB file
         self.try_checkpoint_truncate_with_retry()
             .map_err(|(_, e)| {
-                MuroError::Execution(format!(
-                    "ALTER DATABASE REKEY failed: WAL checkpoint failed: {}",
-                    e
-                ))
+                MuroError::Execution(format!("REKEY failed: WAL checkpoint failed: {}", e))
             })?;
 
         // Generate new salt and derive new key
@@ -382,7 +379,7 @@ impl Session {
             }
         };
 
-        Ok(ExecResult::Ok)
+        Ok(())
     }
 
     /// Execute a statement in auto-commit mode: wrap in an implicit transaction.

@@ -211,8 +211,7 @@ fn test_backup_after_rekey_uses_new_password() {
             .unwrap();
         db.execute("INSERT INTO t VALUES (1, 'before_rekey')")
             .unwrap();
-        db.execute("ALTER DATABASE REKEY WITH PASSWORD 'new_pass'")
-            .unwrap();
+        db.rekey_with_password("new_pass").unwrap();
         db.execute("INSERT INTO t VALUES (2, 'after_rekey')")
             .unwrap();
 
@@ -252,9 +251,7 @@ fn test_rekey_on_backup_does_not_affect_source() {
     // Rekey the BACKUP only.
     {
         let mut backup = murodb::Database::open_with_password(&backup_path, "source_pass").unwrap();
-        backup
-            .execute("ALTER DATABASE REKEY WITH PASSWORD 'backup_pass'")
-            .unwrap();
+        backup.rekey_with_password("backup_pass").unwrap();
     }
 
     // Source must still open with original password and not with backup password.

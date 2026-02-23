@@ -666,6 +666,12 @@ impl Database {
         self.session.execute_read_only_query(sql)
     }
 
+    /// Re-encrypt the database with a new password-derived key.
+    pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
+        let _guard = self.lock_manager.write_lock()?;
+        self.session.rekey_with_password(new_password)
+    }
+
     /// Get the catalog root page ID (needed for reopening).
     pub fn catalog_root(&self) -> u64 {
         self.session.catalog().root_page_id()

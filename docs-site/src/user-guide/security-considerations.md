@@ -13,7 +13,6 @@ This page summarizes the current security model, known risks, and operational gu
 | Risk | Impact | Status |
 |---|---|---|
 | Malformed page/cell metadata can currently trigger panic paths instead of clean corruption errors | Process abort (availability) when opening/querying corrupted files, especially relevant in plaintext mode | Tracked: [#182](https://github.com/tokuhirom/murodb/issues/182) |
-| `ALTER DATABASE REKEY WITH PASSWORD '...'` requires literal secrets in SQL text | Password can leak via shell history, process args (`-e`), logs, and audit trails | Tracked: [#183](https://github.com/tokuhirom/murodb/issues/183) |
 | Plaintext mode has no confidentiality/integrity guarantees | Data can be read/modified offline without cryptographic checks | By design |
 | No built-in user authentication/authorization layer | Access control depends on host process + filesystem permissions | By design |
 

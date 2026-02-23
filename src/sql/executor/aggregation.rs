@@ -90,8 +90,10 @@ enum Accumulator {
     Avg {
         int_sum: i128,
         float_sum: f64,
+        decimal_sum: Option<rust_decimal::Decimal>,
         count: i64,
         has_float: bool,
+        has_decimal: bool,
     },
 }
 
@@ -108,8 +110,10 @@ impl Accumulator {
             "AVG" => Accumulator::Avg {
                 int_sum: 0,
                 float_sum: 0.0,
+                decimal_sum: None,
                 count: 0,
                 has_float: false,
+                has_decimal: false,
             },
             _ => Accumulator::Count { count: 0 },
         }
@@ -134,6 +138,9 @@ impl Accumulator {
                         None => Value::Integer(*n),
                         Some(Value::Integer(cur)) => Value::Integer(cur + *n),
                         Some(Value::Float(cur)) => Value::Float(cur + (*n as f64)),
+                        Some(Value::Decimal(cur)) => {
+                            Value::Decimal(cur + rust_decimal::Decimal::from(*n))
+                        }
                         Some(other) => other,
                     });
                 }
@@ -142,6 +149,16 @@ impl Accumulator {
                         None => Value::Float(*n),
                         Some(Value::Integer(cur)) => Value::Float((cur as f64) + *n),
                         Some(Value::Float(cur)) => Value::Float(cur + *n),
+                        Some(other) => other,
+                    });
+                }
+                Value::Decimal(d) => {
+                    *total = Some(match total.take() {
+                        None => Value::Decimal(*d),
+                        Some(Value::Decimal(cur)) => Value::Decimal(cur + *d),
+                        Some(Value::Integer(cur)) => {
+                            Value::Decimal(rust_decimal::Decimal::from(cur) + *d)
+                        }
                         Some(other) => other,
                     });
                 }
@@ -176,18 +193,29 @@ impl Accumulator {
             Accumulator::Avg {
                 int_sum,
                 float_sum,
+                decimal_sum,
                 count,
                 has_float,
+                has_decimal,
             } => match val {
                 Value::Integer(n) => {
                     *int_sum += *n as i128;
                     *float_sum += *n as f64;
+                    *decimal_sum = Some(
+                        decimal_sum.unwrap_or(rust_decimal::Decimal::ZERO)
+                            + rust_decimal::Decimal::from(*n),
+                    );
                     *count += 1;
                 }
                 Value::Float(n) => {
                     *float_sum += *n;
                     *count += 1;
                     *has_float = true;
+                }
+                Value::Decimal(d) => {
+                    *decimal_sum = Some(decimal_sum.unwrap_or(rust_decimal::Decimal::ZERO) + *d);
+                    *count += 1;
+                    *has_decimal = true;
                 }
                 _ => {}
             },
@@ -210,11 +238,16 @@ impl Accumulator {
             Accumulator::Avg {
                 int_sum,
                 float_sum,
+                decimal_sum,
                 count,
                 has_float,
+                has_decimal,
             } => {
                 if *count == 0 {
                     Value::Null
+                } else if *has_decimal {
+                    let sum = decimal_sum.unwrap_or(rust_decimal::Decimal::ZERO);
+                    Value::Decimal(sum / rust_decimal::Decimal::from(*count))
                 } else if *has_float {
                     Value::Float(*float_sum / (*count as f64))
                 } else {
@@ -686,6 +719,13 @@ pub(super) fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Orde
         (Some(Value::Timestamp(a)), Some(Value::DateTime(b))) => a.cmp(b),
         (Some(Value::Varchar(a)), Some(Value::Varchar(b))) => a.cmp(b),
         (Some(Value::Varbinary(a)), Some(Value::Varbinary(b))) => a.cmp(b),
+        (Some(Value::Decimal(a)), Some(Value::Decimal(b))) => a.cmp(b),
+        (Some(Value::Decimal(a)), Some(Value::Integer(b))) => {
+            a.cmp(&rust_decimal::Decimal::from(*b))
+        }
+        (Some(Value::Integer(a)), Some(Value::Decimal(b))) => {
+            rust_decimal::Decimal::from(*a).cmp(b)
+        }
         (Some(Value::Uuid(a)), Some(Value::Uuid(b))) => a.cmp(b),
         (Some(Value::Null), _) | (None, _) => std::cmp::Ordering::Less,
         (_, Some(Value::Null)) | (_, None) => std::cmp::Ordering::Greater,

@@ -514,6 +514,20 @@ impl Database {
         pager.flush_meta()
     }
 
+    /// Create a consistent backup of the database to `dest`.
+    ///
+    /// Acquires a write lock, checkpoints the WAL (flushing all committed
+    /// data to the main file), then performs a byte-level copy of the
+    /// database file. The backup file is a valid MuroDB database that can
+    /// be opened directly with the same key/password.
+    pub fn backup<P: AsRef<Path>>(&mut self, dest: P) -> Result<()> {
+        let _guard = self.lock_manager.write_lock()?;
+        // Checkpoint WAL so all committed data is in the data file.
+        self.session.try_checkpoint_truncate_once()?;
+        // Copy the data file bytes.
+        self.session.pager_mut().backup_to_file(dest.as_ref())
+    }
+
     /// Create a `Session` that supports BEGIN/COMMIT/ROLLBACK.
     ///
     /// This consumes the Database and returns a Session. The Session owns the

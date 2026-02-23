@@ -1,4 +1,5 @@
 use crate::types::{parse_uuid_string, Value};
+use rust_decimal::prelude::ToPrimitive;
 
 pub(super) fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
@@ -46,6 +47,11 @@ pub(super) fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Timestamp(a), Value::Date(b)) => Some(a.cmp(&((*b as i64) * 1_000_000))),
         (Value::DateTime(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Timestamp(a), Value::DateTime(b)) => Some(a.cmp(b)),
+        (Value::Decimal(a), Value::Decimal(b)) => Some(a.cmp(b)),
+        (Value::Decimal(a), Value::Integer(b)) => Some(a.cmp(&rust_decimal::Decimal::from(*b))),
+        (Value::Integer(a), Value::Decimal(b)) => Some(rust_decimal::Decimal::from(*a).cmp(b)),
+        (Value::Decimal(a), Value::Float(b)) => a.to_f64().and_then(|af| af.partial_cmp(b)),
+        (Value::Float(a), Value::Decimal(b)) => b.to_f64().and_then(|bf| a.partial_cmp(&bf)),
         (Value::Uuid(a), Value::Uuid(b)) => Some(a.cmp(b)),
         (Value::Uuid(a), Value::Varchar(s)) => parse_uuid_string(s).map(|b| a.cmp(&b)),
         (Value::Varchar(s), Value::Uuid(b)) => parse_uuid_string(s).map(|a| a.cmp(b)),
@@ -57,6 +63,7 @@ pub fn is_truthy(val: &Value) -> bool {
     match val {
         Value::Integer(n) => *n != 0,
         Value::Float(n) => *n != 0.0,
+        Value::Decimal(d) => !d.is_zero(),
         Value::Varchar(s) => !s.is_empty(),
         Value::Varbinary(b) => !b.is_empty(),
         Value::Date(_) | Value::DateTime(_) | Value::Timestamp(_) => true,

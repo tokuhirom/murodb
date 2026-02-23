@@ -15,6 +15,9 @@
 | VARCHAR(n) | variable | max n bytes (optional) |
 | TEXT | variable | unbounded text |
 | VARBINARY(n) | variable | max n bytes (optional) |
+| FLOAT | 4 bytes | Single-precision IEEE 754 |
+| DOUBLE | 8 bytes | Double-precision IEEE 754 |
+| DECIMAL(p,s) | 16 bytes | Fixed-point exact numeric (precision 1-28, scale 0-p). Alias: NUMERIC(p,s). Default: DECIMAL(10,0) |
 | UUID | 16 bytes | 128-bit UUID (RFC 9562), stored as fixed-length binary |
 | NULL | 0 bytes | null value |
 
@@ -508,12 +511,15 @@ SELECT REGEXP_LIKE(name, '^hello') FROM t;
 
 ### Numeric Functions
 
+All numeric functions support INTEGER, FLOAT, DOUBLE, and DECIMAL types.
+
 #### ABS(n)
 
 Returns the absolute value.
 
 ```sql
-SELECT ABS(-42);  -- 42
+SELECT ABS(-42);    -- 42
+SELECT ABS(-3.14);  -- 3.14 (DECIMAL)
 ```
 
 #### CEIL(n) / CEILING(n) / FLOOR(n)
@@ -521,16 +527,17 @@ SELECT ABS(-42);  -- 42
 Returns the ceiling or floor. (Identity for integer types.)
 
 ```sql
-SELECT CEIL(42);   -- 42
-SELECT FLOOR(42);  -- 42
+SELECT CEIL(3.14);   -- 4
+SELECT FLOOR(3.14);  -- 3
 ```
 
 #### ROUND(n [, decimals])
 
-Rounds a number. (Identity for integer types.)
+Rounds a number to `decimals` decimal places (default 0). Works with DECIMAL for exact rounding.
 
 ```sql
-SELECT ROUND(42);  -- 42
+SELECT ROUND(3.1459, 2);  -- 3.15 (DECIMAL)
+SELECT ROUND(42);          -- 42
 ```
 
 #### MOD(a, b)
@@ -675,7 +682,7 @@ SELECT CAST(42 AS VARCHAR);    -- '42'
 SELECT CAST(val AS BIGINT) FROM t;
 ```
 
-Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
+Supported target types: TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DECIMAL(p,s), DATE, DATETIME, TIMESTAMP, VARCHAR, TEXT, VARBINARY.
 
 ## Aggregation & GROUP BY
 

@@ -100,6 +100,7 @@ impl ColumnDef {
             DataType::DateTime => 11,
             DataType::Timestamp => 12,
             DataType::Uuid => 13,
+            DataType::Decimal(_, _) => 14,
         });
         // flags
         let mut flags: u8 = 0;
@@ -119,10 +120,14 @@ impl ColumnDef {
             flags |= 0x10;
         }
         buf.push(flags);
-        // optional size for Varchar/Varbinary
+        // optional size for Varchar/Varbinary, precision/scale for Decimal
         match self.data_type {
             DataType::Varchar(size) | DataType::Varbinary(size) => {
                 buf.extend_from_slice(&size.unwrap_or(0).to_le_bytes());
+            }
+            DataType::Decimal(p, s) => {
+                buf.extend_from_slice(&p.to_le_bytes());
+                buf.extend_from_slice(&s.to_le_bytes());
             }
             _ => {}
         }
@@ -213,6 +218,17 @@ impl ColumnDef {
             11 => DataType::DateTime,
             12 => DataType::Timestamp,
             13 => DataType::Uuid,
+            14 => {
+                // Decimal with precision and scale
+                if data.len() < consumed + 8 {
+                    return None;
+                }
+                let p = u32::from_le_bytes(data[consumed..consumed + 4].try_into().unwrap());
+                consumed += 4;
+                let s = u32::from_le_bytes(data[consumed..consumed + 4].try_into().unwrap());
+                consumed += 4;
+                DataType::Decimal(p, s)
+            }
             _ => return None,
         };
 
@@ -337,6 +353,8 @@ mod tests {
             DataType::Varbinary(Some(512)),
             DataType::Text,
             DataType::Uuid,
+            DataType::Decimal(10, 0),
+            DataType::Decimal(18, 2),
         ] {
             let col = ColumnDef::new("test", dt);
             let bytes = col.serialize();

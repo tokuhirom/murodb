@@ -13,7 +13,7 @@ fn test_key() -> MasterKey {
 fn setup_session() -> (Session, TempDir) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let wal_path = dir.path().join("test.wal");
+    let wal_path = dir.path().join("test.db.wal");
     let mut pager = Pager::create(&db_path, &test_key()).unwrap();
     let catalog = SystemCatalog::create(&mut pager).unwrap();
     pager.set_catalog_root(catalog.root_page_id());

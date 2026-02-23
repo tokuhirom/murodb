@@ -4,6 +4,7 @@ use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult, Row};
 use murodb::storage::pager::Pager;
 use murodb::types::Value;
+use murodb::Database;
 use tempfile::TempDir;
 
 fn test_key() -> MasterKey {
@@ -514,4 +515,51 @@ fn test_sql_fulltext_accepts_unquoted_stop_filter_on() {
         &mut catalog,
         "CREATE FULLTEXT INDEX ft_body ON t(body) WITH PARSER ngram OPTIONS (n=2, normalize='nfkc', stop_filter=on, stop_df_ratio_ppm=500000)",
     );
+}
+
+#[test]
+fn test_sql_fulltext_legacy_fixed_key_metadata_backfill() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("legacy.db");
+
+    // Simulate a pre-metadata legacy DB that indexed terms with the historical fixed key.
+    {
+        let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+        pager.set_fts_term_key([0x55u8; 32]);
+        let mut catalog = SystemCatalog::create(&mut pager).unwrap();
+        pager.set_catalog_root(catalog.root_page_id());
+        pager.flush_meta().unwrap();
+
+        execute(
+            "CREATE TABLE docs (id BIGINT PRIMARY KEY, body TEXT)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "CREATE FULLTEXT INDEX fts_body ON docs (body)",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        execute(
+            "INSERT INTO docs VALUES (1, '東京タワーは東京にあります')",
+            &mut pager,
+            &mut catalog,
+        )
+        .unwrap();
+        pager.flush_meta().unwrap();
+    }
+
+    // Opening via Database should backfill missing metadata with legacy fixed key.
+    {
+        let mut db = Database::open(&db_path, &test_key()).unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM docs WHERE MATCH(body) AGAINST('東京' IN BOOLEAN MODE) > 0 ORDER BY id",
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+    }
 }

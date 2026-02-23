@@ -34,6 +34,8 @@ use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_o
 use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
+const LEGACY_SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
+
 /// Main database handle.
 pub struct Database {
     session: Session,
@@ -153,7 +155,11 @@ fn quarantine_wal_durably(wal_path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn initialize_fts_term_key(pager: &mut Pager, catalog: Option<&mut SystemCatalog>) -> Result<bool> {
+fn initialize_fts_term_key(
+    pager: &mut Pager,
+    catalog: Option<&mut SystemCatalog>,
+    missing_meta_key: [u8; 32],
+) -> Result<bool> {
     let Some(catalog) = catalog else {
         pager.set_fts_term_key(pager.derive_bootstrap_fts_term_key());
         return Ok(false);
@@ -165,8 +171,8 @@ fn initialize_fts_term_key(pager: &mut Pager, catalog: Option<&mut SystemCatalog
             Ok(false)
         }
         Ok(None) => {
-            // Bootstrap value for databases that predate catalog-persisted FTS term keys.
-            let generated = pager.derive_bootstrap_fts_term_key();
+            // Missing metadata means legacy DB; call site decides which key to backfill.
+            let generated = missing_meta_key;
             catalog.set_fts_term_key(pager, generated)?;
             pager.set_fts_term_key(generated);
             Ok(true)
@@ -186,7 +192,8 @@ impl Database {
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -209,7 +216,8 @@ impl Database {
     pub fn create_plaintext(path: &Path) -> Result<Self> {
         let mut pager = Pager::create_plaintext(path)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 
@@ -293,6 +301,7 @@ impl Database {
             } else {
                 Some(&mut catalog)
             },
+            LEGACY_SQL_FTS_TERM_KEY,
         )?;
         if migrated {
             pager.set_catalog_root(catalog.root_page_id());
@@ -350,6 +359,7 @@ impl Database {
             } else {
                 Some(&mut catalog)
             },
+            LEGACY_SQL_FTS_TERM_KEY,
         )?;
         if migrated {
             pager.set_catalog_root(catalog.root_page_id());
@@ -377,7 +387,8 @@ impl Database {
         let master_key = kdf::derive_key(password.as_bytes(), &salt)?;
         let mut pager = Pager::create_with_salt(path, &master_key, salt)?;
         let mut catalog = SystemCatalog::create(&mut pager)?;
-        initialize_fts_term_key(&mut pager, Some(&mut catalog))?;
+        let bootstrap_fts_key = pager.derive_bootstrap_fts_term_key();
+        initialize_fts_term_key(&mut pager, Some(&mut catalog), bootstrap_fts_key)?;
         pager.set_catalog_root(catalog.root_page_id());
         pager.flush_meta()?;
 

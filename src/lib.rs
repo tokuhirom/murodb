@@ -9,16 +9,59 @@
 //! - WAL-based crash recovery
 //! - Multiple readers / single writer concurrency
 
+#[cfg(feature = "test-utils")]
+pub mod btree;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod btree;
+
+#[cfg(feature = "test-utils")]
+pub mod concurrency;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod concurrency;
+
+#[cfg(feature = "test-utils")]
+pub mod crypto;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod crypto;
+
+#[cfg(feature = "test-utils")]
+pub mod error;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod error;
+
+#[cfg(feature = "test-utils")]
+pub mod fts;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod fts;
+
+#[cfg(feature = "test-utils")]
+pub mod schema;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod schema;
+
+#[cfg(feature = "test-utils")]
+pub mod sql;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod sql;
+
+#[cfg(feature = "test-utils")]
+pub mod storage;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod storage;
+
+#[cfg(feature = "test-utils")]
+pub mod tx;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod tx;
+
+#[cfg(feature = "test-utils")]
+pub mod types;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod types;
+
+#[cfg(feature = "test-utils")]
+pub mod wal;
+#[cfg(not(feature = "test-utils"))]
 pub(crate) mod wal;
 
 pub use crate::crypto::aead::MasterKey;

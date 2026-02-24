@@ -34,7 +34,7 @@ impl SanitizeReport {
 
 /// Simple freelist tracking free pages.
 /// Free page IDs are stored in-memory and serialized to special page(s) on checkpoint.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FreeList {
     free_pages: Vec<PageId>,
 }

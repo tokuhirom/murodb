@@ -1005,7 +1005,22 @@ COMMIT;
 BEGIN;
 INSERT INTO t (id, name) VALUES (3, 'Charlie');
 ROLLBACK;
+
+-- Savepoints (MySQL-compatible)
+BEGIN;
+INSERT INTO t (id, name) VALUES (10, 'step1');
+SAVEPOINT sp1;
+INSERT INTO t (id, name) VALUES (11, 'step2');
+ROLLBACK TO SAVEPOINT sp1; -- keeps step1, reverts step2
+RELEASE SAVEPOINT sp1;
+COMMIT;
 ```
+
+Savepoint notes:
+- `SAVEPOINT <name>`, `ROLLBACK TO [SAVEPOINT] <name>`, `RELEASE SAVEPOINT <name>` are valid only inside an active transaction.
+- `ROLLBACK TO` keeps the transaction active and discards savepoints created after the target.
+- Reusing the same savepoint name overwrites the previous one (MySQL behavior).
+- `COMMIT` and full `ROLLBACK` clear all savepoints.
 
 Rust API note:
 - `Database::query()` accepts read-only SQL only.

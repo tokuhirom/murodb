@@ -144,6 +144,39 @@ fn test_parse_delete() {
 }
 
 #[test]
+fn test_parse_savepoint() {
+    let stmt = parse_sql("SAVEPOINT sp1").unwrap();
+    match stmt {
+        Statement::Savepoint(name) => assert_eq!(name, "sp1"),
+        _ => panic!("Expected Savepoint"),
+    }
+}
+
+#[test]
+fn test_parse_rollback_to_savepoint_with_optional_keyword() {
+    let stmt = parse_sql("ROLLBACK TO SAVEPOINT sp1").unwrap();
+    match stmt {
+        Statement::RollbackToSavepoint(name) => assert_eq!(name, "sp1"),
+        _ => panic!("Expected RollbackToSavepoint"),
+    }
+
+    let stmt = parse_sql("ROLLBACK TO sp2").unwrap();
+    match stmt {
+        Statement::RollbackToSavepoint(name) => assert_eq!(name, "sp2"),
+        _ => panic!("Expected RollbackToSavepoint"),
+    }
+}
+
+#[test]
+fn test_parse_release_savepoint() {
+    let stmt = parse_sql("RELEASE SAVEPOINT sp1").unwrap();
+    match stmt {
+        Statement::ReleaseSavepoint(name) => assert_eq!(name, "sp1"),
+        _ => panic!("Expected ReleaseSavepoint"),
+    }
+}
+
+#[test]
 fn test_parse_create_unique_index() {
     let stmt = parse_sql("CREATE UNIQUE INDEX idx_email ON users(email)").unwrap();
     if let Statement::CreateIndex(ci) = stmt {

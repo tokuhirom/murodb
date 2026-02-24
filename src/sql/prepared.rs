@@ -144,6 +144,9 @@ fn count_statement_bind_params(stmt: &Statement) -> usize {
         | Statement::Begin
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackToSavepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::ShowCheckpointStats
         | Statement::ShowDatabaseStats
         | Statement::SetRuntimeOption(_)
@@ -320,6 +323,9 @@ fn bind_statement_in_place(stmt: &mut Statement, params: &[Value], next: &mut us
         | Statement::Begin
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackToSavepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::ShowCheckpointStats
         | Statement::ShowDatabaseStats
         | Statement::SetRuntimeOption(_)

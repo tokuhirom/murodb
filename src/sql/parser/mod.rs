@@ -110,7 +110,27 @@ impl Parser {
             }
             Some(Token::Rollback) => {
                 self.advance();
-                Statement::Rollback
+                if self.peek() == Some(&Token::To) {
+                    self.advance(); // TO
+                    if self.peek() == Some(&Token::Savepoint) {
+                        self.advance(); // optional SAVEPOINT
+                    }
+                    let name = self.expect_ident()?;
+                    Statement::RollbackToSavepoint(name)
+                } else {
+                    Statement::Rollback
+                }
+            }
+            Some(Token::Savepoint) => {
+                self.advance();
+                let name = self.expect_ident()?;
+                Statement::Savepoint(name)
+            }
+            Some(Token::Release) => {
+                self.advance();
+                self.expect(&Token::Savepoint)?;
+                let name = self.expect_ident()?;
+                Statement::ReleaseSavepoint(name)
             }
             Some(Token::Set) => self.parse_set_runtime_option()?,
             Some(t) => return Err(format!("Unexpected token: {:?}", t)),

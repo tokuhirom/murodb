@@ -321,6 +321,9 @@ fn is_read_only_statement(stmt: &Statement) -> bool {
         | Statement::Begin
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackToSavepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::SetRuntimeOption(_) => false,
     }
 }

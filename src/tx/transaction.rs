@@ -16,6 +16,7 @@ pub enum TxState {
 
 /// A write transaction that buffers dirty pages and writes them
 /// to the WAL on commit.
+#[derive(Clone)]
 pub struct Transaction {
     txid: TxId,
     state: TxState,

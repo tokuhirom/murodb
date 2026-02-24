@@ -6,6 +6,7 @@ use crate::sql::ast::Statement;
 use crate::sql::executor::{execute_statement, ExecResult, Row};
 use crate::sql::parser::parse_sql;
 use crate::sql::prepared::{contains_bind_params, PreparedStatement};
+use crate::storage::freelist::FreeList;
 use crate::storage::pager::Pager;
 use crate::tx::page_store::TxPageStore;
 use crate::tx::transaction::Transaction;
@@ -54,6 +55,8 @@ pub struct RuntimeConfig {
 /// - `BEGIN` starts a transaction (dirty-page buffering).
 /// - `COMMIT` flushes dirty pages via WAL, then to disk.
 /// - `ROLLBACK` discards dirty pages without WAL append.
+/// - `SAVEPOINT` / `ROLLBACK TO` / `RELEASE SAVEPOINT` are supported inside
+///   explicit transactions.
 /// - Without `BEGIN`, each statement executes in auto-commit mode
 ///   (wrapped in an implicit transaction with WAL).
 pub struct Session {
@@ -61,6 +64,7 @@ pub struct Session {
     catalog: SystemCatalog,
     wal: WalWriter,
     active_tx: Option<Transaction>,
+    savepoints: Vec<Savepoint>,
     next_txid: TxId,
     stats: DatabaseStats,
     poisoned: Option<String>,
@@ -71,6 +75,16 @@ pub struct Session {
     inject_checkpoint_failures_remaining: usize,
     #[cfg(test)]
     inject_wal_recreate_fail_once: bool,
+}
+
+#[derive(Clone)]
+struct Savepoint {
+    name: String,
+    tx: Transaction,
+    catalog_root: u64,
+    pager_page_count: u64,
+    pager_freelist_page_id: u64,
+    pager_freelist: FreeList,
 }
 
 impl Session {
@@ -96,6 +110,7 @@ impl Session {
             catalog,
             wal,
             active_tx: None,
+            savepoints: Vec::new(),
             next_txid,
             stats,
             poisoned: None,
@@ -159,6 +174,9 @@ impl Session {
             Statement::Commit => self.handle_commit(),
             Statement::Rollback => self.handle_rollback(),
             Statement::SetRuntimeOption(set_stmt) => self.handle_set_runtime_option(set_stmt),
+            Statement::Savepoint(name) => self.handle_savepoint(name),
+            Statement::RollbackToSavepoint(name) => self.handle_rollback_to_savepoint(name),
+            Statement::ReleaseSavepoint(name) => self.handle_release_savepoint(name),
             _ => {
                 if self.active_tx.is_some() {
                     self.execute_in_tx(stmt)
@@ -255,6 +273,9 @@ impl Session {
             | Statement::Begin
             | Statement::Commit
             | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackToSavepoint(_)
+            | Statement::ReleaseSavepoint(_)
             | Statement::SetRuntimeOption(_) => false,
         }
     }
@@ -278,6 +299,7 @@ impl Session {
         self.next_txid += 1;
         let snapshot_lsn = self.wal.current_lsn();
         self.active_tx = Some(Transaction::begin(txid, snapshot_lsn));
+        self.savepoints.clear();
         Ok(ExecResult::Ok)
     }
 
@@ -297,6 +319,7 @@ impl Session {
             Err(e) => return Err(e),
             Ok(_) => {}
         }
+        self.savepoints.clear();
         self.post_commit_checkpoint();
         Ok(ExecResult::Ok)
     }
@@ -307,10 +330,70 @@ impl Session {
             .take()
             .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
         tx.rollback_no_wal();
+        self.savepoints.clear();
         self.post_rollback_checkpoint();
         // Reload catalog from disk since in-memory catalog may have been modified
         let catalog_root = self.pager.catalog_root();
         self.catalog = SystemCatalog::open(catalog_root);
+        Ok(ExecResult::Ok)
+    }
+
+    fn handle_savepoint(&mut self, name: &str) -> Result<ExecResult> {
+        let tx = self
+            .active_tx
+            .as_ref()
+            .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?
+            .clone();
+        let catalog_root = self.catalog.root_page_id();
+        let pager_page_count = self.pager.page_count();
+        let pager_freelist_page_id = self.pager.freelist_page_id();
+        let pager_freelist = self.pager.freelist_mut().clone();
+        self.savepoints.retain(|sp| sp.name != name);
+        self.savepoints.push(Savepoint {
+            name: name.to_string(),
+            tx,
+            catalog_root,
+            pager_page_count,
+            pager_freelist_page_id,
+            pager_freelist,
+        });
+        Ok(ExecResult::Ok)
+    }
+
+    fn handle_rollback_to_savepoint(&mut self, name: &str) -> Result<ExecResult> {
+        let tx = self
+            .active_tx
+            .as_mut()
+            .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
+        let idx = self
+            .savepoints
+            .iter()
+            .position(|sp| sp.name == name)
+            .ok_or_else(|| MuroError::Transaction(format!("Unknown savepoint: {}", name)))?;
+        let snapshot = self.savepoints[idx].clone();
+        *tx = snapshot.tx;
+        self.catalog = SystemCatalog::open(snapshot.catalog_root);
+        self.pager.set_page_count(snapshot.pager_page_count);
+        self.pager
+            .set_freelist_page_id(snapshot.pager_freelist_page_id);
+        *self.pager.freelist_mut() = snapshot.pager_freelist;
+        // Savepoints created after the target are discarded.
+        self.savepoints.truncate(idx + 1);
+        Ok(ExecResult::Ok)
+    }
+
+    fn handle_release_savepoint(&mut self, name: &str) -> Result<ExecResult> {
+        self.active_tx
+            .as_ref()
+            .ok_or_else(|| MuroError::Transaction("No active transaction".into()))?;
+        let before = self.savepoints.len();
+        self.savepoints.retain(|sp| sp.name != name);
+        if self.savepoints.len() == before {
+            return Err(MuroError::Transaction(format!(
+                "Unknown savepoint: {}",
+                name
+            )));
+        }
         Ok(ExecResult::Ok)
     }
 

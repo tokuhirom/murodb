@@ -3,7 +3,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
-use murodb::{Database, DatabaseEncryption, RecoveryMode, RecoveryResult};
+use murodb::{Database, DatabaseEncryption, MuroError, RecoveryMode, RecoveryResult};
 
 const EXIT_OK: i32 = 0;
 const EXIT_MALFORMED_DETECTED: i32 = 10;
@@ -241,10 +241,9 @@ fn main() {
     };
     let report = Database::inspect_wal(&cli.db_path, &cli.wal, password.as_deref(), recovery_mode)
         .unwrap_or_else(|e| {
-            let kind = if matches!(mode, DatabaseEncryption::Encrypted) {
-                InspectFatalKind::DeriveKey
-            } else {
-                InspectFatalKind::InspectFailed
+            let kind = match &e {
+                MuroError::Kdf(_) => InspectFatalKind::DeriveKey,
+                _ => InspectFatalKind::InspectFailed,
             };
             inspect_fatal_and_exit(
                 &cli.format,

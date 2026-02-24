@@ -44,6 +44,7 @@ pub enum Statement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum RuntimeOption {
     CheckpointTxThreshold,
     CheckpointWalBytesThreshold,

@@ -49,6 +49,21 @@ impl RuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckpointPhase {
+    PostCommit,
+    PostRollback,
+}
+
+impl CheckpointPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PostCommit => "post-commit",
+            Self::PostRollback => "post-rollback",
+        }
+    }
+}
+
 fn parse_checkpoint_env_u64(name: &str, default: u64, min: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
         return default;
@@ -114,15 +129,14 @@ impl Session {
     }
 
     pub(super) fn post_commit_checkpoint(&mut self) {
-        self.post_checkpoint("post-commit");
+        self.post_checkpoint(CheckpointPhase::PostCommit);
     }
 
     pub(super) fn post_rollback_checkpoint(&mut self) {
-        self.post_checkpoint("post-rollback");
+        self.post_checkpoint(CheckpointPhase::PostRollback);
     }
 
-    // FIXME: Replace string phase labels with an enum to prevent typos.
-    pub(super) fn post_checkpoint(&mut self, phase: &str) {
+    pub(super) fn post_checkpoint(&mut self, phase: CheckpointPhase) {
         self.pending_checkpoint_ops = self.pending_checkpoint_ops.saturating_add(1);
         if !self.should_checkpoint_now() {
             self.stats.deferred_checkpoints += 1;
@@ -355,7 +369,12 @@ impl Session {
         Ok(ExecResult::Rows(rows))
     }
 
-    pub(super) fn emit_checkpoint_warning(&self, phase: &str, attempts: usize, error: &MuroError) {
+    pub(super) fn emit_checkpoint_warning(
+        &self,
+        phase: CheckpointPhase,
+        attempts: usize,
+        error: &MuroError,
+    ) {
         let wal_path = self.wal.wal_path().display();
         let wal_size = self
             .wal
@@ -365,7 +384,7 @@ impl Session {
             .unwrap_or_else(|| "unknown".to_string());
         eprintln!(
             "WARNING: checkpoint_failed phase={} attempts={} error=\"{}\" wal_path={} wal_size_bytes={}",
-            phase, attempts, error, wal_path, wal_size
+            phase.as_str(), attempts, error, wal_path, wal_size
         );
     }
 

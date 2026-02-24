@@ -128,10 +128,13 @@ pub fn execute_statement(
         Statement::Begin
         | Statement::Commit
         | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackToSavepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::ShowCheckpointStats
         | Statement::ShowDatabaseStats
         | Statement::SetRuntimeOption(_) => Err(MuroError::Execution(
-            "BEGIN/COMMIT/ROLLBACK/SHOW CHECKPOINT STATS/SHOW DATABASE STATS/SET runtime option must be handled by Session".into(),
+            "BEGIN/COMMIT/ROLLBACK/SAVEPOINT/ROLLBACK TO/RELEASE SAVEPOINT/SHOW CHECKPOINT STATS/SHOW DATABASE STATS/SET runtime option must be handled by Session".into(),
         )),
     }
 }

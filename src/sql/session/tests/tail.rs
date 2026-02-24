@@ -256,3 +256,146 @@ fn test_read_only_query_in_explicit_tx_reads_uncommitted_state() {
     let rows = session.execute_read_only_query("SELECT id FROM t").unwrap();
     assert!(rows.is_empty());
 }
+
+#[test]
+fn test_savepoint_nested_rollback_and_release_flow() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    session.execute("BEGIN").unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'a')").unwrap();
+    session.execute("SAVEPOINT a").unwrap();
+    session.execute("INSERT INTO t VALUES (2, 'b')").unwrap();
+    session.execute("SAVEPOINT b").unwrap();
+    session.execute("INSERT INTO t VALUES (3, 'c')").unwrap();
+
+    session.execute("ROLLBACK TO SAVEPOINT b").unwrap();
+    let rows = match session.execute("SELECT id FROM t ORDER BY id").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert_eq!(rows.len(), 2);
+
+    session.execute("ROLLBACK TO a").unwrap();
+    let rows = match session.execute("SELECT id FROM t ORDER BY id").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert_eq!(rows.len(), 1);
+
+    session.execute("RELEASE SAVEPOINT a").unwrap();
+    session.execute("COMMIT").unwrap();
+
+    let rows = match session.execute("SELECT id FROM t ORDER BY id").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn test_savepoint_duplicate_name_overwrites_previous() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    session.execute("BEGIN").unwrap();
+    session.execute("INSERT INTO t VALUES (1)").unwrap();
+    session.execute("SAVEPOINT s").unwrap();
+    session.execute("INSERT INTO t VALUES (2)").unwrap();
+    session.execute("SAVEPOINT s").unwrap(); // overwrite
+    session.execute("INSERT INTO t VALUES (3)").unwrap();
+    session.execute("ROLLBACK TO SAVEPOINT s").unwrap();
+    session.execute("COMMIT").unwrap();
+
+    let rows = match session.execute("SELECT id FROM t ORDER BY id").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn test_savepoint_invalid_usage_errors() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    let err = session.execute("SAVEPOINT s").unwrap_err();
+    assert!(matches!(err, MuroError::Transaction(msg) if msg == "No active transaction"));
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    session.execute("BEGIN").unwrap();
+
+    let err = session.execute("ROLLBACK TO SAVEPOINT s").unwrap_err();
+    assert!(matches!(err, MuroError::Transaction(msg) if msg == "Unknown savepoint: s"));
+
+    let err = session.execute("RELEASE SAVEPOINT s").unwrap_err();
+    assert!(matches!(err, MuroError::Transaction(msg) if msg == "Unknown savepoint: s"));
+}
+
+#[test]
+fn test_rollback_to_savepoint_restores_pager_allocation_state() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&dir.path().join("test.wal"), &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, payload VARCHAR)")
+        .unwrap();
+    session.execute("BEGIN").unwrap();
+    session.execute("SAVEPOINT s").unwrap();
+    let page_count_before = session.pager().page_count();
+
+    for i in 0..200 {
+        session
+            .execute(&format!("INSERT INTO t VALUES ({}, REPEAT('a', 2048))", i))
+            .unwrap();
+    }
+    assert!(
+        session.pager().page_count() > page_count_before,
+        "test setup should allocate pages after savepoint"
+    );
+
+    session.execute("ROLLBACK TO SAVEPOINT s").unwrap();
+    assert_eq!(session.pager().page_count(), page_count_before);
+
+    let rows = match session.execute("SELECT id FROM t").unwrap() {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert!(rows.is_empty());
+}

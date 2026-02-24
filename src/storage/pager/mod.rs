@@ -16,7 +16,7 @@ use crate::wal::record::crc32;
 mod backup_rekey;
 mod rekey_marker;
 
-pub use rekey_marker::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, RekeyMarker};
+pub use rekey_marker::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key};
 
 /// Plaintext file header size (written before any encrypted pages).
 /// Layout:

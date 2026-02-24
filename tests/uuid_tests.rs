@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::crypto::aead::MasterKey;
 use murodb::schema::catalog::SystemCatalog;
 use murodb::sql::executor::{execute, ExecResult, Row};

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::types::Value;
 use murodb::Database;
 use tempfile::TempDir;

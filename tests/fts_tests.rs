@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::crypto::aead::MasterKey;
 use murodb::fts::index::{FtsIndex, FtsPendingOp};
 use murodb::fts::query::{query_boolean, query_natural};

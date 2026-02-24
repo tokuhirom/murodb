@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Integration tests for Phase 3: Aggregation & Grouping.
 use murodb::crypto::aead::MasterKey;
 use murodb::schema::catalog::SystemCatalog;

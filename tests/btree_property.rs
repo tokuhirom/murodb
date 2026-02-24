@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Property and fuzz tests for B-tree rebalance invariants.
 ///
 /// Runs randomized insert/delete workloads and verifies structural invariants:

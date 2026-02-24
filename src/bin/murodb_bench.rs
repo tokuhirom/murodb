@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{value_parser, Parser};
-use murodb::crypto::aead::MasterKey;
-use murodb::Database;
+use murodb::{Database, MasterKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 

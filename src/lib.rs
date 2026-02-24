@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! MuroDB: Embedded SQL Database with B+Tree (no leaf links) + FTS (Bigram)
 //!
 //! A single-file database with:
@@ -7,37 +9,88 @@
 //! - WAL-based crash recovery
 //! - Multiple readers / single writer concurrency
 
+#[cfg(feature = "test-utils")]
 pub mod btree;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod btree;
+
+#[cfg(feature = "test-utils")]
 pub mod concurrency;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod concurrency;
+
+#[cfg(feature = "test-utils")]
 pub mod crypto;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod crypto;
+
+#[cfg(feature = "test-utils")]
 pub mod error;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod error;
+
+#[cfg(feature = "test-utils")]
 pub mod fts;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod fts;
+
+#[cfg(feature = "test-utils")]
 pub mod schema;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod schema;
+
+#[cfg(feature = "test-utils")]
 pub mod sql;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod sql;
+
+#[cfg(feature = "test-utils")]
 pub mod storage;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod storage;
+
+#[cfg(feature = "test-utils")]
 pub mod tx;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod tx;
+
+#[cfg(feature = "test-utils")]
 pub mod types;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod types;
+
+#[cfg(feature = "test-utils")]
 pub mod wal;
+#[cfg(not(feature = "test-utils"))]
+pub(crate) mod wal;
+
+pub use crate::crypto::aead::MasterKey;
+pub use crate::error::{MuroError, Result};
+pub use crate::fts::snippet::fts_snippet;
+pub use crate::sql::executor::{ExecResult, Row};
+pub use crate::sql::prepared::PreparedStatement;
+pub use crate::sql::session::Session;
+pub use crate::storage::pager::DbEncryptionInfo;
+pub use crate::types::{format_date, format_datetime, format_uuid, parse_uuid_string, Value};
+pub use crate::wal::recovery::{RecoveryMode, RecoveryResult, RecoverySkipCode, RecoverySkippedTx};
+
+pub type QueryResult = Vec<Row>;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::btree::ops::BTree;
 use crate::concurrency::LockManager;
-use crate::crypto::aead::MasterKey;
 use crate::crypto::kdf;
 use crate::crypto::suite::EncryptionSuite;
-use crate::error::{MuroError, Result};
 use crate::fts::index::FtsIndex;
 use crate::fts::tokenizer::tokenize_bigram;
 use crate::schema::catalog::SystemCatalog;
 use crate::schema::index::IndexType;
-use crate::sql::executor::{deserialize_row_versioned, ExecResult, Row};
-use crate::sql::prepared::PreparedStatement;
-use crate::sql::session::{RuntimeConfig, Session};
+use crate::sql::ast::Statement;
+use crate::sql::executor::deserialize_row_versioned;
+use crate::sql::session::RuntimeConfig;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
-use crate::types::Value;
-use crate::wal::recovery::{RecoveryMode, RecoveryResult};
 use crate::wal::writer::WalWriter;
 
 const LEGACY_SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
@@ -46,11 +99,8 @@ const LEGACY_SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
 pub struct Database {
     session: Session,
     lock_manager: LockManager,
-    #[allow(dead_code)]
     master_key: Option<MasterKey>,
-    #[allow(dead_code)]
     db_path: PathBuf,
-    #[allow(dead_code)]
     encryption_suite: EncryptionSuite,
 }
 
@@ -64,6 +114,15 @@ pub struct DatabaseReader {
 pub enum DatabaseEncryption {
     Encrypted,
     Plaintext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlStatementClass {
+    ReadOnly,
+    Begin,
+    Commit,
+    Rollback,
+    Write,
 }
 
 fn wal_path(db_path: &Path) -> PathBuf {
@@ -298,6 +357,84 @@ fn initialize_fts_term_key(
 }
 
 impl Database {
+    /// Parse and classify SQL for routing between read-only and write paths.
+    pub fn classify_sql(sql: &str) -> Result<SqlStatementClass> {
+        fn classify(stmt: &Statement) -> SqlStatementClass {
+            match stmt {
+                Statement::Select(_)
+                | Statement::SetQuery(_)
+                | Statement::ShowTables
+                | Statement::ShowCreateTable(_)
+                | Statement::Describe(_)
+                | Statement::ShowCheckpointStats
+                | Statement::ShowDatabaseStats => SqlStatementClass::ReadOnly,
+                Statement::Explain(inner) => classify(inner),
+                Statement::Begin => SqlStatementClass::Begin,
+                Statement::Commit => SqlStatementClass::Commit,
+                Statement::Rollback => SqlStatementClass::Rollback,
+                Statement::Savepoint(_)
+                | Statement::RollbackToSavepoint(_)
+                | Statement::ReleaseSavepoint(_)
+                | Statement::SetRuntimeOption(_) => SqlStatementClass::Write,
+                Statement::CreateTable(_)
+                | Statement::CreateIndex(_)
+                | Statement::CreateFulltextIndex(_)
+                | Statement::AnalyzeTable(_)
+                | Statement::DropTable(_)
+                | Statement::DropIndex(_)
+                | Statement::AlterTable(_)
+                | Statement::RenameTable(_)
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_) => SqlStatementClass::Write,
+            }
+        }
+
+        let stmt = crate::sql::parser::parse_sql(sql).map_err(MuroError::Parse)?;
+        Ok(classify(&stmt))
+    }
+
+    /// Read database file encryption metadata from header.
+    pub fn read_encryption_info(path: &Path) -> Result<DbEncryptionInfo> {
+        Pager::read_encryption_info_from_file(path)
+    }
+
+    /// Detect whether a database file is encrypted.
+    pub fn read_encryption_mode(path: &Path) -> Result<DatabaseEncryption> {
+        let info = Self::read_encryption_info(path)?;
+        Ok(match info.suite {
+            EncryptionSuite::Aes256GcmSiv => DatabaseEncryption::Encrypted,
+            EncryptionSuite::Plaintext => DatabaseEncryption::Plaintext,
+        })
+    }
+
+    /// Inspect WAL consistency without opening a writable SQL session.
+    pub fn inspect_wal(
+        db_path: &Path,
+        wal_path: &Path,
+        password: Option<&str>,
+        mode: RecoveryMode,
+    ) -> Result<RecoveryResult> {
+        let info = Self::read_encryption_info(db_path)?;
+        match info.suite {
+            EncryptionSuite::Aes256GcmSiv => {
+                let password = password.ok_or_else(|| {
+                    MuroError::Encryption(
+                        "password is required for WAL inspection of encrypted database".to_string(),
+                    )
+                })?;
+                let key = kdf::derive_key(password.as_bytes(), &info.salt)?;
+                crate::wal::recovery::inspect_wal(wal_path, &key, mode)
+            }
+            EncryptionSuite::Plaintext => crate::wal::recovery::inspect_wal_with_suite(
+                wal_path,
+                EncryptionSuite::Plaintext,
+                None,
+                mode,
+            ),
+        }
+    }
+
     /// Create a new database at the given path.
     pub fn create(path: &Path, master_key: &MasterKey) -> Result<Self> {
         let mut pager = Pager::create(path, master_key)?;
@@ -805,8 +942,8 @@ impl Database {
         Ok(())
     }
 
-    /// Get the catalog root page ID (needed for reopening).
-    pub fn catalog_root(&self) -> u64 {
+    /// Get the catalog root page ID (needed for internal reopen flows).
+    pub(crate) fn catalog_root(&self) -> u64 {
         self.session.catalog().root_page_id()
     }
 

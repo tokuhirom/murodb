@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Crash Simulation Matrix: systematic testing of crash recovery at every point in
 /// the commit pipeline. Each test constructs WAL records manually to simulate
 /// a crash at a specific point, then verifies recovery produces the correct state.

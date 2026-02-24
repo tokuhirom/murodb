@@ -3,10 +3,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
-use murodb::crypto::kdf;
-use murodb::crypto::suite::EncryptionSuite;
-use murodb::storage::pager::Pager;
-use murodb::wal::recovery::{inspect_wal, RecoveryMode, RecoveryResult};
+use murodb::{Database, DatabaseEncryption, MuroError, RecoveryMode, RecoveryResult};
 
 const EXIT_OK: i32 = 0;
 const EXIT_MALFORMED_DETECTED: i32 = 10;
@@ -229,7 +226,7 @@ fn main() {
 
     let recovery_mode: RecoveryMode = cli.recovery_mode.clone().into();
 
-    let info = Pager::read_encryption_info_from_file(&cli.db_path).unwrap_or_else(|e| {
+    let mode = Database::read_encryption_mode(&cli.db_path).unwrap_or_else(|e| {
         inspect_fatal_and_exit(
             &cli.format,
             recovery_mode,
@@ -238,36 +235,24 @@ fn main() {
             &format!("Failed to read DB encryption info: {}", e),
         );
     });
-    let report = match info.suite {
-        EncryptionSuite::Aes256GcmSiv => {
-            let password = get_password(&cli.password);
-            let key = kdf::derive_key(password.as_bytes(), &info.salt).unwrap_or_else(|e| {
-                inspect_fatal_and_exit(
-                    &cli.format,
-                    recovery_mode,
-                    &cli.wal,
-                    InspectFatalKind::DeriveKey,
-                    &format!("Failed to derive key: {}", e),
-                );
-            });
-            inspect_wal(&cli.wal, &key, recovery_mode)
-        }
-        EncryptionSuite::Plaintext => murodb::wal::recovery::inspect_wal_with_suite(
-            &cli.wal,
-            EncryptionSuite::Plaintext,
-            None,
-            recovery_mode,
-        ),
-    }
-    .unwrap_or_else(|e| {
-        inspect_fatal_and_exit(
-            &cli.format,
-            recovery_mode,
-            &cli.wal,
-            InspectFatalKind::InspectFailed,
-            &format!("WAL inspection failed: {}", e),
-        );
-    });
+    let password = match mode {
+        DatabaseEncryption::Encrypted => Some(get_password(&cli.password)),
+        DatabaseEncryption::Plaintext => None,
+    };
+    let report = Database::inspect_wal(&cli.db_path, &cli.wal, password.as_deref(), recovery_mode)
+        .unwrap_or_else(|e| {
+            let kind = match &e {
+                MuroError::Kdf(_) => InspectFatalKind::DeriveKey,
+                _ => InspectFatalKind::InspectFailed,
+            };
+            inspect_fatal_and_exit(
+                &cli.format,
+                recovery_mode,
+                &cli.wal,
+                kind,
+                &format!("WAL inspection failed: {}", e),
+            );
+        });
 
     match cli.format {
         OutputFormatArg::Text => {
@@ -296,7 +281,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use murodb::wal::recovery::{RecoverySkipCode, RecoverySkippedTx};
+    use murodb::{RecoverySkipCode, RecoverySkippedTx};
 
     #[test]
     fn inspect_json_success_has_null_fatal_error() {

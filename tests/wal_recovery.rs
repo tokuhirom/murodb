@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::crypto::aead::MasterKey;
 use murodb::sql::executor::ExecResult;
 use murodb::storage::page::Page;

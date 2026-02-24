@@ -3,13 +3,9 @@ use std::process;
 
 use base64::Engine;
 use clap::{Parser, ValueEnum};
-use murodb::crypto::suite::EncryptionSuite;
-use murodb::sql::ast::Statement;
-use murodb::sql::executor::ExecResult;
-use murodb::sql::parser::parse_sql;
-use murodb::types::Value;
-use murodb::wal::recovery::RecoveryMode;
-use murodb::Database;
+use murodb::{
+    Database, DatabaseEncryption, ExecResult, MuroError, RecoveryMode, SqlStatementClass, Value,
+};
 
 #[derive(Clone, Debug, ValueEnum)]
 enum RecoveryModeArg {
@@ -198,19 +194,19 @@ fn format_value_json(val: &Value) -> String {
                 format!("\"{}\"", json_escape(&n.to_string()))
             }
         }
-        Value::Date(n) => format!("\"{}\"", json_escape(&murodb::types::format_date(*n))),
+        Value::Date(n) => format!("\"{}\"", json_escape(&murodb::format_date(*n))),
         Value::DateTime(n) => format!("\"{}\"", json_escape(&format_datetime_iso8601(*n))),
         Value::Timestamp(n) => format!("\"{}\"", json_escape(&format_datetime_iso8601(*n))),
         Value::Varchar(s) => format!("\"{}\"", json_escape(s)),
         Value::Varbinary(b) => format!("\"{}\"", base64_encode(b)),
         Value::Decimal(d) => d.to_string(),
-        Value::Uuid(b) => format!("\"{}\"", murodb::types::format_uuid(b)),
+        Value::Uuid(b) => format!("\"{}\"", murodb::format_uuid(b)),
         Value::Null => "null".to_string(),
     }
 }
 
 fn format_datetime_iso8601(packed: i64) -> String {
-    let s = murodb::types::format_datetime(packed);
+    let s = murodb::format_datetime(packed);
     let mut out = String::with_capacity(s.len() + 1);
     if let Some((date, time)) = s.split_once(' ') {
         out.push_str(date);
@@ -272,13 +268,13 @@ fn format_value(val: &Value) -> String {
     match val {
         Value::Integer(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
-        Value::Date(n) => murodb::types::format_date(*n),
-        Value::DateTime(n) => murodb::types::format_datetime(*n),
-        Value::Timestamp(n) => murodb::types::format_datetime(*n),
+        Value::Date(n) => murodb::format_date(*n),
+        Value::DateTime(n) => murodb::format_datetime(*n),
+        Value::Timestamp(n) => murodb::format_datetime(*n),
         Value::Varchar(s) => s.clone(),
         Value::Varbinary(b) => format!("0x{}", hex_encode(b)),
         Value::Decimal(d) => d.to_string(),
-        Value::Uuid(b) => murodb::types::format_uuid(b),
+        Value::Uuid(b) => murodb::format_uuid(b),
         Value::Null => "NULL".to_string(),
     }
 }
@@ -291,57 +287,10 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExecutionRoute {
-    Execute,
-    Query,
-}
-
-fn is_read_only_statement(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::Select(_)
-        | Statement::SetQuery(_)
-        | Statement::ShowTables
-        | Statement::ShowCreateTable(_)
-        | Statement::Describe(_)
-        | Statement::ShowCheckpointStats
-        | Statement::ShowDatabaseStats => true,
-        Statement::Explain(inner) => is_read_only_statement(inner),
-        Statement::CreateTable(_)
-        | Statement::CreateIndex(_)
-        | Statement::CreateFulltextIndex(_)
-        | Statement::DropTable(_)
-        | Statement::DropIndex(_)
-        | Statement::AlterTable(_)
-        | Statement::RenameTable(_)
-        | Statement::Insert(_)
-        | Statement::Update(_)
-        | Statement::Delete(_)
-        | Statement::AnalyzeTable(_)
-        | Statement::Begin
-        | Statement::Commit
-        | Statement::Rollback
-        | Statement::Savepoint(_)
-        | Statement::RollbackToSavepoint(_)
-        | Statement::ReleaseSavepoint(_)
-        | Statement::SetRuntimeOption(_) => false,
-    }
-}
-
-fn choose_execution_route(stmt: &Statement, in_explicit_tx: bool) -> ExecutionRoute {
-    if in_explicit_tx {
-        ExecutionRoute::Execute
-    } else if is_read_only_statement(stmt) {
-        ExecutionRoute::Query
-    } else {
-        ExecutionRoute::Execute
-    }
-}
-
 fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explicit_tx: &mut bool) {
-    let stmt = match parse_sql(sql) {
-        Ok(stmt) => stmt,
-        Err(e) => {
+    let class = match Database::classify_sql(sql) {
+        Ok(class) => class,
+        Err(MuroError::Parse(e)) => {
             match format {
                 OutputFormatArg::Text => eprintln!("ERROR: SQL parse error: {}", e),
                 OutputFormatArg::Json => {
@@ -350,28 +299,43 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
             }
             return;
         }
+        Err(e) => {
+            match format {
+                OutputFormatArg::Text => eprintln!("ERROR: {}", e),
+                OutputFormatArg::Json => println!("{}", format_error_json(&e.to_string())),
+            }
+            return;
+        }
     };
 
-    let route = choose_execution_route(&stmt, *in_explicit_tx);
-    let result = match route {
-        ExecutionRoute::Execute => db.execute(sql),
-        ExecutionRoute::Query => db.query(sql).map(ExecResult::Rows),
+    let result = match class {
+        SqlStatementClass::ReadOnly if !*in_explicit_tx => db.query(sql).map(ExecResult::Rows),
+        SqlStatementClass::Begin
+        | SqlStatementClass::Commit
+        | SqlStatementClass::Rollback
+        | SqlStatementClass::ReadOnly
+        | SqlStatementClass::Write => db.execute(sql),
     };
-
     match result {
         Ok(result) => match format {
             OutputFormatArg::Text => {
-                if matches!(stmt, Statement::Begin) {
+                if matches!(class, SqlStatementClass::Begin) {
                     *in_explicit_tx = true;
-                } else if matches!(stmt, Statement::Commit | Statement::Rollback) {
+                } else if matches!(
+                    class,
+                    SqlStatementClass::Commit | SqlStatementClass::Rollback
+                ) {
                     *in_explicit_tx = false;
                 }
                 println!("{}", format_rows(&result));
             }
             OutputFormatArg::Json => {
-                if matches!(stmt, Statement::Begin) {
+                if matches!(class, SqlStatementClass::Begin) {
                     *in_explicit_tx = true;
-                } else if matches!(stmt, Statement::Commit | Statement::Rollback) {
+                } else if matches!(
+                    class,
+                    SqlStatementClass::Commit | SqlStatementClass::Rollback
+                ) {
                     *in_explicit_tx = false;
                 }
                 println!("{}", format_rows_json(&result));
@@ -392,7 +356,6 @@ fn run_repl(db: &mut Database, format: &OutputFormatArg) {
 
     let mut buffer = String::new();
     let mut in_explicit_tx = false;
-
     loop {
         let prompt = if buffer.is_empty() {
             "murodb> "
@@ -480,19 +443,21 @@ fn main() {
             eprintln!("Use --create to create a new database");
             process::exit(1);
         }
-        let info = murodb::storage::pager::Pager::read_encryption_info_from_file(db_path)
-            .unwrap_or_else(|e| {
-                eprintln!("ERROR: Failed to read database header: {}", e);
-                process::exit(1);
-            });
-        let requested_suite = match cli.encryption {
-            EncryptionModeArg::Aes256GcmSiv => EncryptionSuite::Aes256GcmSiv,
-            EncryptionModeArg::Off => EncryptionSuite::Plaintext,
+        let detected_mode = Database::read_encryption_mode(db_path).unwrap_or_else(|e| {
+            eprintln!("ERROR: Failed to read database header: {}", e);
+            process::exit(1);
+        });
+        let requested_mode = match cli.encryption {
+            EncryptionModeArg::Aes256GcmSiv => DatabaseEncryption::Encrypted,
+            EncryptionModeArg::Off => DatabaseEncryption::Plaintext,
         };
-        if requested_suite != info.suite {
+        if requested_mode != detected_mode {
             eprintln!(
                 "ERROR: Encryption mode mismatch. DB is {}, but --encryption={} was requested.",
-                info.suite.as_str(),
+                match detected_mode {
+                    DatabaseEncryption::Encrypted => "aes256-gcm-siv",
+                    DatabaseEncryption::Plaintext => "off",
+                },
                 match cli.encryption {
                     EncryptionModeArg::Aes256GcmSiv => "aes256-gcm-siv",
                     EncryptionModeArg::Off => "off",
@@ -500,8 +465,8 @@ fn main() {
             );
             process::exit(1);
         }
-        let (db, report) = match info.suite {
-            EncryptionSuite::Aes256GcmSiv => {
+        let (db, report) = match detected_mode {
+            DatabaseEncryption::Encrypted => {
                 let password = get_password(&cli.password);
                 Database::open_with_password_and_recovery_mode_and_report(
                     db_path,
@@ -509,7 +474,7 @@ fn main() {
                     recovery_mode,
                 )
             }
-            EncryptionSuite::Plaintext => {
+            DatabaseEncryption::Plaintext => {
                 Database::open_plaintext_with_recovery_mode_and_report(db_path, recovery_mode)
             }
         }
@@ -551,7 +516,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use murodb::sql::executor::Row;
+    use murodb::Row;
 
     #[test]
     fn format_rows_json_empty() {
@@ -606,23 +571,11 @@ mod tests {
     }
 
     #[test]
-    fn choose_route_select_outside_tx_uses_query() {
-        let stmt = parse_sql("SELECT * FROM t").unwrap();
-        assert_eq!(choose_execution_route(&stmt, false), ExecutionRoute::Query);
-    }
-
-    #[test]
-    fn choose_route_select_inside_tx_uses_execute() {
-        let stmt = parse_sql("SELECT * FROM t").unwrap();
-        assert_eq!(choose_execution_route(&stmt, true), ExecutionRoute::Execute);
-    }
-
-    #[test]
-    fn choose_route_insert_uses_execute() {
-        let stmt = parse_sql("INSERT INTO t VALUES (1)").unwrap();
+    fn format_value_plaintext_date_and_datetime() {
+        assert_eq!(format_value(&Value::Date(20240203)), "2024-02-03");
         assert_eq!(
-            choose_execution_route(&stmt, false),
-            ExecutionRoute::Execute
+            format_value(&Value::DateTime(20240203112233)),
+            "2024-02-03 11:22:33"
         );
     }
 }

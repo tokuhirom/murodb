@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Crash/kill durability stress test.
 ///
 /// Spawns worker processes that perform randomized write workloads, kills them

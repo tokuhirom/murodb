@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, ValueEnum};
-use murodb::wal::recovery::RecoveryMode;
-use murodb::Database;
+use murodb::{Database, RecoveryMode};
 
 #[derive(Clone, Debug, ValueEnum)]
 enum RecoveryModeArg {

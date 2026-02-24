@@ -321,7 +321,10 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
             OutputFormatArg::Text => {
                 if matches!(class, SqlStatementClass::Begin) {
                     *in_explicit_tx = true;
-                } else if matches!(class, SqlStatementClass::Commit | SqlStatementClass::Rollback) {
+                } else if matches!(
+                    class,
+                    SqlStatementClass::Commit | SqlStatementClass::Rollback
+                ) {
                     *in_explicit_tx = false;
                 }
                 println!("{}", format_rows(&result));
@@ -329,7 +332,10 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
             OutputFormatArg::Json => {
                 if matches!(class, SqlStatementClass::Begin) {
                     *in_explicit_tx = true;
-                } else if matches!(class, SqlStatementClass::Commit | SqlStatementClass::Rollback) {
+                } else if matches!(
+                    class,
+                    SqlStatementClass::Commit | SqlStatementClass::Rollback
+                ) {
                     *in_explicit_tx = false;
                 }
                 println!("{}", format_rows_json(&result));

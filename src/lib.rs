@@ -44,6 +44,7 @@ use crate::fts::index::FtsIndex;
 use crate::fts::tokenizer::tokenize_bigram;
 use crate::schema::catalog::SystemCatalog;
 use crate::schema::index::IndexType;
+use crate::sql::ast::Statement;
 use crate::sql::executor::deserialize_row_versioned;
 use crate::sql::session::RuntimeConfig;
 use crate::storage::pager::{read_rekey_marker, rekey_marker_path, unwrap_rekey_old_key, Pager};
@@ -70,6 +71,15 @@ pub struct DatabaseReader {
 pub enum DatabaseEncryption {
     Encrypted,
     Plaintext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlStatementClass {
+    ReadOnly,
+    Begin,
+    Commit,
+    Rollback,
+    Write,
 }
 
 fn wal_path(db_path: &Path) -> PathBuf {
@@ -304,6 +314,43 @@ fn initialize_fts_term_key(
 }
 
 impl Database {
+    /// Parse and classify SQL for routing between read-only and write paths.
+    pub fn classify_sql(sql: &str) -> Result<SqlStatementClass> {
+        fn classify(stmt: &Statement) -> SqlStatementClass {
+            match stmt {
+                Statement::Select(_)
+                | Statement::SetQuery(_)
+                | Statement::ShowTables
+                | Statement::ShowCreateTable(_)
+                | Statement::Describe(_)
+                | Statement::ShowCheckpointStats
+                | Statement::ShowDatabaseStats => SqlStatementClass::ReadOnly,
+                Statement::Explain(inner) => classify(inner),
+                Statement::Begin => SqlStatementClass::Begin,
+                Statement::Commit => SqlStatementClass::Commit,
+                Statement::Rollback => SqlStatementClass::Rollback,
+                Statement::Savepoint(_)
+                | Statement::RollbackToSavepoint(_)
+                | Statement::ReleaseSavepoint(_)
+                | Statement::SetRuntimeOption(_) => SqlStatementClass::Write,
+                Statement::CreateTable(_)
+                | Statement::CreateIndex(_)
+                | Statement::CreateFulltextIndex(_)
+                | Statement::AnalyzeTable(_)
+                | Statement::DropTable(_)
+                | Statement::DropIndex(_)
+                | Statement::AlterTable(_)
+                | Statement::RenameTable(_)
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_) => SqlStatementClass::Write,
+            }
+        }
+
+        let stmt = crate::sql::parser::parse_sql(sql).map_err(MuroError::Parse)?;
+        Ok(classify(&stmt))
+    }
+
     /// Read database file encryption metadata from header.
     pub fn read_encryption_info(path: &Path) -> Result<DbEncryptionInfo> {
         Pager::read_encryption_info_from_file(path)

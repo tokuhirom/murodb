@@ -21,3 +21,5 @@ jobs:
       - run: cargo test --features test-utils
       - run: cargo clippy -- -D warnings
       - run: cargo fmt -- --check
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

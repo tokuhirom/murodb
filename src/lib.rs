@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! MuroDB: Embedded SQL Database with B+Tree (no leaf links) + FTS (Bigram)
 //!
 //! A single-file database with:

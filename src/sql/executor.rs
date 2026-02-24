@@ -43,7 +43,7 @@ mod select_query;
 mod show;
 mod subquery;
 
-pub use codec::{deserialize_row, deserialize_row_versioned, encode_value, serialize_row};
+pub use codec::{deserialize_row_versioned, encode_value, serialize_row};
 
 use aggregation::{cmp_values, execute_aggregation, execute_aggregation_join, has_aggregates};
 use alter::*;

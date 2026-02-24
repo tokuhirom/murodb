@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use murodb::fts::snippet::fts_snippet;
+use murodb::fts_snippet;
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Copy)]

@@ -17,8 +17,6 @@ pub struct LockManager {
     rw_lock: RwLock<()>,
     /// File used for process-level locking.
     lock_file: File,
-    #[allow(dead_code)]
-    lock_path: PathBuf,
 }
 
 impl LockManager {
@@ -36,7 +34,6 @@ impl LockManager {
         Ok(LockManager {
             rw_lock: RwLock::new(()),
             lock_file,
-            lock_path,
         })
     }
 

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Integration tests for Phase 4: ALTER TABLE & RENAME TABLE.
 use murodb::btree::ops::BTree;
 use murodb::crypto::aead::MasterKey;

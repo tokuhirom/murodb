@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::crypto::aead::{MasterKey, PageCrypto};
 use murodb::crypto::kdf;
 use murodb::crypto::suite::EncryptionSuite;

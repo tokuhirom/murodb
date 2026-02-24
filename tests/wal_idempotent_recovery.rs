@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Integration tests for idempotent WAL recovery.
 ///
 /// Recovery must be idempotent: running `recover()` multiple times on the same

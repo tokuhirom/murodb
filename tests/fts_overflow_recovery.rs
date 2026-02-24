@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::crypto::aead::MasterKey;
 #[cfg(feature = "test-utils")]
 use murodb::error::MuroError;

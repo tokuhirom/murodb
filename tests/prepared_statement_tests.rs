@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::sql::executor::ExecResult;
 use murodb::types::parse_uuid_string;
 use murodb::types::Value;

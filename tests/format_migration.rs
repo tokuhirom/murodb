@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Tests for database format validation policy (v4/v5 compatible).
 use murodb::crypto::aead::MasterKey;
 use murodb::crypto::suite::EncryptionSuite;

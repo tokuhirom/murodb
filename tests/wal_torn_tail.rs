@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Integration tests for WAL torn tail recovery.
 ///
 /// These tests simulate various kinds of WAL tail corruption that can occur

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 /// Integration tests for Phase 2: Built-in scalar functions.
 use murodb::crypto::aead::MasterKey;
 use murodb::schema::catalog::SystemCatalog;

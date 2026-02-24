@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::concurrency::LockManager;
 use std::fs::File;
 use std::sync::Arc;

@@ -1,3 +1,4 @@
+#![cfg(feature = "test-utils")]
 use murodb::btree::key_encoding::{decode_i64, encode_i64};
 use murodb::btree::ops::BTree;
 use murodb::crypto::aead::MasterKey;

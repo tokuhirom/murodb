@@ -47,3 +47,4 @@ tempfile = "3"
 name = "crash_stress"
 path = "tests/crash_stress.rs"
 harness = false
+required-features = ["test-utils"]

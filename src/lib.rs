@@ -833,6 +833,22 @@ impl Database {
         self.session.pager_mut().backup_to_file(dest.as_ref())
     }
 
+    /// Override the checkpoint policy at runtime.
+    ///
+    /// Primarily intended for integration tests that need deterministic
+    /// checkpoint timing without relying on process-global environment
+    /// variables.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_checkpoint_policy(
+        &mut self,
+        tx_threshold: u64,
+        wal_bytes_threshold: u64,
+        interval_ms: u64,
+    ) {
+        self.session
+            .set_checkpoint_policy(tx_threshold, wal_bytes_threshold, interval_ms);
+    }
+
     /// Create a `Session` that supports BEGIN/COMMIT/ROLLBACK.
     ///
     /// This consumes the Database and returns a Session. The Session owns the

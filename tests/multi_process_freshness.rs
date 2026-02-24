@@ -1,29 +1,29 @@
+#![cfg(feature = "test-utils")]
+
 use murodb::types::Value;
 use murodb::Database;
 use tempfile::TempDir;
 
-/// Multi-process freshness tests rely on checkpoint flushing data to the DB
-/// file after every commit so that other handles can see the changes. Force
-/// checkpoint-every-commit by setting the env-based policy.
-fn force_checkpoint_every_commit() {
-    std::env::set_var("MURODB_CHECKPOINT_TX_THRESHOLD", "1");
-    std::env::set_var("MURODB_CHECKPOINT_WAL_BYTES_THRESHOLD", "0");
-    std::env::set_var("MURODB_CHECKPOINT_INTERVAL_MS", "0");
+/// Force checkpoint-every-commit so that data is flushed to the DB file
+/// and visible to other handles.
+fn force_checkpoint_every_commit(db: &mut Database) {
+    db.set_checkpoint_policy(1, 0, 0);
 }
 
 #[test]
 fn test_query_refreshes_after_other_handle_commit() {
-    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("freshness.db");
     let password = "pw";
 
     let mut db1 = Database::create_with_password(&db_path, password).unwrap();
+    force_checkpoint_every_commit(&mut db1);
     db1.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     db1.execute("INSERT INTO t VALUES (1, 'one')").unwrap();
 
     let mut db2 = Database::open_with_password(&db_path, password).unwrap();
+    force_checkpoint_every_commit(&mut db2);
 
     // Warm db1 page cache with the pre-change view.
     let before = db1
@@ -44,17 +44,18 @@ fn test_query_refreshes_after_other_handle_commit() {
 
 #[test]
 fn test_execute_refresh_prevents_stale_page_overwrite() {
-    force_checkpoint_every_commit();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("freshness_write.db");
     let password = "pw";
 
     let mut db1 = Database::create_with_password(&db_path, password).unwrap();
+    force_checkpoint_every_commit(&mut db1);
     db1.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
         .unwrap();
     db1.execute("INSERT INTO t VALUES (1, 'one')").unwrap();
 
     let mut db2 = Database::open_with_password(&db_path, password).unwrap();
+    force_checkpoint_every_commit(&mut db2);
     db2.execute("INSERT INTO t VALUES (2, 'two')").unwrap();
 
     // db1 has stale cached pages from its first insert; the next write must refresh first.

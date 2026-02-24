@@ -425,9 +425,24 @@ impl Session {
         wal_threshold: u64,
         interval_ms: u64,
     ) {
+        self.set_checkpoint_policy(tx_threshold, wal_threshold, interval_ms);
+    }
+
+    /// Override the checkpoint policy at runtime.
+    ///
+    /// Primarily intended for integration tests that need deterministic
+    /// checkpoint timing without relying on process-global environment
+    /// variables.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_checkpoint_policy(
+        &mut self,
+        tx_threshold: u64,
+        wal_bytes_threshold: u64,
+        interval_ms: u64,
+    ) {
         self.checkpoint_policy = CheckpointPolicy {
             tx_threshold,
-            wal_bytes_threshold: wal_threshold,
+            wal_bytes_threshold,
             interval_ms,
         };
     }

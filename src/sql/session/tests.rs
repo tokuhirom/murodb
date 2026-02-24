@@ -553,7 +553,7 @@ fn test_set_runtime_option_rejected_inside_transaction() {
 }
 
 #[test]
-fn test_default_policy_defers_checkpoints() {
+fn test_default_policy_checkpoints_every_commit() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -575,17 +575,12 @@ fn test_default_policy_defers_checkpoints() {
     }
 
     let stats = session.database_stats();
-    // With DEFAULT_CHECKPOINT_TX_THRESHOLD=8, 6 ops (1 CREATE + 5 INSERT)
-    // should not yet trigger a tx-count checkpoint.
+    // With DEFAULT_CHECKPOINT_TX_THRESHOLD=1, every commit checkpoints.
     assert_eq!(
-        stats.total_checkpoints, 0,
-        "default policy should defer checkpoints for fewer than 8 ops"
+        stats.total_checkpoints, 6,
+        "default policy should checkpoint every commit (1 CREATE + 5 INSERT)"
     );
-    assert!(
-        stats.deferred_checkpoints >= 6,
-        "expected at least 6 deferred checkpoints, got {}",
-        stats.deferred_checkpoints
-    );
+    assert_eq!(stats.deferred_checkpoints, 0);
 }
 
 mod tail;

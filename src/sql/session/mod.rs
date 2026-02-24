@@ -15,7 +15,7 @@ use crate::wal::writer::WalWriter;
 use checkpoint::CheckpointPolicy;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
-const DEFAULT_CHECKPOINT_TX_THRESHOLD: u64 = 8;
+const DEFAULT_CHECKPOINT_TX_THRESHOLD: u64 = 1;
 const DEFAULT_CHECKPOINT_WAL_BYTES_THRESHOLD: u64 = 1_048_576; // 1 MiB
 const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 1000; // 1 second
 mod checkpoint;

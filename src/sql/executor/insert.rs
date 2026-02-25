@@ -19,7 +19,6 @@ pub(super) fn exec_insert(
     let mut rows_inserted = 0u64;
 
     for value_row in &ins.values {
-        cancellation_point()?;
         let mut values = resolve_insert_values(&table_def, &ins.columns, value_row)?;
 
         // Apply DEFAULT values for NULL columns that have defaults
@@ -303,7 +302,6 @@ fn collect_replace_conflicts(
     }
     let mut conflicts = Vec::new();
     for pk in conflict_keys {
-        cancellation_point()?;
         if let Some(existing_data) = data_btree.search(pager, &pk)? {
             let existing_values = deserialize_row_versioned(
                 &existing_data,

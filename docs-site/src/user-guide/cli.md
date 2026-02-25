@@ -52,6 +52,13 @@ The CLI parses each statement and routes execution automatically:
 - Write and transaction-control statements (`INSERT`, `UPDATE`, `DELETE`, DDL, `BEGIN`/`COMMIT`/`ROLLBACK`) use the write path.
 - While an explicit transaction is active (`BEGIN` ... `COMMIT`/`ROLLBACK`), all statements (including `SELECT`) run with execute semantics.
 
+## Ctrl-C behavior
+
+- In REPL input mode (while typing a statement), `Ctrl-C` clears the current input buffer.
+- While a statement is executing, `Ctrl-C` requests cancellation of the in-flight statement.
+- If cancellation succeeds, the statement returns an error and the REPL stays alive.
+- In one-shot mode (`-e`), `Ctrl-C` also requests cancellation; the command then exits after printing the statement error.
+
 ## JSON output
 
 When using `--format json`, results are emitted as a single JSON object per statement.

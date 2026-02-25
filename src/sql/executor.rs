@@ -93,6 +93,11 @@ pub enum ExecResult {
     RowsAffected(u64),
     Ok,
 }
+
+pub(super) fn cancellation_point() -> Result<()> {
+    crate::sql::session::cancellation_point_current()
+}
+
 pub fn execute(
     sql: &str,
     pager: &mut impl PageStore,

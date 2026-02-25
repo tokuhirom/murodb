@@ -10,6 +10,7 @@ pub(super) fn scan_table_qualified(
     let data_btree = BTree::open(table_def.data_btree_root);
     let mut result = Vec::new();
     data_btree.scan(pager, |_k, v| {
+        cancellation_point()?;
         let values =
             deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
         let mut row: Vec<(String, Value)> = Vec::with_capacity(table_def.columns.len());
@@ -106,6 +107,7 @@ pub(super) fn exec_select_join(
 
     // 2. For each JOIN, perform nested loop join
     for join in &sel.joins {
+        cancellation_point()?;
         let right_table_def = catalog
             .get_table(pager, &join.table_name)?
             .ok_or_else(|| MuroError::Schema(format!("Table '{}' not found", join.table_name)))?;
@@ -138,7 +140,9 @@ pub(super) fn exec_select_join(
                     == JoinLoopOrder::RightOuter
                 {
                     for right in &right_rows {
+                        cancellation_point()?;
                         for left in &joined_rows {
+                            cancellation_point()?;
                             let mut combined: Vec<(String, Value)> =
                                 Vec::with_capacity(left.len() + right.len());
                             // Keep logical row shape stable: left columns first, then right.
@@ -157,7 +161,9 @@ pub(super) fn exec_select_join(
                     }
                 } else {
                     for left in &joined_rows {
+                        cancellation_point()?;
                         for right in &right_rows {
+                            cancellation_point()?;
                             let mut combined: Vec<(String, Value)> =
                                 Vec::with_capacity(left.len() + right.len());
                             combined.extend(left.iter().cloned());
@@ -177,8 +183,10 @@ pub(super) fn exec_select_join(
             }
             JoinType::Left => {
                 for left in &joined_rows {
+                    cancellation_point()?;
                     let mut matched = false;
                     for right in &right_rows {
+                        cancellation_point()?;
                         let mut combined: Vec<(String, Value)> =
                             Vec::with_capacity(left.len() + right.len());
                         combined.extend(left.iter().cloned());
@@ -210,8 +218,10 @@ pub(super) fn exec_select_join(
                     .collect();
 
                 for right in &right_rows {
+                    cancellation_point()?;
                     let mut matched = false;
                     for left in &joined_rows {
+                        cancellation_point()?;
                         let mut combined: Vec<(String, Value)> =
                             Vec::with_capacity(left.len() + right.len());
                         combined.extend(left.iter().cloned());
@@ -240,7 +250,9 @@ pub(super) fn exec_select_join(
                     == JoinLoopOrder::RightOuter
                 {
                     for right in &right_rows {
+                        cancellation_point()?;
                         for left in &joined_rows {
+                            cancellation_point()?;
                             let mut combined: Vec<(String, Value)> =
                                 Vec::with_capacity(left.len() + right.len());
                             combined.extend(left.iter().cloned());
@@ -250,7 +262,9 @@ pub(super) fn exec_select_join(
                     }
                 } else {
                     for left in &joined_rows {
+                        cancellation_point()?;
                         for right in &right_rows {
+                            cancellation_point()?;
                             let mut combined: Vec<(String, Value)> =
                                 Vec::with_capacity(left.len() + right.len());
                             combined.extend(left.iter().cloned());
@@ -350,6 +364,7 @@ pub(super) fn exec_select_join(
         // 7. Project SELECT columns
         let mut rows: Vec<Row> = Vec::new();
         for jrow in &joined_rows {
+            cancellation_point()?;
             let row = build_join_row(jrow, &sel.columns, &hidden_columns)?;
             rows.push(row);
         }

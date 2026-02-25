@@ -70,6 +70,7 @@ pub(super) fn exec_update(
                 .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
             let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
             for pk_key in pk_keys {
+                cancellation_point()?;
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
                         &data,
@@ -123,6 +124,7 @@ pub(super) fn exec_update(
                 .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
             let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
             for pk_key in pk_keys {
+                cancellation_point()?;
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
                         &data,
@@ -141,6 +143,7 @@ pub(super) fn exec_update(
         | Plan::FullScan { .. }
         | Plan::FtsScan { .. } => {
             data_btree.scan(pager, |k, v| {
+                cancellation_point()?;
                 let values =
                     deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
                 if matches_where(&upd.where_clause, &table_def, &values)? {
@@ -276,6 +279,7 @@ pub(super) fn exec_delete(
                 .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
             let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
             for pk_key in pk_keys {
+                cancellation_point()?;
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
                         &data,
@@ -329,6 +333,7 @@ pub(super) fn exec_delete(
                 .ok_or_else(|| MuroError::Execution(format!("Index '{}' not found", index_name)))?;
             let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
             for pk_key in pk_keys {
+                cancellation_point()?;
                 if let Some(data) = data_btree.search(pager, &pk_key)? {
                     let values = deserialize_row_versioned(
                         &data,
@@ -347,6 +352,7 @@ pub(super) fn exec_delete(
         | Plan::FullScan { .. }
         | Plan::FtsScan { .. } => {
             data_btree.scan(pager, |k, v| {
+                cancellation_point()?;
                 let values =
                     deserialize_row_versioned(v, &table_def.columns, table_def.row_format_version)?;
                 if matches_where(&del.where_clause, &table_def, &values)? {

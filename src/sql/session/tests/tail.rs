@@ -183,6 +183,90 @@ fn test_rekey_wal_recreate_failure_poison_session() {
 }
 
 #[test]
+fn test_cancel_handle_returns_false_when_no_statement_is_running() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let session = Session::new(pager, catalog, wal);
+
+    let handle = session.cancel_handle();
+    assert!(!handle.cancel());
+}
+
+#[test]
+fn test_cancel_handle_marks_in_flight_statement() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let session = Session::new(pager, catalog, wal);
+
+    let handle = session.cancel_handle();
+    let statement_guard = session.enter_statement();
+    assert!(handle.cancel());
+    assert!(matches!(
+        session.cancellation_point(),
+        Err(MuroError::Cancelled)
+    ));
+    drop(statement_guard);
+    assert!(session.cancellation_point().is_ok());
+}
+
+#[test]
+fn test_inflight_cancel_interrupts_long_running_query() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    for i in 0..1000 {
+        session
+            .execute(&format!("INSERT INTO t VALUES ({})", i))
+            .unwrap();
+    }
+
+    let handle = session.cancel_handle();
+    let canceller = std::thread::spawn(move || {
+        for _ in 0..200_000 {
+            if handle.cancel() {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        false
+    });
+
+    let result = session.execute_read_only_query("SELECT a.id FROM t a CROSS JOIN t b");
+    let cancel_observed = canceller.join().unwrap();
+
+    assert!(
+        cancel_observed,
+        "canceller did not observe in-flight statement"
+    );
+    assert!(matches!(result, Err(MuroError::Cancelled)));
+}
+
+#[test]
 fn test_read_only_query_select_does_not_create_wal_records() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
@@ -398,4 +482,53 @@ fn test_rollback_to_savepoint_restores_pager_allocation_state() {
         _ => panic!("Expected rows"),
     };
     assert!(rows.is_empty());
+}
+
+#[test]
+fn test_cancelled_update_in_explicit_tx_does_not_apply_partial_changes() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+
+    session
+        .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .unwrap();
+    session
+        .execute("CREATE UNIQUE INDEX idx_name ON t(name)")
+        .unwrap();
+    session.execute("INSERT INTO t VALUES (1, 'a')").unwrap();
+    session.execute("INSERT INTO t VALUES (2, 'b')").unwrap();
+
+    session.execute("BEGIN").unwrap();
+    let handle = session.cancel_handle();
+    let statement_guard = session.enter_statement();
+    assert!(handle.cancel());
+    let stmt = parse_sql("UPDATE t SET name = 'x'").unwrap();
+    let err = session
+        .execute_in_tx(&stmt)
+        .expect_err("update should be cancelled");
+    drop(statement_guard);
+    assert!(matches!(err, MuroError::Cancelled));
+
+    let rows = match session
+        .execute("SELECT id, name FROM t WHERE name = 'x'")
+        .unwrap()
+    {
+        ExecResult::Rows(rows) => rows,
+        _ => panic!("Expected rows"),
+    };
+    assert_eq!(
+        rows.len(),
+        0,
+        "cancelled statement must not leave partial updates"
+    );
+
+    session.execute("ROLLBACK").unwrap();
 }

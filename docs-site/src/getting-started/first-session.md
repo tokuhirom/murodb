@@ -58,6 +58,10 @@ murodb demo.db
 
 Start without `-e` to enter REPL mode.
 
+Tip:
+- Press `Ctrl-C` while typing to clear the current buffer.
+- Press `Ctrl-C` during statement execution to cancel the running statement and keep the REPL open.
+
 ## Next
 
 - [Quick Start](quick-start.md) for concise command examples.

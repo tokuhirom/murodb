@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::process;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use clap::{Parser, ValueEnum};
 use murodb::{
-    Database, DatabaseEncryption, ExecResult, MuroError, RecoveryMode, SqlStatementClass, Value,
+    Database, DatabaseEncryption, ExecResult, MuroError, QueryCancelHandle, RecoveryMode,
+    SqlStatementClass, Value,
 };
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -287,7 +289,47 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explicit_tx: &mut bool) {
+#[derive(Clone, Default)]
+struct InterruptController {
+    active_handle: Arc<Mutex<Option<QueryCancelHandle>>>,
+}
+
+impl InterruptController {
+    fn install_sigint_handler(&self) {
+        let active_handle = Arc::clone(&self.active_handle);
+        if let Err(e) = ctrlc::set_handler(move || {
+            let handle = match active_handle.lock() {
+                Ok(guard) => guard.as_ref().cloned(),
+                Err(_) => None,
+            };
+            if let Some(handle) = handle {
+                let _ = handle.cancel();
+            }
+        }) {
+            eprintln!("WARNING: failed to install Ctrl-C handler: {}", e);
+        }
+    }
+
+    fn begin_statement(&self, handle: QueryCancelHandle) {
+        if let Ok(mut slot) = self.active_handle.lock() {
+            *slot = Some(handle);
+        }
+    }
+
+    fn end_statement(&self) {
+        if let Ok(mut slot) = self.active_handle.lock() {
+            *slot = None;
+        }
+    }
+}
+
+fn execute_sql(
+    db: &mut Database,
+    sql: &str,
+    format: &OutputFormatArg,
+    in_explicit_tx: &mut bool,
+    interrupts: &InterruptController,
+) {
     let class = match Database::classify_sql(sql) {
         Ok(class) => class,
         Err(MuroError::Parse(e)) => {
@@ -308,6 +350,7 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
         }
     };
 
+    interrupts.begin_statement(db.cancel_handle());
     let result = match class {
         SqlStatementClass::ReadOnly if !*in_explicit_tx => db.query(sql).map(ExecResult::Rows),
         SqlStatementClass::Begin
@@ -316,6 +359,8 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
         | SqlStatementClass::ReadOnly
         | SqlStatementClass::Write => db.execute(sql),
     };
+    interrupts.end_statement();
+
     match result {
         Ok(result) => match format {
             OutputFormatArg::Text => {
@@ -348,7 +393,7 @@ fn execute_sql(db: &mut Database, sql: &str, format: &OutputFormatArg, in_explic
     }
 }
 
-fn run_repl(db: &mut Database, format: &OutputFormatArg) {
+fn run_repl(db: &mut Database, format: &OutputFormatArg, interrupts: &InterruptController) {
     let mut rl = rustyline::DefaultEditor::new().unwrap_or_else(|e| {
         eprintln!("ERROR: Failed to initialize REPL: {}", e);
         process::exit(1);
@@ -381,7 +426,7 @@ fn run_repl(db: &mut Database, format: &OutputFormatArg) {
                 if buffer.trim_end().ends_with(';') {
                     let sql = buffer.trim().to_string();
                     let _ = rl.add_history_entry(&sql);
-                    execute_sql(db, &sql, format, &mut in_explicit_tx);
+                    execute_sql(db, &sql, format, &mut in_explicit_tx, interrupts);
                     buffer.clear();
                 }
             }
@@ -501,15 +546,18 @@ fn main() {
         db
     };
 
+    let interrupts = InterruptController::default();
+    interrupts.install_sigint_handler();
+
     if let Some(sql) = &cli.execute {
         let mut in_explicit_tx = false;
-        execute_sql(&mut db, sql, &cli.format, &mut in_explicit_tx);
+        execute_sql(&mut db, sql, &cli.format, &mut in_explicit_tx, &interrupts);
         if let Err(e) = db.flush() {
             eprintln!("ERROR: Failed to flush database: {}", e);
             process::exit(1);
         }
     } else {
-        run_repl(&mut db, &cli.format);
+        run_repl(&mut db, &cli.format, &interrupts);
     }
 }
 

@@ -38,6 +38,9 @@ pub enum MuroError {
     #[error("Query cancelled")]
     Cancelled,
 
+    #[error("Statement timeout after {timeout_ms}ms")]
+    StatementTimeout { timeout_ms: u64 },
+
     #[error("Unique constraint violation: {0}")]
     UniqueViolation(String),
 

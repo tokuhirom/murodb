@@ -85,6 +85,12 @@ struct Cli {
     /// `text` is human-readable; `json` is intended for tool integration.
     #[arg(long, value_enum, default_value = "text")]
     format: OutputFormatArg,
+
+    /// Lock wait timeout in milliseconds.
+    ///
+    /// `0` means wait indefinitely.
+    #[arg(long, default_value_t = 0)]
+    busy_timeout_ms: u64,
 }
 
 fn get_password(cli_password: &Option<String>) -> String {
@@ -545,6 +551,8 @@ fn main() {
         }
         db
     };
+
+    db.set_busy_timeout_ms(cli.busy_timeout_ms);
 
     let interrupts = InterruptController::default();
     interrupts.install_sigint_handler();

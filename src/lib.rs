@@ -77,7 +77,7 @@ pub use crate::wal::recovery::{RecoveryMode, RecoveryResult, RecoverySkipCode, R
 pub type QueryResult = Vec<Row>;
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::btree::ops::BTree;
 use crate::concurrency::LockManager;
@@ -99,6 +99,7 @@ const LEGACY_SQL_FTS_TERM_KEY: [u8; 32] = [0x55u8; 32];
 pub struct Database {
     session: Session,
     lock_manager: LockManager,
+    busy_timeout_ms: u64,
     master_key: Option<MasterKey>,
     db_path: PathBuf,
     encryption_suite: EncryptionSuite,
@@ -108,6 +109,7 @@ pub struct Database {
 pub struct DatabaseReader {
     session: Session,
     lock_manager: LockManager,
+    busy_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +456,7 @@ impl Database {
         Ok(Database {
             session,
             lock_manager,
+            busy_timeout_ms: 0,
             master_key: Some(master_key.clone()),
             db_path: path.to_path_buf(),
             encryption_suite: EncryptionSuite::Aes256GcmSiv,
@@ -477,6 +480,7 @@ impl Database {
         Ok(Database {
             session,
             lock_manager,
+            busy_timeout_ms: 0,
             master_key: None,
             db_path: path.to_path_buf(),
             encryption_suite: EncryptionSuite::Plaintext,
@@ -559,6 +563,7 @@ impl Database {
             Database {
                 session,
                 lock_manager,
+                busy_timeout_ms: 0,
                 master_key: Some(master_key.clone()),
                 db_path: path.to_path_buf(),
                 encryption_suite: EncryptionSuite::Aes256GcmSiv,
@@ -614,6 +619,7 @@ impl Database {
             Database {
                 session,
                 lock_manager,
+                busy_timeout_ms: 0,
                 master_key: None,
                 db_path: path.to_path_buf(),
                 encryption_suite: EncryptionSuite::Plaintext,
@@ -643,6 +649,7 @@ impl Database {
         Ok(Database {
             session,
             lock_manager,
+            busy_timeout_ms: 0,
             master_key: Some(master_key),
             db_path: path.to_path_buf(),
             encryption_suite: EncryptionSuite::Aes256GcmSiv,
@@ -797,7 +804,13 @@ impl Database {
 
     /// Execute a SQL statement. Returns the result.
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.execute(sql)
     }
 
@@ -808,14 +821,40 @@ impl Database {
 
     /// Get current session runtime configuration.
     pub fn runtime_config(&self) -> Result<RuntimeConfig> {
-        let _guard = self.lock_manager.read_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.read_lock()?
+        } else {
+            self.lock_manager
+                .read_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         Ok(self.session.runtime_config())
     }
 
     /// Update session runtime configuration.
     pub fn set_runtime_config(&mut self, config: RuntimeConfig) -> Result<()> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.set_runtime_config(config)
+    }
+
+    /// Configure lock wait timeout in milliseconds.
+    ///
+    /// `0` means wait indefinitely (default).
+    pub fn set_busy_timeout_ms(&mut self, timeout_ms: u64) {
+        self.busy_timeout_ms = timeout_ms;
+    }
+
+    /// Current lock wait timeout in milliseconds.
+    ///
+    /// `0` means wait indefinitely.
+    pub fn busy_timeout_ms(&self) -> u64 {
+        self.busy_timeout_ms
     }
 
     /// Parse SQL into a reusable prepared statement template.
@@ -829,7 +868,13 @@ impl Database {
         prepared: &PreparedStatement,
         params: &[Value],
     ) -> Result<ExecResult> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.execute_prepared(prepared, params)
     }
 
@@ -847,7 +892,13 @@ impl Database {
     /// pager/catalog state from disk before executing the read.
     /// Non-read-only SQL returns an execution error.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.read_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.read_lock()?
+        } else {
+            self.lock_manager
+                .read_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.execute_read_only_query(sql)
     }
 
@@ -857,7 +908,13 @@ impl Database {
         prepared: &PreparedStatement,
         params: &[Value],
     ) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.read_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.read_lock()?
+        } else {
+            self.lock_manager
+                .read_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session
             .execute_read_only_prepared_query(prepared, params)
     }
@@ -900,6 +957,7 @@ impl Database {
                 Ok(DatabaseReader {
                     session,
                     lock_manager,
+                    busy_timeout_ms: self.busy_timeout_ms,
                 })
             }
             EncryptionSuite::Aes256GcmSiv => {
@@ -927,6 +985,7 @@ impl Database {
                 Ok(DatabaseReader {
                     session,
                     lock_manager,
+                    busy_timeout_ms: self.busy_timeout_ms,
                 })
             }
         }
@@ -934,7 +993,13 @@ impl Database {
 
     /// Re-encrypt the database with a new password-derived key.
     pub fn rekey_with_password(&mut self, new_password: &str) -> Result<()> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.rekey_with_password(new_password)?;
         let info = Pager::read_encryption_info_from_file(&self.db_path)?;
         if info.suite == EncryptionSuite::Aes256GcmSiv {
@@ -954,7 +1019,13 @@ impl Database {
 
     /// Flush all data to disk.
     pub fn flush(&mut self) -> Result<()> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         let catalog_root = self.session.catalog().root_page_id();
         let pager = self.session.pager_mut();
         pager.set_catalog_root(catalog_root);
@@ -968,7 +1039,13 @@ impl Database {
     /// database file. The backup file is a valid MuroDB database that can
     /// be opened directly with the same key/password.
     pub fn backup<P: AsRef<Path>>(&mut self, dest: P) -> Result<()> {
-        let _guard = self.lock_manager.write_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.write_lock()?
+        } else {
+            self.lock_manager
+                .write_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         // Checkpoint WAL so all committed data is in the data file.
         self.session.try_checkpoint_truncate_once()?;
         // Copy the data file bytes.
@@ -990,6 +1067,20 @@ impl DatabaseReader {
         self.session.cancel_handle()
     }
 
+    /// Configure lock wait timeout in milliseconds.
+    ///
+    /// `0` means wait indefinitely (default).
+    pub fn set_busy_timeout_ms(&mut self, timeout_ms: u64) {
+        self.busy_timeout_ms = timeout_ms;
+    }
+
+    /// Current lock wait timeout in milliseconds.
+    ///
+    /// `0` means wait indefinitely.
+    pub fn busy_timeout_ms(&self) -> u64 {
+        self.busy_timeout_ms
+    }
+
     /// Parse SQL into a reusable prepared statement template.
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         self.session.prepare(sql)
@@ -997,7 +1088,13 @@ impl DatabaseReader {
 
     /// Execute a read-only SQL query and return rows.
     pub fn query(&mut self, sql: &str) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.read_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.read_lock()?
+        } else {
+            self.lock_manager
+                .read_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session.execute_read_only_query(sql)
     }
 
@@ -1007,7 +1104,13 @@ impl DatabaseReader {
         prepared: &PreparedStatement,
         params: &[Value],
     ) -> Result<Vec<Row>> {
-        let _guard = self.lock_manager.read_lock()?;
+        let timeout_ms = self.busy_timeout_ms;
+        let _guard = if timeout_ms == 0 {
+            self.lock_manager.read_lock()?
+        } else {
+            self.lock_manager
+                .read_lock_with_timeout(Some(Duration::from_millis(timeout_ms)))?
+        };
         self.session
             .execute_read_only_prepared_query(prepared, params)
     }
@@ -1061,6 +1164,34 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(2))
             .expect("flush should complete after read lock is released");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn flush_respects_busy_timeout() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("flush_timeout.db");
+
+        let mut db1 = Database::create_plaintext(&db_path).unwrap();
+        db1.execute("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        db1.execute("INSERT INTO t VALUES (1)").unwrap();
+        db1.set_busy_timeout_ms(20);
+
+        let db2 = Database::open_plaintext(&db_path).unwrap();
+        let read_guard = db2.lock_manager.read_lock().unwrap();
+
+        let err = db1
+            .flush()
+            .expect_err("flush should time out while read lock is held");
+        assert!(matches!(
+            err,
+            crate::MuroError::LockTimeout {
+                mode: "exclusive",
+                ..
+            }
+        ));
+
+        drop(read_guard);
     }
 
     #[test]

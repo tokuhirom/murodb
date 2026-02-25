@@ -5,6 +5,7 @@
 /// Process-level: fs4 file lock
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use parking_lot::RwLock;
@@ -39,11 +40,54 @@ impl LockManager {
 
     /// Acquire a shared (read) lock.
     pub fn read_lock(&self) -> Result<ReadGuard<'_>> {
-        let thread_guard = self.rw_lock.read();
+        self.read_lock_with_timeout(None)
+    }
 
-        self.lock_file
-            .lock_shared()
-            .map_err(|e| MuroError::Lock(format!("Failed to acquire shared file lock: {}", e)))?;
+    /// Acquire a shared (read) lock with timeout.
+    ///
+    /// If `timeout` is `None`, this blocks until acquired.
+    pub fn read_lock_with_timeout(&self, timeout: Option<Duration>) -> Result<ReadGuard<'_>> {
+        let timeout_ms = timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+        let thread_guard = if let Some(timeout) = timeout {
+            self.rw_lock
+                .try_read_for(timeout)
+                .ok_or(MuroError::LockTimeout {
+                    mode: "shared",
+                    timeout_ms,
+                })?
+        } else {
+            self.rw_lock.read()
+        };
+
+        if let Some(timeout) = timeout {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match self.lock_file.try_lock_shared() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(MuroError::LockTimeout {
+                                mode: "shared",
+                                timeout_ms,
+                            });
+                        }
+                        let remaining = deadline.saturating_duration_since(now);
+                        std::thread::sleep(std::cmp::min(Duration::from_millis(1), remaining));
+                    }
+                    Err(std::fs::TryLockError::Error(e)) => {
+                        return Err(MuroError::Lock(format!(
+                            "Failed to acquire shared file lock: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+        } else {
+            self.lock_file.lock_shared().map_err(|e| {
+                MuroError::Lock(format!("Failed to acquire shared file lock: {}", e))
+            })?;
+        }
 
         Ok(ReadGuard {
             _thread_guard: thread_guard,
@@ -53,11 +97,54 @@ impl LockManager {
 
     /// Acquire an exclusive (write) lock.
     pub fn write_lock(&self) -> Result<WriteGuard<'_>> {
-        let thread_guard = self.rw_lock.write();
+        self.write_lock_with_timeout(None)
+    }
 
-        self.lock_file.lock_exclusive().map_err(|e| {
-            MuroError::Lock(format!("Failed to acquire exclusive file lock: {}", e))
-        })?;
+    /// Acquire an exclusive (write) lock with timeout.
+    ///
+    /// If `timeout` is `None`, this blocks until acquired.
+    pub fn write_lock_with_timeout(&self, timeout: Option<Duration>) -> Result<WriteGuard<'_>> {
+        let timeout_ms = timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+        let thread_guard = if let Some(timeout) = timeout {
+            self.rw_lock
+                .try_write_for(timeout)
+                .ok_or(MuroError::LockTimeout {
+                    mode: "exclusive",
+                    timeout_ms,
+                })?
+        } else {
+            self.rw_lock.write()
+        };
+
+        if let Some(timeout) = timeout {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match self.lock_file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return Err(MuroError::LockTimeout {
+                                mode: "exclusive",
+                                timeout_ms,
+                            });
+                        }
+                        let remaining = deadline.saturating_duration_since(now);
+                        std::thread::sleep(std::cmp::min(Duration::from_millis(1), remaining));
+                    }
+                    Err(e) => {
+                        return Err(MuroError::Lock(format!(
+                            "Failed to acquire exclusive file lock: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+        } else {
+            self.lock_file.lock_exclusive().map_err(|e| {
+                MuroError::Lock(format!("Failed to acquire exclusive file lock: {}", e))
+            })?;
+        }
 
         Ok(WriteGuard {
             _thread_guard: thread_guard,
@@ -153,5 +240,22 @@ mod tests {
 
         writer.join().unwrap();
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn test_read_lock_timeout_when_writer_is_held() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        File::create(&db_path).unwrap();
+
+        let lock_mgr = LockManager::new(&db_path).unwrap();
+        let _writer_guard = lock_mgr.write_lock().unwrap();
+
+        let err = match lock_mgr.read_lock_with_timeout(Some(std::time::Duration::from_millis(20)))
+        {
+            Err(err) => err,
+            Ok(_) => panic!("read lock should time out while writer lock is held"),
+        };
+        assert!(matches!(err, MuroError::LockTimeout { mode: "shared", .. }));
     }
 }

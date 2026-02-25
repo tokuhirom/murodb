@@ -14,6 +14,9 @@ use crate::types::Value;
 use crate::wal::record::TxId;
 use crate::wal::writer::WalWriter;
 use checkpoint::CheckpointPolicy;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
 const DEFAULT_CHECKPOINT_TX_THRESHOLD: u64 = 1;
@@ -50,6 +53,51 @@ pub struct RuntimeConfig {
     pub checkpoint_interval_ms: u64,
 }
 
+#[derive(Debug, Default)]
+struct QueryCancelState {
+    in_flight: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+/// Handle for requesting cancellation of the currently running statement.
+#[derive(Debug, Clone)]
+pub struct QueryCancelHandle {
+    state: Arc<QueryCancelState>,
+}
+
+impl QueryCancelHandle {
+    /// Request cancellation of the in-flight statement.
+    ///
+    /// Returns `true` if a statement was running when the request was issued.
+    /// Returns `false` when no statement is currently executing.
+    pub fn cancel(&self) -> bool {
+        if self.state.in_flight.load(Ordering::SeqCst) {
+            self.state.cancelled.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct StatementExecutionGuard {
+    state: Arc<QueryCancelState>,
+}
+
+thread_local! {
+    static ACTIVE_CANCEL_STATE: RefCell<Option<Arc<QueryCancelState>>> = const { RefCell::new(None) };
+}
+
+impl Drop for StatementExecutionGuard {
+    fn drop(&mut self) {
+        ACTIVE_CANCEL_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        self.state.cancelled.store(false, Ordering::SeqCst);
+        self.state.in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
 /// A session that manages explicit transaction state.
 ///
 /// - `BEGIN` starts a transaction (dirty-page buffering).
@@ -71,6 +119,7 @@ pub struct Session {
     checkpoint_policy: CheckpointPolicy,
     pending_checkpoint_ops: u64,
     last_checkpoint_at: std::time::Instant,
+    cancel_state: Arc<QueryCancelState>,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
     #[cfg(test)]
@@ -117,10 +166,18 @@ impl Session {
             checkpoint_policy: CheckpointPolicy::from_env(),
             pending_checkpoint_ops: 0,
             last_checkpoint_at: std::time::Instant::now(),
+            cancel_state: Arc::new(QueryCancelState::default()),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
             #[cfg(test)]
             inject_wal_recreate_fail_once: false,
+        }
+    }
+
+    /// Get a handle that can request cancellation of in-flight statements.
+    pub fn cancel_handle(&self) -> QueryCancelHandle {
+        QueryCancelHandle {
+            state: Arc::clone(&self.cancel_state),
         }
     }
 
@@ -158,6 +215,9 @@ impl Session {
     }
 
     fn execute_statement_with_session(&mut self, stmt: &Statement) -> Result<ExecResult> {
+        let _statement_guard = self.enter_statement();
+        self.cancellation_point()?;
+
         // Stats queries are always allowed, even on poisoned sessions,
         // so operators can inspect counters after CommitInDoubt.
         match stmt {
@@ -212,6 +272,9 @@ impl Session {
     }
 
     fn execute_read_only_query_statement(&mut self, stmt: &Statement) -> Result<Vec<Row>> {
+        let _statement_guard = self.enter_statement();
+        self.cancellation_point()?;
+
         // Stats queries are always allowed, even on poisoned sessions.
         match stmt {
             Statement::ShowCheckpointStats => {
@@ -238,6 +301,24 @@ impl Session {
             // Read directly from pager/catalog without opening an implicit WAL transaction.
             Self::rows_from_exec_result(execute_statement(stmt, &mut self.pager, &mut self.catalog))
         }
+    }
+
+    fn enter_statement(&self) -> StatementExecutionGuard {
+        self.cancel_state.cancelled.store(false, Ordering::SeqCst);
+        self.cancel_state.in_flight.store(true, Ordering::SeqCst);
+        ACTIVE_CANCEL_STATE.with(|slot| {
+            *slot.borrow_mut() = Some(Arc::clone(&self.cancel_state));
+        });
+        StatementExecutionGuard {
+            state: Arc::clone(&self.cancel_state),
+        }
+    }
+
+    pub(crate) fn cancellation_point(&self) -> Result<()> {
+        if self.cancel_state.cancelled.load(Ordering::SeqCst) {
+            return Err(MuroError::Cancelled);
+        }
+        Ok(())
     }
 
     fn rows_from_exec_result(result: Result<ExecResult>) -> Result<Vec<Row>> {
@@ -544,6 +625,19 @@ impl Session {
     pub fn catalog(&self) -> &SystemCatalog {
         &self.catalog
     }
+}
+
+pub(crate) fn cancellation_point_current() -> Result<()> {
+    ACTIVE_CANCEL_STATE.with(|slot| {
+        if slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.cancelled.load(Ordering::SeqCst))
+        {
+            return Err(MuroError::Cancelled);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -69,7 +69,7 @@ pub use crate::error::{MuroError, Result};
 pub use crate::fts::snippet::fts_snippet;
 pub use crate::sql::executor::{ExecResult, Row};
 pub use crate::sql::prepared::PreparedStatement;
-pub use crate::sql::session::Session;
+pub use crate::sql::session::{QueryCancelHandle, Session};
 pub use crate::storage::pager::DbEncryptionInfo;
 pub use crate::types::{format_date, format_datetime, format_uuid, parse_uuid_string, Value};
 pub use crate::wal::recovery::{RecoveryMode, RecoveryResult, RecoverySkipCode, RecoverySkippedTx};
@@ -801,6 +801,11 @@ impl Database {
         self.session.execute(sql)
     }
 
+    /// Get a handle that can request cancellation of in-flight statements.
+    pub fn cancel_handle(&self) -> QueryCancelHandle {
+        self.session.cancel_handle()
+    }
+
     /// Get current session runtime configuration.
     pub fn runtime_config(&self) -> Result<RuntimeConfig> {
         let _guard = self.lock_manager.read_lock()?;
@@ -980,6 +985,11 @@ impl Database {
 }
 
 impl DatabaseReader {
+    /// Get a handle that can request cancellation of in-flight statements.
+    pub fn cancel_handle(&self) -> QueryCancelHandle {
+        self.session.cancel_handle()
+    }
+
     /// Parse SQL into a reusable prepared statement template.
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         self.session.prepare(sql)

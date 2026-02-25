@@ -411,9 +411,11 @@ pub(super) fn execute_aggregation(
     let mut group_index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
 
     for raw_row in &raw_rows {
+        cancellation_point()?;
         let group_key = if let Some(group_exprs) = &sel.group_by {
             let mut key = Vec::with_capacity(group_exprs.len());
             for gexpr in group_exprs {
+                cancellation_point()?;
                 let val = eval_expr(gexpr, &|name| {
                     table_def
                         .column_index(name)
@@ -444,6 +446,7 @@ pub(super) fn execute_aggregation(
     let mut result_rows = Vec::new();
 
     for (_group_key, group_rows) in &groups {
+        cancellation_point()?;
         // Create accumulators for each aggregate
         let mut accumulators: Vec<Accumulator> = aggs
             .iter()
@@ -452,6 +455,7 @@ pub(super) fn execute_aggregation(
 
         // Feed rows into accumulators
         for raw_row in group_rows {
+            cancellation_point()?;
             for (i, agg_info) in aggs.iter().enumerate() {
                 if let Some(arg_expr) = &agg_info.arg {
                     let val = eval_expr(arg_expr, &|name| {
@@ -494,6 +498,7 @@ pub(super) fn execute_aggregation(
         let mut row_values = Vec::new();
 
         for sel_col in &sel.columns {
+            cancellation_point()?;
             match sel_col {
                 SelectColumn::Star => {
                     if let Some(raw) = rep_row {
@@ -564,9 +569,11 @@ pub(super) fn execute_aggregation_join(
     let mut group_index: HashMap<Vec<ValueKey>, usize> = HashMap::new();
 
     for jrow in joined_rows {
+        cancellation_point()?;
         let group_key = if let Some(group_exprs) = &sel.group_by {
             let mut key = Vec::with_capacity(group_exprs.len());
             for gexpr in group_exprs {
+                cancellation_point()?;
                 let val = eval_join_expr(gexpr, jrow)?;
                 key.push(ValueKey(val));
             }
@@ -591,12 +598,14 @@ pub(super) fn execute_aggregation_join(
     let mut result_rows = Vec::new();
 
     for (_group_key, group_rows) in &groups {
+        cancellation_point()?;
         let mut accumulators: Vec<Accumulator> = aggs
             .iter()
             .map(|a| Accumulator::new(&a.name, a.distinct))
             .collect();
 
         for jrow in group_rows {
+            cancellation_point()?;
             for (i, agg_info) in aggs.iter().enumerate() {
                 if let Some(arg_expr) = &agg_info.arg {
                     let val = eval_join_expr(arg_expr, jrow)?;
@@ -622,6 +631,7 @@ pub(super) fn execute_aggregation_join(
         let mut row_values = Vec::new();
 
         for sel_col in &sel.columns {
+            cancellation_point()?;
             match sel_col {
                 SelectColumn::Star => {
                     for (qualified_name, val) in rep_row {

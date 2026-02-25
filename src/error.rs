@@ -35,6 +35,9 @@ pub enum MuroError {
     #[error("SQL execution error: {0}")]
     Execution(String),
 
+    #[error("Query cancelled")]
+    Cancelled,
+
     #[error("Unique constraint violation: {0}")]
     UniqueViolation(String),
 

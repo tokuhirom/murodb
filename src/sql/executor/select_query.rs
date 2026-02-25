@@ -254,6 +254,7 @@ pub(super) fn exec_select(
                 let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 for pk_key in &pk_keys {
+                    cancellation_point()?;
                     if let Some(data) = data_btree.search(pager, pk_key)? {
                         let values = deserialize_row_versioned(
                             &data,
@@ -317,6 +318,7 @@ pub(super) fn exec_select(
                 let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 for pk_key in &pk_keys {
+                    cancellation_point()?;
                     if let Some(data) = data_btree.search(pager, pk_key)? {
                         let values = deserialize_row_versioned(
                             &data,
@@ -348,6 +350,7 @@ pub(super) fn exec_select(
                 if needs_fts_doc_ids {
                     let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
                     data_btree.scan(pager, |pk_key, v| {
+                        cancellation_point()?;
                         let values = deserialize_row_versioned(
                             v,
                             &table_def.columns,
@@ -357,6 +360,7 @@ pub(super) fn exec_select(
                         Ok(true)
                     })?;
                     for (pk_key, values) in entries {
+                        cancellation_point()?;
                         populate_fts_row_doc_ids(
                             &mut fts_ctx,
                             &pk_key,
@@ -375,6 +379,7 @@ pub(super) fn exec_select(
                     }
                 } else {
                     data_btree.scan(pager, |_, v| {
+                        cancellation_point()?;
                         let values = deserialize_row_versioned(
                             v,
                             &table_def.columns,
@@ -401,6 +406,7 @@ pub(super) fn exec_select(
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
                 for (_doc_id, values) in fts_rows {
+                    cancellation_point()?;
                     if needs_fts_doc_ids {
                         let pk_key = encode_pk_key(&table_def, &values);
                         populate_fts_row_doc_ids(
@@ -506,6 +512,7 @@ pub(super) fn exec_select(
                 let pk_keys = index_seek_pk_keys(idx, &idx_key, pager)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 for pk_key in &pk_keys {
+                    cancellation_point()?;
                     if let Some(data) = data_btree.search(pager, pk_key)? {
                         let values = deserialize_row_versioned(
                             &data,
@@ -576,6 +583,7 @@ pub(super) fn exec_select(
                 let pk_keys = index_seek_pk_keys_range(idx, lower_key, upper_key, pager)?;
                 let data_btree = BTree::open(table_def.data_btree_root);
                 for pk_key in &pk_keys {
+                    cancellation_point()?;
                     if let Some(data) = data_btree.search(pager, pk_key)? {
                         let values = deserialize_row_versioned(
                             &data,
@@ -614,6 +622,7 @@ pub(super) fn exec_select(
                 if needs_fts_doc_ids {
                     let mut entries: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
                     data_btree.scan(pager, |pk_key, v| {
+                        cancellation_point()?;
                         let values = deserialize_row_versioned(
                             v,
                             &table_def.columns,
@@ -623,6 +632,7 @@ pub(super) fn exec_select(
                         Ok(true)
                     })?;
                     for (pk_key, values) in entries {
+                        cancellation_point()?;
                         populate_fts_row_doc_ids(
                             &mut fts_ctx,
                             &pk_key,
@@ -648,6 +658,7 @@ pub(super) fn exec_select(
                     }
                 } else {
                     data_btree.scan(pager, |_, v| {
+                        cancellation_point()?;
                         let values = deserialize_row_versioned(
                             v,
                             &table_def.columns,
@@ -681,6 +692,7 @@ pub(super) fn exec_select(
                 let fts_rows =
                     execute_fts_scan_rows(&table_def, &indexes, &column, &query, mode, pager)?;
                 for (_doc_id, values) in fts_rows {
+                    cancellation_point()?;
                     if needs_fts_doc_ids {
                         let pk_key = encode_pk_key(&table_def, &values);
                         populate_fts_row_doc_ids(
@@ -731,6 +743,7 @@ pub(super) fn exec_select(
         // Strip extra ORDER BY columns that were injected for sorting
         if !extra_order_cols.is_empty() {
             for row in &mut rows {
+                cancellation_point()?;
                 row.values
                     .retain(|(name, _)| !extra_order_cols.contains(name));
             }

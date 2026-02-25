@@ -819,6 +819,20 @@ impl Database {
         self.session.cancel_handle()
     }
 
+    /// Configure per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn set_statement_timeout_ms(&mut self, timeout_ms: u64) {
+        self.session.set_statement_timeout_ms(timeout_ms);
+    }
+
+    /// Current per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn statement_timeout_ms(&self) -> u64 {
+        self.session.statement_timeout_ms()
+    }
+
     /// Get current session runtime configuration.
     pub fn runtime_config(&self) -> Result<RuntimeConfig> {
         let timeout_ms = self.busy_timeout_ms;
@@ -953,7 +967,8 @@ impl Database {
                 // Reader handles never write WAL; fixed LSN is acceptable.
                 let wal = WalWriter::open_plaintext(&wp, 0)?;
                 let lock_manager = LockManager::new(path)?;
-                let session = Session::new(pager, catalog, wal);
+                let mut session = Session::new(pager, catalog, wal);
+                session.set_statement_timeout_ms(self.session.statement_timeout_ms());
                 Ok(DatabaseReader {
                     session,
                     lock_manager,
@@ -981,7 +996,8 @@ impl Database {
                 // Reader handles never write WAL; fixed LSN is acceptable.
                 let wal = WalWriter::open(&wp, master_key, 0)?;
                 let lock_manager = LockManager::new(path)?;
-                let session = Session::new(pager, catalog, wal);
+                let mut session = Session::new(pager, catalog, wal);
+                session.set_statement_timeout_ms(self.session.statement_timeout_ms());
                 Ok(DatabaseReader {
                     session,
                     lock_manager,
@@ -1079,6 +1095,20 @@ impl DatabaseReader {
     /// `0` means wait indefinitely.
     pub fn busy_timeout_ms(&self) -> u64 {
         self.busy_timeout_ms
+    }
+
+    /// Configure per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn set_statement_timeout_ms(&mut self, timeout_ms: u64) {
+        self.session.set_statement_timeout_ms(timeout_ms);
+    }
+
+    /// Current per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn statement_timeout_ms(&self) -> u64 {
+        self.session.statement_timeout_ms()
     }
 
     /// Parse SQL into a reusable prepared statement template.
@@ -1276,5 +1306,28 @@ mod tests {
         assert_eq!(cfg.checkpoint_tx_threshold, 7);
         assert_eq!(cfg.checkpoint_wal_bytes_threshold, 4096);
         assert_eq!(cfg.checkpoint_interval_ms, 500);
+    }
+
+    #[test]
+    fn statement_timeout_api_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("statement_timeout_api.db");
+
+        let mut db = Database::create_plaintext(&db_path).unwrap();
+        assert_eq!(db.statement_timeout_ms(), 0);
+        db.set_statement_timeout_ms(123);
+        assert_eq!(db.statement_timeout_ms(), 123);
+    }
+
+    #[test]
+    fn open_reader_inherits_statement_timeout() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("reader_statement_timeout.db");
+
+        let mut db = Database::create_plaintext(&db_path).unwrap();
+        db.set_statement_timeout_ms(77);
+
+        let reader = db.open_reader().unwrap();
+        assert_eq!(reader.statement_timeout_ms(), 77);
     }
 }

@@ -17,6 +17,7 @@ murodb <database-file> [options]
 | `--recovery-mode <strict\|permissive>` | WAL recovery policy for open |
 | `--format <text\|json>` | Output format for query results |
 | `--busy-timeout-ms <N>` | Lock wait timeout in milliseconds (`0` = wait indefinitely) |
+| `--statement-timeout-ms <N>` | Per-statement execution timeout in milliseconds (`0` = no timeout) |
 
 ## Examples
 

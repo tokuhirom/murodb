@@ -1032,6 +1032,8 @@ Rust API note:
 - `Database::cancel_handle()` / `DatabaseReader::cancel_handle()` returns a `QueryCancelHandle`.
 - `QueryCancelHandle::cancel()` returns `true` when a statement is currently in flight, otherwise `false`.
 - Cancellation errors are reported as `MuroError::Cancelled`.
+- `Database::set_statement_timeout_ms(ms)` and `DatabaseReader::set_statement_timeout_ms(ms)` set per-statement execution timeout (`0` = no timeout).
+- Timeout errors are reported as `MuroError::StatementTimeout { timeout_ms }`.
 - Cancellation safety for explicit transactions: cancellation checks in write paths are performed before row-application phases, so a cancelled statement does not commit partial row changes.
 
 ## Hidden _rowid

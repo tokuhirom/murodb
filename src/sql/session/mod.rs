@@ -17,6 +17,7 @@ use checkpoint::CheckpointPolicy;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 const CHECKPOINT_MAX_ATTEMPTS: usize = 2;
 const DEFAULT_CHECKPOINT_TX_THRESHOLD: u64 = 1;
@@ -88,13 +89,23 @@ struct StatementExecutionGuard {
     statement_id: u64,
 }
 
+#[derive(Clone, Copy)]
+struct StatementTimeoutContext {
+    deadline: Instant,
+    timeout_ms: u64,
+}
+
 thread_local! {
     static ACTIVE_CANCEL_STATE: RefCell<Option<Arc<QueryCancelState>>> = const { RefCell::new(None) };
+    static ACTIVE_STATEMENT_TIMEOUT: RefCell<Option<StatementTimeoutContext>> = const { RefCell::new(None) };
 }
 
 impl Drop for StatementExecutionGuard {
     fn drop(&mut self) {
         ACTIVE_CANCEL_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        ACTIVE_STATEMENT_TIMEOUT.with(|slot| {
             *slot.borrow_mut() = None;
         });
         let _ = self.state.active_statement_id.compare_exchange(
@@ -127,6 +138,7 @@ pub struct Session {
     checkpoint_policy: CheckpointPolicy,
     pending_checkpoint_ops: u64,
     last_checkpoint_at: std::time::Instant,
+    statement_timeout_ms: u64,
     cancel_state: Arc<QueryCancelState>,
     #[cfg(test)]
     inject_checkpoint_failures_remaining: usize,
@@ -174,6 +186,7 @@ impl Session {
             checkpoint_policy: CheckpointPolicy::from_env(),
             pending_checkpoint_ops: 0,
             last_checkpoint_at: std::time::Instant::now(),
+            statement_timeout_ms: 0,
             cancel_state: Arc::new(QueryCancelState::default()),
             #[cfg(test)]
             inject_checkpoint_failures_remaining: 0,
@@ -187,6 +200,20 @@ impl Session {
         QueryCancelHandle {
             state: Arc::clone(&self.cancel_state),
         }
+    }
+
+    /// Configure per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn set_statement_timeout_ms(&mut self, timeout_ms: u64) {
+        self.statement_timeout_ms = timeout_ms;
+    }
+
+    /// Current per-statement execution timeout in milliseconds.
+    ///
+    /// `0` means no timeout.
+    pub fn statement_timeout_ms(&self) -> u64 {
+        self.statement_timeout_ms
     }
 
     fn check_poisoned(&self) -> Result<()> {
@@ -323,6 +350,17 @@ impl Session {
         ACTIVE_CANCEL_STATE.with(|slot| {
             *slot.borrow_mut() = Some(Arc::clone(&self.cancel_state));
         });
+        ACTIVE_STATEMENT_TIMEOUT.with(|slot| {
+            *slot.borrow_mut() = if self.statement_timeout_ms == 0 {
+                None
+            } else {
+                Some(StatementTimeoutContext {
+                    deadline: Instant::now()
+                        + std::time::Duration::from_millis(self.statement_timeout_ms),
+                    timeout_ms: self.statement_timeout_ms,
+                })
+            };
+        });
         StatementExecutionGuard {
             state: Arc::clone(&self.cancel_state),
             statement_id,
@@ -330,6 +368,9 @@ impl Session {
     }
 
     pub(crate) fn cancellation_point(&self) -> Result<()> {
+        if let Some(err) = statement_timeout_error_current() {
+            return Err(err);
+        }
         let active_id = self.cancel_state.active_statement_id.load(Ordering::SeqCst);
         if active_id != 0
             && self
@@ -650,6 +691,9 @@ impl Session {
 }
 
 pub(crate) fn cancellation_point_current() -> Result<()> {
+    if let Some(err) = statement_timeout_error_current() {
+        return Err(err);
+    }
     ACTIVE_CANCEL_STATE.with(|slot| {
         let borrowed = slot.borrow();
         let Some(state) = borrowed.as_ref() else {
@@ -666,6 +710,21 @@ pub(crate) fn cancellation_point_current() -> Result<()> {
             return Err(MuroError::Cancelled);
         }
         Ok(())
+    })
+}
+
+fn statement_timeout_error_current() -> Option<MuroError> {
+    ACTIVE_STATEMENT_TIMEOUT.with(|slot| {
+        let timeout = *slot.borrow();
+        timeout.and_then(|ctx| {
+            if Instant::now() >= ctx.deadline {
+                Some(MuroError::StatementTimeout {
+                    timeout_ms: ctx.timeout_ms,
+                })
+            } else {
+                None
+            }
+        })
     })
 }
 

@@ -297,6 +297,24 @@ fn test_statement_timeout_interrupts_long_running_query() {
 }
 
 #[test]
+fn test_statement_timeout_max_value_does_not_panic() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+    let wal_path = dir.path().join("test.wal");
+
+    let mut pager = Pager::create(&db_path, &test_key()).unwrap();
+    let catalog = SystemCatalog::create(&mut pager).unwrap();
+    pager.set_catalog_root(catalog.root_page_id());
+    pager.flush_meta().unwrap();
+    let wal = WalWriter::create(&wal_path, &test_key()).unwrap();
+    let mut session = Session::new(pager, catalog, wal);
+    session.set_statement_timeout_ms(u64::MAX);
+
+    let result = session.execute("SELECT 1");
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_read_only_query_select_does_not_create_wal_records() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");

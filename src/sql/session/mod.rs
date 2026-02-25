@@ -354,11 +354,12 @@ impl Session {
             *slot.borrow_mut() = if self.statement_timeout_ms == 0 {
                 None
             } else {
-                Some(StatementTimeoutContext {
-                    deadline: Instant::now()
-                        + std::time::Duration::from_millis(self.statement_timeout_ms),
-                    timeout_ms: self.statement_timeout_ms,
-                })
+                Instant::now()
+                    .checked_add(std::time::Duration::from_millis(self.statement_timeout_ms))
+                    .map(|deadline| StatementTimeoutContext {
+                        deadline,
+                        timeout_ms: self.statement_timeout_ms,
+                    })
             };
         });
         StatementExecutionGuard {

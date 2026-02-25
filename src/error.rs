@@ -47,6 +47,9 @@ pub enum MuroError {
     #[error("Lock error: {0}")]
     Lock(String),
 
+    #[error("Lock timeout after {timeout_ms}ms while acquiring {mode} lock")]
+    LockTimeout { mode: &'static str, timeout_ms: u64 },
+
     #[error("FTS error: {0}")]
     Fts(String),
 

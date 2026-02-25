@@ -1027,6 +1027,8 @@ Rust API note:
 - `Database::query()` takes `&mut self` because read execution may refresh pager/catalog state from disk before running.
 - For concurrent reads in one process, use multiple read-only handles (for example `Database::open_reader()`).
 - Inside an explicit transaction (`BEGIN` ... `COMMIT`/`ROLLBACK`), run statements through `Database::execute()`, including `SELECT`.
+- `Database::set_busy_timeout_ms(ms)` sets lock wait timeout (`0` = wait indefinitely).
+- `DatabaseReader::set_busy_timeout_ms(ms)` does the same for read-only handles.
 - `Database::cancel_handle()` / `DatabaseReader::cancel_handle()` returns a `QueryCancelHandle`.
 - `QueryCancelHandle::cancel()` returns `true` when a statement is currently in flight, otherwise `false`.
 - Cancellation errors are reported as `MuroError::Cancelled`.

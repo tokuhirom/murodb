@@ -24,7 +24,7 @@ unicode-normalization = "0.1"
 fs4 = "0.12"
 lru = "0.16"
 parking_lot = "0.12"
-rand = "0.8"
+rand = "0.9"
 uuid = { version = "1", features = ["v4", "v7"] }
 regex = "1"
 rust_decimal = "1"

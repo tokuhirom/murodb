@@ -34,7 +34,7 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
-rpassword = "5"
+rpassword = "7"
 rustyline = "15"
 ctrlc = "3"
 
